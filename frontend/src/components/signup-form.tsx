@@ -26,16 +26,19 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useSignup } from '@/features/auth/hooks/useSignup'
+import { useSignupCaptcha } from '@/features/auth/hooks/useSignupCaptcha'
 import {
   COUNTRIES,
   getCitiesForCountry,
 } from '@/features/auth/utils/locationData'
+import { SignupCaptcha } from '@/components/signup-captcha'
 
 export function SignupForm({
   className,
   ...props
 }: React.ComponentProps<'div'>) {
-  const { isSubmitting, submitSignup } = useSignup()
+  const captcha = useSignupCaptcha()
+  const { isSubmitting, submitSignup } = useSignup(captcha)
   const [showPassword, setShowPassword] = useState(false)
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
@@ -109,7 +112,10 @@ export function SignupForm({
                 <FieldLabel htmlFor="age">Age</FieldLabel>
                 <Input
                   id="age"
-                  type="text"
+                  type="number"
+                  min={1}
+                  step={1}
+                  inputMode="numeric"
                   placeholder="25"
                   required
                   disabled={isSubmitting}
@@ -214,8 +220,13 @@ export function SignupForm({
                   Must be at least 8 characters long.
                 </FieldDescription>
               </Field>
+              <SignupCaptcha disabled={isSubmitting} captcha={captcha} />
               <Field>
-                <Button type="submit" className="w-full" disabled={isSubmitting}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={isSubmitting || !captcha.hasCaptchaToken}
+                >
                   {isSubmitting ? (
                     <>
                       <Loader2 className="animate-spin" />
