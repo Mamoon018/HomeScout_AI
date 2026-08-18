@@ -1,0 +1,56 @@
+/**
+ * Linear Design System — Atomic Tokens (@theme)
+ *
+ * Tailwind v4 emits --color-*, --spacing-*, etc. from @theme so var() references
+ * in tailwind.config.ts component classes resolve at runtime. Values mirror
+ * theme.extend in tailwind.config.ts exactly.
+ */
+
+@theme {
+  /* ── 1. Tokens — Colors (Neutrals & Core) ─────────────────────────────── */
+  --color-Neutral-000: #000000;
+  --color-Neutral-900: #08090A;
+  --color-Neutral-800: #121314;
+  --color-Neutral-700: #1B1C1D;
+  --color-Neutral-100: #F7F8F8;
+  --color-Neutral-400: #8A8F98;
+  --color-Brand-500: #5E6AD2;
+
+  /* ── 1. Tokens — Spacing (4px grid) ───────────────────────────────────── */
+  --spacing-Space-1: 4px;
+  --spacing-Space-2: 8px;
+  --spacing-Space-4: 16px;
+  --spacing-Space-6: 24px;
+  --spacing-Space-12: 48px;
+
+  /* ── 1. Tokens — Typography ───────────────────────────────────────────── */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif;
+  --font-mono: SF Mono, Roboto Mono, monospace;
+  --text-Size-XS: 12px;
+  --text-Size-SM: 14px;
+  --text-Size-MD: 16px;
+  --text-Size-LG: 20px;
+  --text-Size-XL: 32px;
+  --font-weight-Weight-Regular: 400;
+  --font-weight-Weight-Medium: 500;
+  --font-weight-Weight-Bold: 600;
+
+  /* ── 1. Tokens — Radius & Shadows ─────────────────────────────────────── */
+  --radius-Radius-SM: 4px;
+  --radius-Radius-MD: 8px;
+  --shadow-Shadow-Subtle: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-Shadow-Elevated: 0 8px 16px rgba(0, 0, 0, 0.6);
+
+  /* ── 1. Tokens — Motion ───────────────────────────────────────────────── */
+  --duration-Duration-Fast: 150ms;
+  --duration-Duration-Standard: 250ms;
+  --ease-Easing-Out: cubic-bezier(0, 0, 0.2, 1);
+
+  /* ── 2. Foundational — Layout ─────────────────────────────────────────── */
+  --tracking-Text-Heading: -0.02em;
+  --height-Interactive-Height: 32px;
+  --height-List-Row: 40px;
+  --width-Global-Sidebar: 240px;
+  --spacing-Section-Gap: var(--spacing-Space-12);
+  --spacing-Content-Gutter: var(--spacing-Space-6);
+}

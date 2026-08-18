@@ -1,0 +1,28 @@
+/**
+ * Linear Design System — Foundational / Semantic Layer
+ *
+ * Maps design-system intent tokens to atomic token CSS variables defined in
+ * tailwind.config.ts (e.g. App-Background → Neutral-900).
+ *
+ * Why a separate file: semantic aliases reference atomic tokens via var() rather
+ * than duplicating resolved hex/rgba values. Tailwind @theme is the bridge that
+ * exposes these as utilities (bg-App-Background, text-Text-Heading, etc.).
+ */
+
+@theme inline {
+  /* ── 2. Foundational — Color Meaning ──────────────────────────────────── */
+  --color-App-Background: var(--color-Neutral-900);
+  --color-Surface-Primary: var(--color-Neutral-800);
+  --color-Surface-Secondary: var(--color-Neutral-700);
+  --color-Surface-Elevate: var(--color-Neutral-700);
+  --color-Text-Heading: var(--color-Neutral-100);
+  --color-Text-Body: var(--color-Neutral-400);
+  --color-Action-Primary: var(--color-Brand-500);
+  --color-Border-Subtle: rgba(255, 255, 255, 0.08);
+}
+
+/* Noise texture tokens — asset placeholder until IMAGE_2 is added to the repo */
+:root {
+  --texture-noise-image: none;
+  --texture-noise-opacity: 0.04;
+}

@@ -1,5 +1,9 @@
 @import "tailwindcss";
+@config "../tailwind.config.ts";
 @import "tw-animate-css";
+@import "./assets/design/linear-tokens.css";
+@import "./assets/design/linear-semantics.css";
+@import "./assets/design/linear-components.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -29,25 +33,26 @@
 }
 
 :root {
-  --radius: 0.5rem;
-  --background: #08090a;
-  --foreground: #f3f4f6;
-  --card: #16171d;
-  --card-foreground: #f3f4f6;
-  --popover: #16171d;
-  --popover-foreground: #f3f4f6;
-  --primary: #5e6ad2;
-  --primary-foreground: #f3f4f6;
-  --secondary: #1f2028;
-  --secondary-foreground: #f3f4f6;
-  --muted: #1f2028;
-  --muted-foreground: #9ca3af;
-  --accent: #2e303a;
-  --accent-foreground: #f3f4f6;
+  /* Shadcn bridge → Linear semantic tokens (see linear-semantics.css) */
+  --radius: var(--radius-Radius-MD);
+  --background: var(--color-App-Background);
+  --foreground: var(--color-Text-Heading);
+  --card: var(--color-Surface-Primary);
+  --card-foreground: var(--color-Text-Heading);
+  --popover: var(--color-Surface-Primary);
+  --popover-foreground: var(--color-Text-Heading);
+  --primary: var(--color-Action-Primary);
+  --primary-foreground: var(--color-Text-Heading);
+  --secondary: var(--color-Surface-Secondary);
+  --secondary-foreground: var(--color-Text-Heading);
+  --muted: var(--color-Surface-Secondary);
+  --muted-foreground: var(--color-Text-Body);
+  --accent: var(--color-Surface-Secondary);
+  --accent-foreground: var(--color-Text-Heading);
   --destructive: #ef4444;
-  --border: #2e303a;
-  --input: #2e303a;
-  --ring: #5e6ad2;
+  --border: var(--color-Border-Subtle);
+  --input: var(--color-Border-Subtle);
+  --ring: var(--color-Action-Primary);
 }
 
 @layer base {
@@ -56,7 +61,7 @@
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-background font-sans text-foreground antialiased;
     margin: 0;
     min-height: 100svh;
   }

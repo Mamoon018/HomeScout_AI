@@ -1,0 +1,34 @@
+/**
+ * Linear Design System — Component & composition @utility classes
+ *
+ * Supplements tailwind.config.ts plugin components with utilities that need
+ * pseudo-elements or layered backgrounds (noise texture on large surfaces).
+ */
+
+@utility texture-noise {
+  position: relative;
+  isolation: isolate;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    opacity: var(--texture-noise-opacity);
+    background-image: var(--texture-noise-image);
+    background-repeat: repeat;
+    background-size: 128px 128px;
+    z-index: 0;
+  }
+
+  & > * {
+    position: relative;
+    z-index: 1;
+  }
+}
+
+@utility touch-target {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
