@@ -16,7 +16,9 @@ function redactSetCookieHeader(value: string | string[] | undefined): string[] {
   }
   const values = Array.isArray(value) ? value : [value]
   return values.map((cookie) =>
-    cookie.replace(/^(access_token=)[^;]*/i, '$1<redacted>'),
+    cookie
+      .replace(/^(access_token=)[^;]*/i, '$1<redacted>')
+      .replace(/^(refresh_token=)[^;]*/i, '$1<redacted>'),
   )
 }
 
@@ -75,11 +77,13 @@ export default defineConfig({
       : undefined,
     proxy: {
       '/api': authApiProxy,
+      '/auth/refresh': authApiProxy,
     },
   },
   preview: {
     proxy: {
       '/api': authApiProxy,
+      '/auth/refresh': authApiProxy,
     },
   },
   test: {

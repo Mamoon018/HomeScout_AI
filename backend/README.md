@@ -16,11 +16,11 @@ cp .env.example .env
 
 | Variable | Purpose |
 |----------|---------|
-| `DUMMY_EMAIL` | Demo login email (server-side only) |
-| `DUMMY_PASSWORD` | Demo login password (server-side only) |
-| `ACCESS_TOKEN` | Token set in HttpOnly cookie on success |
+| `SUPABASE_URL` | Supabase project URL (server-side only) |
+| `SUPABASE_PUBLISHABLE_KEY` | Publishable API key for the Supabase SDK client |
+| `SUPABASE_JWT_AUDIENCE` | Optional. JWT `aud` claim expected during local verification (default `authenticated`) |
 
-`.env` is gitignored. Do **not** use `VITE_` prefixes — those would be exposed to the frontend bundle.
+`.env` is gitignored. Do **not** use `VITE_` prefixes — those would be exposed to the frontend bundle. Do not put the service-role / secret key in this app or in the frontend.
 
 ## Local HTTPS setup (mkcert)
 
@@ -55,13 +55,14 @@ point the browser at `https://localhost:8000` for login.
 
 A successful JSON body does not prove the session cookie landed. Check all three:
 
-1. **Backend send logs** — after login you should see `access_token cookie sent` with `http_only=True secure=True same_site=strict`.
-2. **Vite proxy logs** — `[auth-proxy] response` should include a redacted `Set-Cookie` (`access_token=<redacted>; HttpOnly; Secure; SameSite=strict`).
-3. **Backend receive probe** — `GET /api/auth/session` (same origin, through the proxy) returns `{ "present": true, "matches_expected": true, "name": "access_token" }`. The callback and home pages show this in the UI. In DevTools, the cookie is under Application → Cookies → `https://localhost:5173`. HttpOnly cookies never appear in `document.cookie`.
+1. **Backend send logs** — after login you should see `session cookies sent` with `http_only=True secure=True same_site=strict`.
+2. **Vite proxy logs** — `[auth-proxy] response` should include redacted `Set-Cookie` headers (`access_token=<redacted>`; `refresh_token=<redacted>`).
+3. **Backend receive probe** — `GET /api/auth/session` (same origin, through the proxy) returns `{ "present": true, "matches_expected": true, "name": "access_token" }` when the access cookie is present and locally verifiable. The callback and home pages show this in the UI. In DevTools, the cookie is under Application → Cookies → `https://localhost:5173`. HttpOnly cookies never appear in `document.cookie`.
 
 Endpoints:
 
-- `POST /api/auth/login` — dummy credential check; sets the cookie on success
-- `GET /api/auth/session` — reports whether the cookie was sent back (never returns the token)
+- `POST /api/auth/login` — Supabase `sign_in_with_password`; sets `access_token` (`Path=/`) and `refresh_token` (`Path=/auth/refresh`) cookies on success
+- `GET /api/auth/session` — reports whether the access cookie was sent back and verifies locally (never returns the token)
+- `GET /api/auth/token-check` — diagnostic: locally verifies the access JWT (algorithm + `aud`). Not a production auth guard.
 
-Use the email and password from your local `backend/.env` when testing login.
+Use a real registered Supabase user when testing login.
