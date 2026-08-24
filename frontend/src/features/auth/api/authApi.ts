@@ -11,6 +11,99 @@ export type SignUpParams = {
   captchaToken: string
 }
 
+export type LoginParams = {
+  email: string
+  password: string
+}
+
+export type CookieSendStatus = {
+  sent: boolean
+  name: string
+  http_only: boolean
+  secure: boolean
+  same_site: string
+  path: string
+}
+
+export type CookieReceiveStatus = {
+  present: boolean
+  matches_expected: boolean
+  name: string
+}
+
+export type LoginApiData = {
+  message?: string
+  error?: string
+  cookie?: CookieSendStatus
+}
+
+export type AuthApiResponse<T> = {
+  ok: boolean
+  status: number
+  data: T | null
+  aborted?: boolean
+  networkError?: boolean
+}
+
+export type LoginApiResponse = AuthApiResponse<LoginApiData>
+
+const AUTH_API_TIMEOUT_MS = 15000
+const LOGIN_PATH = '/api/auth/login'
+const SESSION_PATH = '/api/auth/session'
+
+type SameOriginFetchResult<T> = AuthApiResponse<T>
+
+async function fetchSameOriginJson<T>(
+  path: string,
+  init: RequestInit,
+): Promise<SameOriginFetchResult<T>> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), AUTH_API_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(path, {
+      ...init,
+      credentials: 'include',
+      signal: controller.signal,
+    })
+
+    let data: T | null = null
+    try {
+      data = (await response.json()) as T
+    } catch {
+      data = null
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return {
+        ok: false,
+        status: 0,
+        data: null,
+        aborted: true,
+      }
+    }
+
+    if (error instanceof TypeError) {
+      return {
+        ok: false,
+        status: 0,
+        data: null,
+        networkError: true,
+      }
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 /** Registers a new user via Supabase Auth browser client. */
 export async function signUp(params: SignUpParams) {
   // age must be a JSON number (not string) so auth metadata stores a numeric value.
@@ -29,5 +122,23 @@ export async function signUp(params: SignUpParams) {
         zip_code: params.zipCode,
       },
     },
+  })
+}
+
+/** Authenticates via a same-origin relative path so Vite can proxy the cookie. */
+export async function login(params: LoginParams): Promise<LoginApiResponse> {
+  return fetchSameOriginJson<LoginApiData>(LOGIN_PATH, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+}
+
+/** Asks the backend whether the HttpOnly cookie was stored and sent back. */
+export async function getAccessTokenSession(): Promise<
+  AuthApiResponse<CookieReceiveStatus>
+> {
+  return fetchSameOriginJson<CookieReceiveStatus>(SESSION_PATH, {
+    method: 'GET',
   })
 }

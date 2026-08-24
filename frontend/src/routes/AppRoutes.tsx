@@ -1,4 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { AuthCallbackPage } from '@/pages/AuthCallbackPage'
+import { HomePage } from '@/pages/HomePage'
+import { LoginPage } from '@/pages/LoginPage'
 import { SignupPage } from '@/pages/SignupPage'
 
 /** Application route definitions. */
@@ -6,8 +9,12 @@ export function AppRoutes() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/signup" element={<SignupPage />} />
-        <Route path="/" element={<Navigate to="/signup" replace />} />
+        <Route path="/auth/login" element={<LoginPage />} />
+        <Route path="/auth/signup" element={<SignupPage />} />
+        <Route path="/signup" element={<Navigate to="/auth/signup" replace />} />
+        <Route path="/auth/callback" element={<AuthCallbackPage />} />
+        <Route path="/home" element={<HomePage />} />
+        <Route path="/" element={<Navigate to="/auth/login" replace />} />
       </Routes>
     </BrowserRouter>
   )

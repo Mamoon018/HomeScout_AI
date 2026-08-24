@@ -1,15 +1,15 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { UserEvent } from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { SignupForm } from '@/components/signup-form'
 import { Toaster } from '@/components/ui/sonner'
 
 export function renderSignupForm() {
   return render(
-    <>
+    <MemoryRouter>
       <SignupForm />
       <Toaster />
-    </>,
+    </MemoryRouter>,
   )
 }
 

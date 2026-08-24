@@ -32,3 +32,223 @@
   min-height: 2.75rem;
   min-width: 2.75rem;
 }
+
+/* Secondary feature card scroll areas — black track for dark UI consistency */
+@utility secondary-card-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #525252 #000000;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: #000000;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #525252;
+    border-radius: 9999px;
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: #737373;
+  }
+}
+
+/* Secondary card neon border — slow flowing electric current per feature color */
+@property --neon-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes secondary-neon-flow {
+  to {
+    --neon-angle: 360deg;
+  }
+}
+
+@keyframes secondary-neon-ambient {
+  0%,
+  100% {
+    opacity: 0.22;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.secondary-neon-border {
+  --neon-speed: 9s;
+  position: absolute;
+  isolation: isolate;
+}
+
+.secondary-neon-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--neon-angle),
+    transparent 0%,
+    color-mix(in srgb, var(--neon-color) 12%, transparent) 5%,
+    color-mix(in srgb, var(--neon-color) 50%, transparent) 9%,
+    rgba(255, 255, 255, 0.48) 11%,
+    color-mix(in srgb, var(--neon-color) 50%, transparent) 13%,
+    color-mix(in srgb, var(--neon-color) 28%, transparent) 17%,
+    transparent 26%,
+    transparent 40%,
+    color-mix(in srgb, var(--neon-color) 15%, transparent) 44%,
+    color-mix(in srgb, var(--neon-color) 50%, transparent) 48%,
+    rgba(255, 255, 255, 0.42) 49.5%,
+    color-mix(in srgb, var(--neon-color) 50%, transparent) 51%,
+    color-mix(in srgb, var(--neon-color) 22%, transparent) 55%,
+    transparent 64%,
+    transparent 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: secondary-neon-flow var(--neon-speed) linear infinite;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.55;
+  filter: blur(0.75px);
+}
+
+.secondary-neon-border::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+  box-shadow:
+    0 0 8px color-mix(in srgb, var(--neon-color) 22%, transparent),
+    0 0 16px color-mix(in srgb, var(--neon-color) 14%, transparent),
+    0 0 28px color-mix(in srgb, var(--neon-color) 7%, transparent);
+  animation: secondary-neon-ambient var(--neon-speed) ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.secondary-neon-amber {
+  --neon-color: #fbbf24;
+}
+
+.secondary-neon-sky {
+  --neon-color: #38bdf8;
+}
+
+.secondary-neon-emerald {
+  --neon-color: #34d399;
+}
+
+.secondary-neon-violet {
+  --neon-color: #a78bfa;
+}
+
+.secondary-neon-orange {
+  --neon-color: #fb923c;
+}
+
+.secondary-neon-fuchsia {
+  --neon-color: #e879f9;
+}
+
+/* Hero heading entrance: rise, fade, settle, blur → sharp (motion tokens) */
+@keyframes hero-heading-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(1.5rem);
+    filter: blur(10px);
+  }
+  35% {
+    opacity: 0.45;
+    transform: translateY(0.75rem);
+    filter: blur(7px);
+  }
+  60% {
+    opacity: 0.85;
+    transform: translateY(-0.2rem);
+    filter: blur(4px);
+  }
+  82% {
+    opacity: 0.97;
+    transform: translateY(0.08rem);
+    filter: blur(1px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@utility animate-hero-heading {
+  --duration-Duration-Hero: 900ms;
+  --ease-Easing-Hero-Settle: cubic-bezier(0.22, 1, 0.36, 1);
+  animation: hero-heading-enter var(--duration-Duration-Hero) var(--ease-Easing-Hero-Settle) both;
+}
+
+/* Feature card entrance: rise, fade, slide down into place */
+@keyframes feature-card-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+  35% {
+    opacity: 0.45;
+    transform: translateY(0.6rem);
+  }
+  60% {
+    opacity: 0.85;
+    transform: translateY(-0.15rem);
+  }
+  82% {
+    opacity: 0.97;
+    transform: translateY(0.06rem);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility animate-feature-card-enter {
+  --duration-Duration-Feature-Card: 550ms;
+  --ease-Easing-Feature-Card-Settle: cubic-bezier(0.22, 1, 0.36, 1);
+  --delay-Feature-Card-Stagger: 100ms;
+  animation: feature-card-enter var(--duration-Duration-Feature-Card)
+    var(--ease-Easing-Feature-Card-Settle) both;
+  animation-delay: calc(
+    var(--feature-card-index, 0) * var(--delay-Feature-Card-Stagger) + 250ms
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-hero-heading,
+  .animate-feature-card-enter {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+
+  .secondary-neon-border::before {
+    animation: none;
+    --neon-angle: 60deg;
+    opacity: 0.45;
+  }
+
+  .secondary-neon-border::after {
+    animation: none;
+    opacity: 0.28;
+  }
+}
