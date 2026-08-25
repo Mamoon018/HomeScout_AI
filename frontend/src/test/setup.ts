@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 vi.stubEnv('SITE_KEY_CAPTCHA', 'test-site-key')
 
 afterEach(() => {
+  localStorage.clear()
   toast.dismiss()
   cleanup()
 })

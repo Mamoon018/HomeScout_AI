@@ -18,18 +18,6 @@ class Settings(BaseSettings):
 
     supabase_url: str = Field(validation_alias="SUPABASE_URL")
     supabase_publishable_key: str = Field(validation_alias="SUPABASE_PUBLISHABLE_KEY")
-    supabase_jwt_audience: str = Field(
-        default="authenticated",
-        validation_alias="SUPABASE_JWT_AUDIENCE",
-    )
-
-    @property
-    def supabase_jwt_issuer(self) -> str:
-        return f"{self.supabase_url.rstrip('/')}/auth/v1"
-
-    @property
-    def supabase_jwks_url(self) -> str:
-        return f"{self.supabase_jwt_issuer}/.well-known/jwks.json"
 
 
 @lru_cache

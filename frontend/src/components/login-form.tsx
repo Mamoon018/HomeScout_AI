@@ -23,17 +23,20 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useLogin } from '@/features/auth/hooks/useLogin'
+import { useSignupCaptcha } from '@/features/auth/hooks/useSignupCaptcha'
 import {
   INVALID_INPUT_MESSAGE,
   loginSchema,
   type LoginFormData,
 } from '@/features/auth/utils/loginSchema'
+import { SignupCaptcha } from '@/components/signup-captcha'
 
 export function LoginForm({
   className,
   ...props
 }: React.ComponentProps<'div'>) {
-  const { isSubmitting, submitLogin } = useLogin()
+  const captcha = useSignupCaptcha()
+  const { isSubmitting, submitLogin } = useLogin(captcha)
   const [showPassword, setShowPassword] = useState(false)
   const passwordInputType = showPassword ? 'text' : 'password'
 
@@ -107,8 +110,17 @@ export function LoginForm({
                   {errors.password ? INVALID_INPUT_MESSAGE : null}
                 </FieldError>
               </Field>
+              <SignupCaptcha
+                disabled={isSubmitting}
+                captcha={captcha}
+                description="Complete the captcha challenge to enable sign in."
+              />
               <Field>
-                <Button type="submit" className="w-full" disabled={isSubmitting}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={isSubmitting || !captcha.hasCaptchaToken}
+                >
                   {isSubmitting ? (
                     <>
                       <Loader2 className="animate-spin" />

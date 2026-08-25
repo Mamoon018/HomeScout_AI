@@ -8,10 +8,15 @@ import { cn } from '@/lib/utils'
 type SignupCaptchaProps = {
   disabled?: boolean
   captcha: SignupCaptchaControls
+  description?: string
 }
 
-/** Renders the Turnstile captcha trigger button and widget for the signup form. */
-export function SignupCaptcha({ disabled = false, captcha }: SignupCaptchaProps) {
+/** Renders the Turnstile captcha trigger button and widget for auth forms. */
+export function SignupCaptcha({
+  disabled = false,
+  captcha,
+  description = 'Complete the captcha challenge to enable account creation.',
+}: SignupCaptchaProps) {
   const {
     showWidget,
     setShowWidget,
@@ -49,9 +54,7 @@ export function SignupCaptcha({ disabled = false, captcha }: SignupCaptchaProps)
           />
         </div>
       )}
-      <FieldDescription>
-        Complete the captcha challenge to enable account creation.
-      </FieldDescription>
+      <FieldDescription>{description}</FieldDescription>
     </Field>
   )
 }

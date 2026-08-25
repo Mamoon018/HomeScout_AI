@@ -3,8 +3,11 @@ import userEvent from '@testing-library/user-event'
 import { login } from '@/features/auth/api/authApi'
 import { LOGIN_USER_MESSAGES } from '@/features/auth/utils/loginErrors'
 import { INVALID_INPUT_MESSAGE } from '@/features/auth/utils/loginSchema'
+import { MockTurnstile } from '@/test/mocks/turnstile'
 import {
+  completeLoginCaptcha,
   fillValidLoginForm,
+  fillValidLoginFormWithCaptcha,
   findToastMessage,
   getPasswordInput,
   getSubmitButton,
@@ -12,6 +15,10 @@ import {
 } from '@/test/loginTestUtils'
 
 const mockNavigate = vi.fn()
+
+vi.mock('@marsidev/react-turnstile', () => ({
+  Turnstile: MockTurnstile,
+}))
 
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>(
@@ -44,6 +51,7 @@ describe('LoginForm', () => {
     const user = userEvent.setup()
     renderLoginForm()
 
+    await completeLoginCaptcha(user)
     await user.click(getSubmitButton())
 
     expect(await screen.findAllByText(INVALID_INPUT_MESSAGE)).toHaveLength(2)
@@ -72,46 +80,57 @@ describe('LoginForm', () => {
     mockedLogin.mockReturnValue(loginPromise)
 
     renderLoginForm()
-    await fillValidLoginForm(user)
+    await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     expect(
       screen.getByRole('button', { name: 'Signing in...' }),
     ).toBeDisabled()
 
-    resolveLogin({ ok: true, status: 200, data: { message: 'Login successful' } })
+    resolveLogin({
+      ok: true,
+      status: 200,
+      data: { message: 'Login successful', user_id: 'user-1', user_name: 'Demo User' },
+    })
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith('/auth/callback', {
-        state: { cookie: null },
-      })
+      expect(mockNavigate).toHaveBeenCalledWith('/home', { replace: true })
     })
   })
 
-  it('navigates to callback on success', async () => {
+  it('navigates to home on success', async () => {
     const user = userEvent.setup()
-    const cookie = {
-      sent: true,
-      name: 'access_token',
-      http_only: true,
-      secure: true,
-      same_site: 'Strict',
-      path: '/',
-    }
     mockedLogin.mockResolvedValue({
       ok: true,
       status: 200,
-      data: { message: 'Login successful', cookie },
+      data: {
+        message: 'Login successful',
+        user_id: 'user-1',
+        user_name: 'Demo User',
+      },
     })
 
     renderLoginForm()
-    await fillValidLoginForm(user)
+    await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith('/auth/callback', {
-        state: { cookie },
-      })
+      expect(mockNavigate).toHaveBeenCalledWith('/home', { replace: true })
     })
+    expect(localStorage.getItem('homescout.auth.user')).toContain('Demo User')
+  })
+
+  it('keeps submit disabled until captcha is completed', async () => {
+    const user = userEvent.setup()
+    renderLoginForm()
+
+    await fillValidLoginForm(user)
+    expect(getSubmitButton()).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Verify captcha' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Complete captcha challenge' }),
+    )
+    expect(getSubmitButton()).not.toBeDisabled()
   })
 
   it('shows generic error on 401', async () => {
@@ -123,7 +142,7 @@ describe('LoginForm', () => {
     })
 
     renderLoginForm()
-    await fillValidLoginForm(user)
+    await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await findToastMessage(LOGIN_USER_MESSAGES.invalidCredentials)
@@ -141,7 +160,7 @@ describe('LoginForm', () => {
     })
 
     renderLoginForm()
-    await fillValidLoginForm(user)
+    await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await findToastMessage(rateLimitMessage)
@@ -157,7 +176,7 @@ describe('LoginForm', () => {
     })
 
     renderLoginForm()
-    await fillValidLoginForm(user)
+    await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await findToastMessage(LOGIN_USER_MESSAGES.connection)

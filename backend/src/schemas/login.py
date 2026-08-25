@@ -1,16 +1,16 @@
 from pydantic import BaseModel, EmailStr
 
-from src.schemas.auth_cookie import CookieSendStatus
-
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    captcha_token: str
 
 
 class LoginResponse(BaseModel):
     message: str
-    cookie: CookieSendStatus
+    user_id: str
+    user_name: str | None = None
 
 
 class LoginError(BaseModel):

@@ -4,8 +4,6 @@ from enum import Enum
 from supabase import Client
 from supabase_auth.errors import AuthApiError, AuthError
 
-from src.services.auth.access_token import AccessTokenVerifier, TokenVerificationError
-
 MAX_FAILED_ATTEMPTS = 5
 DEFAULT_ACCESS_TOKEN_MAX_AGE = 12 * 60 * 60
 REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 30
@@ -21,13 +19,14 @@ class LoginOutcome(str, Enum):
 
 @dataclass(frozen=True)
 class IssuedIdentity:
-    """Fields taken from a Supabase session for cookies — never the raw SDK object."""
+    """Fields taken from a Supabase session for cookies and the login body."""
 
     access_token: str
     refresh_token: str
     expires_in: int
     user_id: str
     email: str | None
+    user_name: str | None
 
 
 @dataclass(frozen=True)
@@ -64,48 +63,29 @@ ACCESS_TOKEN_COOKIE_POLICY = AccessTokenCookiePolicy()
 REFRESH_TOKEN_COOKIE_POLICY = RefreshTokenCookiePolicy()
 
 
-@dataclass(frozen=True)
-class AccessTokenCookieReceipt:
-    present: bool
-    matches_expected: bool
-    name: str
-
-
-def describe_cookie_send() -> dict[str, bool | str]:
-    """Describe the Set-Cookie policy that was applied, never including the token."""
-    policy = ACCESS_TOKEN_COOKIE_POLICY
-    return {
-        "sent": True,
-        "name": policy.name,
-        "http_only": policy.httponly,
-        "secure": policy.secure,
-        "same_site": "Strict",
-        "path": policy.path,
-    }
-
-
-def inspect_received_access_token(
-    cookie_value: str | None,
-    verifier: AccessTokenVerifier,
-) -> AccessTokenCookieReceipt:
-    """Check that a cookie arrived and verifies locally without echoing the value."""
-    present = bool(cookie_value)
-    matches_expected = False
-    if cookie_value:
-        try:
-            verifier.verify(cookie_value)
-            matches_expected = True
-        except TokenVerificationError:
-            matches_expected = False
-    return AccessTokenCookieReceipt(
-        present=present,
-        matches_expected=matches_expected,
-        name=ACCESS_TOKEN_COOKIE_POLICY.name,
-    )
-
-
 def reset_failed_attempts(email: str) -> None:
     _failed_attempts.pop(email.lower(), None)
+
+
+def _as_metadata_dict(value: object) -> dict | None:
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        return dumped if isinstance(dumped, dict) else None
+    return None
+
+
+def _extract_user_name(user: object) -> str | None:
+    for attr in ("user_metadata", "raw_user_meta_data"):
+        metadata = _as_metadata_dict(getattr(user, attr, None))
+        if metadata is None:
+            continue
+        full_name = metadata.get("full_name")
+        if isinstance(full_name, str) and full_name.strip():
+            return full_name
+    return None
 
 
 def _map_supabase_session(session: object) -> IssuedIdentity | None:
@@ -130,10 +110,21 @@ def _map_supabase_session(session: object) -> IssuedIdentity | None:
         expires_in=max_age,
         user_id=user_id,
         email=email if isinstance(email, str) else None,
+        user_name=_extract_user_name(user) if user is not None else None,
     )
 
 
-def authenticate(client: Client, email: str, password: str) -> LoginResult:
+def _auth_error_code(error: AuthApiError | AuthError) -> str | None:
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) else None
+
+
+def authenticate(
+    client: Client,
+    email: str,
+    password: str,
+    captcha_token: str,
+) -> LoginResult:
     normalized_email = email.lower()
 
     if _failed_attempts.get(normalized_email, 0) >= MAX_FAILED_ATTEMPTS:
@@ -144,9 +135,19 @@ def authenticate(client: Client, email: str, password: str) -> LoginResult:
 
     try:
         response = client.auth.sign_in_with_password(
-            {"email": normalized_email, "password": password}
+            {
+                "email": normalized_email,
+                "password": password,
+                "options": {"captcha_token": captcha_token},
+            }
         )
-    except (AuthApiError, AuthError):
+    except (AuthApiError, AuthError) as error:
+        if _auth_error_code(error) == "captcha_failed":
+            return LoginResult(
+                outcome=LoginOutcome.INVALID_CREDENTIALS,
+                error="Please complete the captcha challenge and try again.",
+            )
+
         _failed_attempts[normalized_email] = _failed_attempts.get(normalized_email, 0) + 1
         return LoginResult(
             outcome=LoginOutcome.INVALID_CREDENTIALS,

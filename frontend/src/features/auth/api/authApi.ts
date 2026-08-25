@@ -14,27 +14,14 @@ export type SignUpParams = {
 export type LoginParams = {
   email: string
   password: string
-}
-
-export type CookieSendStatus = {
-  sent: boolean
-  name: string
-  http_only: boolean
-  secure: boolean
-  same_site: string
-  path: string
-}
-
-export type CookieReceiveStatus = {
-  present: boolean
-  matches_expected: boolean
-  name: string
+  captchaToken: string
 }
 
 export type LoginApiData = {
   message?: string
   error?: string
-  cookie?: CookieSendStatus
+  user_id?: string
+  user_name?: string | null
 }
 
 export type AuthApiResponse<T> = {
@@ -49,7 +36,6 @@ export type LoginApiResponse = AuthApiResponse<LoginApiData>
 
 const AUTH_API_TIMEOUT_MS = 15000
 const LOGIN_PATH = '/api/auth/login'
-const SESSION_PATH = '/api/auth/session'
 
 type SameOriginFetchResult<T> = AuthApiResponse<T>
 
@@ -130,15 +116,10 @@ export async function login(params: LoginParams): Promise<LoginApiResponse> {
   return fetchSameOriginJson<LoginApiData>(LOGIN_PATH, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  })
-}
-
-/** Asks the backend whether the HttpOnly cookie was stored and sent back. */
-export async function getAccessTokenSession(): Promise<
-  AuthApiResponse<CookieReceiveStatus>
-> {
-  return fetchSameOriginJson<CookieReceiveStatus>(SESSION_PATH, {
-    method: 'GET',
+    body: JSON.stringify({
+      email: params.email,
+      password: params.password,
+      captcha_token: params.captchaToken,
+    }),
   })
 }

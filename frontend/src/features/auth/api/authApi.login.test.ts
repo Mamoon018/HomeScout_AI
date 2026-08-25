@@ -14,14 +14,8 @@ describe('authApi.login', () => {
       status: 200,
       json: async () => ({
         message: 'Login successful',
-        cookie: {
-          sent: true,
-          name: 'access_token',
-          http_only: true,
-          secure: true,
-          same_site: 'Strict',
-          path: '/',
-        },
+        user_id: 'user-1',
+        user_name: 'Demo User',
       }),
     })
     globalThis.fetch = fetchMock
@@ -29,6 +23,7 @@ describe('authApi.login', () => {
     const result = await login({
       email: 'demo@homescout.ai',
       password: 'password123',
+      captchaToken: 'mock-captcha-token',
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -40,12 +35,14 @@ describe('authApi.login', () => {
         body: JSON.stringify({
           email: 'demo@homescout.ai',
           password: 'password123',
+          captcha_token: 'mock-captcha-token',
         }),
       }),
     )
     expect(result.ok).toBe(true)
     expect(result.status).toBe(200)
-    expect(result.data?.cookie?.same_site).toBe('Strict')
+    expect(result.data?.user_id).toBe('user-1')
+    expect(result.data?.user_name).toBe('Demo User')
   })
 
   it('returns aborted response when fetch times out at 15s', async () => {
@@ -64,6 +61,7 @@ describe('authApi.login', () => {
     const loginPromise = login({
       email: 'demo@homescout.ai',
       password: 'password123',
+      captchaToken: 'mock-captcha-token',
     })
 
     await vi.advanceTimersByTimeAsync(15000)

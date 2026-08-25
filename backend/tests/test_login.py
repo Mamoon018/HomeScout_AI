@@ -1,35 +1,29 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from src.app.api.dependencies.supabase import get_access_token_verifier, get_supabase_client
+from src.app.api.dependencies.supabase import get_supabase_client
 from src.app.main import app
 from src.services.auth.login import (
     ACCESS_TOKEN_COOKIE_POLICY,
     REFRESH_TOKEN_COOKIE_POLICY,
     MAX_FAILED_ATTEMPTS,
     authenticate,
-    describe_cookie_send,
-    inspect_received_access_token,
     reset_failed_attempts,
 )
 from tests.conftest import (
     FakeSupabaseClient,
+    TEST_ACCESS_TOKEN,
+    TEST_CAPTCHA_TOKEN,
     TEST_EMAIL,
     TEST_PASSWORD,
-    mint_access_token,
-    make_access_token_verifier,
+    TEST_USER_NAME,
 )
 
 LOGIN_ENDPOINT = "/api/auth/login"
-SESSION_ENDPOINT = "/api/auth/session"
-TOKEN_CHECK_ENDPOINT = "/api/auth/token-check"
-EXPECTED_COOKIE_SEND = {
-    "sent": True,
-    "name": "access_token",
-    "http_only": True,
-    "secure": True,
-    "same_site": "Strict",
-    "path": "/",
+LOGIN_PAYLOAD = {
+    "email": TEST_EMAIL,
+    "password": TEST_PASSWORD,
+    "captcha_token": TEST_CAPTCHA_TOKEN,
 }
 
 
@@ -42,75 +36,55 @@ def clear_failed_attempts():
 
 
 @pytest.fixture
-def access_token() -> str:
-    return mint_access_token()
+def supabase_client() -> FakeSupabaseClient:
+    return FakeSupabaseClient(TEST_ACCESS_TOKEN)
 
 
 @pytest.fixture
-def supabase_client(access_token: str) -> FakeSupabaseClient:
-    return FakeSupabaseClient(access_token)
-
-
-@pytest.fixture
-def verifier():
-    return make_access_token_verifier()
-
-
-@pytest.fixture
-async def client(supabase_client: FakeSupabaseClient, verifier):
+async def client(supabase_client: FakeSupabaseClient):
     app.dependency_overrides[get_supabase_client] = lambda: supabase_client
-    app.dependency_overrides[get_access_token_verifier] = lambda: verifier
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="https://test") as ac:
         yield ac
 
 
-def test_authenticate_success(supabase_client: FakeSupabaseClient, access_token: str):
-    result = authenticate(supabase_client, TEST_EMAIL, TEST_PASSWORD)
+def test_authenticate_success(supabase_client: FakeSupabaseClient):
+    result = authenticate(
+        supabase_client,
+        TEST_EMAIL,
+        TEST_PASSWORD,
+        TEST_CAPTCHA_TOKEN,
+    )
     assert result.outcome.value == "success"
     assert result.message == "Login successful"
     assert result.identity is not None
-    assert result.identity.access_token == access_token
+    assert result.identity.access_token == TEST_ACCESS_TOKEN
     assert result.identity.refresh_token == "test-refresh-token"
     assert result.identity.expires_in == 3600
     assert result.identity.user_id == "user-1"
     assert result.identity.email == TEST_EMAIL
+    assert result.identity.user_name == TEST_USER_NAME
 
 
 def test_authenticate_invalid_credentials(supabase_client: FakeSupabaseClient):
-    result = authenticate(supabase_client, TEST_EMAIL, "wrong-password")
+    result = authenticate(
+        supabase_client,
+        TEST_EMAIL,
+        "wrong-password",
+        TEST_CAPTCHA_TOKEN,
+    )
     assert result.outcome.value == "invalid_credentials"
     assert result.error == "Invalid email or password"
     assert result.identity is None
 
 
-def test_describe_cookie_send_uses_strict_secure_httponly():
-    assert describe_cookie_send() == EXPECTED_COOKIE_SEND
+def test_cookie_policies_use_strict_secure_httponly():
     assert ACCESS_TOKEN_COOKIE_POLICY.samesite == "strict"
     assert ACCESS_TOKEN_COOKIE_POLICY.httponly is True
     assert ACCESS_TOKEN_COOKIE_POLICY.secure is True
     assert REFRESH_TOKEN_COOKIE_POLICY.path == "/auth/refresh"
     assert REFRESH_TOKEN_COOKIE_POLICY.httponly is True
     assert REFRESH_TOKEN_COOKIE_POLICY.secure is True
-
-
-def test_inspect_received_access_token_missing(verifier):
-    receipt = inspect_received_access_token(None, verifier)
-    assert receipt.present is False
-    assert receipt.matches_expected is False
-    assert receipt.name == "access_token"
-
-
-def test_inspect_received_access_token_verifies_jwt(verifier, access_token: str):
-    receipt = inspect_received_access_token(access_token, verifier)
-    assert receipt.present is True
-    assert receipt.matches_expected is True
-
-
-def test_inspect_received_access_token_rejects_wrong_value(verifier):
-    receipt = inspect_received_access_token("not-a-jwt", verifier)
-    assert receipt.present is True
-    assert receipt.matches_expected is False
 
 
 def _set_cookie_headers(response) -> list[str]:
@@ -126,17 +100,16 @@ def _cookie_header_for(headers: list[str], name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_login_route_success_sets_access_and_refresh_cookies(
-    client: AsyncClient, access_token: str
-):
+async def test_login_route_success_sets_access_and_refresh_cookies(client: AsyncClient):
     response = await client.post(
         LOGIN_ENDPOINT,
-        json={"email": TEST_EMAIL, "password": TEST_PASSWORD},
+        json=LOGIN_PAYLOAD,
     )
     assert response.status_code == 200
     assert response.json() == {
         "message": "Login successful",
-        "cookie": EXPECTED_COOKIE_SEND,
+        "user_id": "user-1",
+        "user_name": TEST_USER_NAME,
     }
     headers = _set_cookie_headers(response)
     access = _cookie_header_for(headers, "access_token")
@@ -150,7 +123,7 @@ async def test_login_route_success_sets_access_and_refresh_cookies(
     assert "secure" in refresh
     assert "samesite=strict" in refresh
     assert "path=/auth/refresh" in refresh
-    assert access_token.lower() in access
+    assert TEST_ACCESS_TOKEN.lower() in access
     assert "test-refresh-token" in refresh
 
 
@@ -160,7 +133,7 @@ async def test_login_route_invalid_credentials_does_not_set_cookie(
 ):
     response = await client.post(
         LOGIN_ENDPOINT,
-        json={"email": TEST_EMAIL, "password": "wrong-password"},
+        json={**LOGIN_PAYLOAD, "password": "wrong-password"},
     )
     assert response.status_code == 401
     assert response.json() == {"error": "Invalid email or password"}
@@ -172,70 +145,14 @@ async def test_login_route_rate_limit(client: AsyncClient):
     for _ in range(MAX_FAILED_ATTEMPTS):
         await client.post(
             LOGIN_ENDPOINT,
-            json={"email": TEST_EMAIL, "password": "wrong-password"},
+            json={**LOGIN_PAYLOAD, "password": "wrong-password"},
         )
 
     response = await client.post(
         LOGIN_ENDPOINT,
-        json={"email": TEST_EMAIL, "password": TEST_PASSWORD},
+        json=LOGIN_PAYLOAD,
     )
     assert response.status_code == 429
     assert response.json() == {
         "error": "Too many login attempts. Please try again later.",
-    }
-
-
-@pytest.mark.asyncio
-async def test_session_route_reports_missing_cookie(client: AsyncClient):
-    response = await client.get(SESSION_ENDPOINT)
-    assert response.status_code == 200
-    assert response.json() == {
-        "present": False,
-        "matches_expected": False,
-        "name": "access_token",
-    }
-
-
-@pytest.mark.asyncio
-async def test_session_route_reports_cookie_after_login(client: AsyncClient):
-    login_response = await client.post(
-        LOGIN_ENDPOINT,
-        json={"email": TEST_EMAIL, "password": TEST_PASSWORD},
-    )
-    assert login_response.status_code == 200
-
-    response = await client.get(SESSION_ENDPOINT)
-    assert response.status_code == 200
-    assert response.json() == {
-        "present": True,
-        "matches_expected": True,
-        "name": "access_token",
-    }
-
-
-@pytest.mark.asyncio
-async def test_token_check_reports_uncheckable_when_missing(client: AsyncClient):
-    response = await client.get(TOKEN_CHECK_ENDPOINT)
-    assert response.status_code == 200
-    assert response.json() == {
-        "checkable": False,
-        "algorithm": None,
-        "audience_matched": False,
-    }
-
-
-@pytest.mark.asyncio
-async def test_token_check_verifies_issued_jwt_locally(client: AsyncClient):
-    login_response = await client.post(
-        LOGIN_ENDPOINT,
-        json={"email": TEST_EMAIL, "password": TEST_PASSWORD},
-    )
-    assert login_response.status_code == 200
-
-    response = await client.get(TOKEN_CHECK_ENDPOINT)
-    assert response.status_code == 200
-    assert response.json() == {
-        "checkable": True,
-        "algorithm": "ES256",
-        "audience_matched": True,
     }
