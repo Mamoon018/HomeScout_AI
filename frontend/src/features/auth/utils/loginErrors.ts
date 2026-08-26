@@ -12,7 +12,7 @@ export function getLoginErrorMessage(result: LoginApiResponse): string | null {
   }
 
   if (result.status === 401) {
-    return LOGIN_USER_MESSAGES.invalidCredentials
+    return result.data?.error ?? LOGIN_USER_MESSAGES.invalidCredentials
   }
 
   if (result.status === 429 && result.data?.error) {

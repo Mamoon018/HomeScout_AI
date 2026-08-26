@@ -3,9 +3,11 @@ from httpx import ASGITransport, AsyncClient
 
 from src.app.api.dependencies.supabase import get_supabase_client
 from src.app.main import app
+from src.core.config import get_settings
 from src.services.auth.login import (
     ACCESS_TOKEN_COOKIE_POLICY,
     REFRESH_TOKEN_COOKIE_POLICY,
+    CAPTCHA_REQUIRED_MESSAGE,
     MAX_FAILED_ATTEMPTS,
     authenticate,
     reset_failed_attempts,
@@ -33,6 +35,7 @@ def clear_failed_attempts():
     yield
     reset_failed_attempts(TEST_EMAIL)
     app.dependency_overrides.clear()
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -54,6 +57,7 @@ def test_authenticate_success(supabase_client: FakeSupabaseClient):
         TEST_EMAIL,
         TEST_PASSWORD,
         TEST_CAPTCHA_TOKEN,
+        captcha_required=True,
     )
     assert result.outcome.value == "success"
     assert result.message == "Login successful"
@@ -72,10 +76,76 @@ def test_authenticate_invalid_credentials(supabase_client: FakeSupabaseClient):
         TEST_EMAIL,
         "wrong-password",
         TEST_CAPTCHA_TOKEN,
+        captcha_required=True,
     )
     assert result.outcome.value == "invalid_credentials"
     assert result.error == "Invalid email or password"
     assert result.identity is None
+
+
+def test_authenticate_requires_captcha_token_when_enabled(
+    supabase_client: FakeSupabaseClient,
+):
+    result = authenticate(
+        supabase_client,
+        TEST_EMAIL,
+        TEST_PASSWORD,
+        None,
+        captcha_required=True,
+    )
+    assert result.outcome.value == "invalid_credentials"
+    assert result.error == CAPTCHA_REQUIRED_MESSAGE
+
+
+def test_authenticate_succeeds_without_captcha_token_when_disabled(
+    supabase_client: FakeSupabaseClient,
+):
+    result = authenticate(
+        supabase_client,
+        TEST_EMAIL,
+        TEST_PASSWORD,
+        None,
+        captcha_required=False,
+    )
+    assert result.outcome.value == "success"
+
+
+@pytest.mark.asyncio
+async def test_login_route_succeeds_without_captcha_when_disabled(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CAPTCHA_ENABLED", "false")
+    get_settings.cache_clear()
+
+    response = await client.post(
+        LOGIN_ENDPOINT,
+        json={
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_login_route_requires_captcha_when_enabled(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CAPTCHA_ENABLED", "true")
+    get_settings.cache_clear()
+
+    response = await client.post(
+        LOGIN_ENDPOINT,
+        json={
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD,
+        },
+    )
+    assert response.status_code == 401
+    assert response.json() == {"error": CAPTCHA_REQUIRED_MESSAGE}
 
 
 def test_cookie_policies_use_strict_secure_httponly():

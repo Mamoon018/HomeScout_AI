@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { login } from '@/features/auth/api/authApi'
 import type { SignupCaptchaControls } from '@/features/auth/hooks/useSignupCaptcha'
 import { saveAuthUser } from '@/features/auth/utils/authUserStore'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 import { getLoginErrorMessage } from '@/features/auth/utils/loginErrors'
 import type { LoginFormData } from '@/features/auth/utils/loginSchema'
 
@@ -14,19 +15,26 @@ const CAPTCHA_REQUIRED_MESSAGE =
 export function useLogin(captcha: SignupCaptchaControls) {
   const navigate = useNavigate()
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const captchaRequired = isCaptchaEnabled()
   const { getCaptchaToken, resetCaptcha, registerCaptchaErrorHandler } = captcha
 
   useEffect(() => {
+    if (!captchaRequired) {
+      return
+    }
+
     registerCaptchaErrorHandler(() => {
       toast.error('Unable to connect. Please try again.')
     })
-  }, [registerCaptchaErrorHandler])
+  }, [captchaRequired, registerCaptchaErrorHandler])
 
   async function submitLogin(formData: LoginFormData) {
-    const captchaToken = getCaptchaToken()
-    if (!captchaToken) {
-      toast.error(CAPTCHA_REQUIRED_MESSAGE)
-      return
+    if (captchaRequired) {
+      const captchaToken = getCaptchaToken()
+      if (!captchaToken) {
+        toast.error(CAPTCHA_REQUIRED_MESSAGE)
+        return
+      }
     }
 
     setIsSubmitting(true)
@@ -35,11 +43,13 @@ export function useLogin(captcha: SignupCaptchaControls) {
       const result = await login({
         email: formData.email,
         password: formData.password,
-        captchaToken: getCaptchaToken()!,
+        captchaToken: captchaRequired ? getCaptchaToken()! : undefined,
       })
 
       if (!result.ok) {
-        resetCaptcha()
+        if (captchaRequired) {
+          resetCaptcha()
+        }
         const message = getLoginErrorMessage(result)
         toast.error(message ?? 'Invalid email or password')
         return
@@ -55,7 +65,9 @@ export function useLogin(captcha: SignupCaptchaControls) {
 
       navigate('/home', { replace: true })
     } catch {
-      resetCaptcha()
+      if (captchaRequired) {
+        resetCaptcha()
+      }
       toast.error('Unable to connect. Please try again.')
     } finally {
       setIsSubmitting(false)

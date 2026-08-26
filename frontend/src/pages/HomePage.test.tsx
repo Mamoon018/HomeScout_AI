@@ -1,17 +1,9 @@
 import { render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
-import { saveAuthUser } from '@/features/auth/utils/authUserStore'
 import { HomePage } from '@/pages/HomePage'
 
 describe('HomePage', () => {
-  it('shows Welcome {user_name}! when identity is stored', () => {
-    saveAuthUser({ user_id: 'user-1', user_name: 'Demo User' })
-
-    render(
-      <MemoryRouter>
-        <HomePage />
-      </MemoryRouter>,
-    )
+  it('shows the welcome message returned by the API', () => {
+    render(<HomePage message="Welcome Demo User!" />)
 
     expect(
       screen.getByRole('heading', { name: 'Welcome Demo User!' }),
@@ -19,14 +11,10 @@ describe('HomePage', () => {
     expect(screen.getByText('You are signed in.')).toBeInTheDocument()
   })
 
-  it('does not show a welcome heading when no user name is stored', () => {
-    render(
-      <MemoryRouter>
-        <HomePage />
-      </MemoryRouter>,
-    )
+  it('does not show a greeting while the welcome request has no message', () => {
+    render(<HomePage message={null} />)
 
     expect(screen.queryByRole('heading')).not.toBeInTheDocument()
-    expect(screen.getByText('You are signed in.')).toBeInTheDocument()
+    expect(screen.queryByText('You are signed in.')).not.toBeInTheDocument()
   })
 })

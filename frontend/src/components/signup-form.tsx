@@ -33,6 +33,7 @@ import {
   getCitiesForCountry,
 } from '@/features/auth/utils/locationData'
 import { SignupCaptcha } from '@/components/signup-captcha'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
 export function SignupForm({
   className,
@@ -226,7 +227,7 @@ export function SignupForm({
                 <Button
                   type="submit"
                   className="w-full"
-                  disabled={isSubmitting || !captcha.hasCaptchaToken}
+                  disabled={isSubmitting || (isCaptchaEnabled() && !captcha.hasCaptchaToken)}
                 >
                   {isSubmitting ? (
                     <>

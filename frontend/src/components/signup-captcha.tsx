@@ -2,7 +2,7 @@ import { Turnstile } from '@marsidev/react-turnstile'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription } from '@/components/ui/field'
 import type { SignupCaptchaControls } from '@/features/auth/hooks/useSignupCaptcha'
-import { getCaptchaSiteKey } from '@/features/auth/utils/captchaConfig'
+import { getCaptchaSiteKey, isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 import { cn } from '@/lib/utils'
 
 type SignupCaptchaProps = {
@@ -17,6 +17,10 @@ export function SignupCaptcha({
   captcha,
   description = 'Complete the captcha challenge to enable account creation.',
 }: SignupCaptchaProps) {
+  if (!isCaptchaEnabled()) {
+    return null
+  }
+
   const {
     showWidget,
     setShowWidget,

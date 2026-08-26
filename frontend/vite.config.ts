@@ -91,5 +91,10 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     globals: true,
     testTimeout: 10000,
+    server: {
+      deps: {
+        inline: ['@marsidev/react-turnstile'],
+      },
+    },
   },
 })

@@ -30,6 +30,7 @@ import {
   type LoginFormData,
 } from '@/features/auth/utils/loginSchema'
 import { SignupCaptcha } from '@/components/signup-captcha'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
 export function LoginForm({
   className,
@@ -119,7 +120,7 @@ export function LoginForm({
                 <Button
                   type="submit"
                   className="w-full"
-                  disabled={isSubmitting || !captcha.hasCaptchaToken}
+                  disabled={isSubmitting || (isCaptchaEnabled() && !captcha.hasCaptchaToken)}
                 >
                   {isSubmitting ? (
                     <>

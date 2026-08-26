@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event'
 import { login } from '@/features/auth/api/authApi'
 import { LOGIN_USER_MESSAGES } from '@/features/auth/utils/loginErrors'
 import { INVALID_INPUT_MESSAGE } from '@/features/auth/utils/loginSchema'
-import { MockTurnstile } from '@/test/mocks/turnstile'
 import {
   completeLoginCaptcha,
   fillValidLoginForm,
@@ -14,20 +13,18 @@ import {
   renderLoginForm,
 } from '@/test/loginTestUtils'
 
-const mockNavigate = vi.fn()
-
-vi.mock('@marsidev/react-turnstile', () => ({
-  Turnstile: MockTurnstile,
+const { isCaptchaEnabledMock } = vi.hoisted(() => ({
+  isCaptchaEnabledMock: vi.fn(() => true),
 }))
 
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>(
-    'react-router-dom',
-  )
-  return {
-    ...actual,
-    useNavigate: () => mockNavigate,
-  }
+vi.mock('@/features/auth/utils/captchaConfig', () => ({
+  isCaptchaEnabled: () => isCaptchaEnabledMock(),
+  getCaptchaSiteKey: () => 'test-site-key',
+}))
+
+vi.mock('@marsidev/react-turnstile', async () => {
+  const { MockTurnstile } = await import('@/test/mocks/turnstile')
+  return { Turnstile: MockTurnstile }
 })
 
 vi.mock('@/features/auth/api/authApi', async () => {
@@ -44,6 +41,7 @@ const mockedLogin = vi.mocked(login)
 
 beforeEach(() => {
   vi.clearAllMocks()
+  isCaptchaEnabledMock.mockReturnValue(true)
 })
 
 describe('LoginForm', () => {
@@ -79,7 +77,7 @@ describe('LoginForm', () => {
     })
     mockedLogin.mockReturnValue(loginPromise)
 
-    renderLoginForm()
+    const { path } = renderLoginForm()
     await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
@@ -93,7 +91,7 @@ describe('LoginForm', () => {
       data: { message: 'Login successful', user_id: 'user-1', user_name: 'Demo User' },
     })
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith('/home', { replace: true })
+      expect(path.current).toBe('/home')
     })
   })
 
@@ -109,12 +107,12 @@ describe('LoginForm', () => {
       },
     })
 
-    renderLoginForm()
+    const { path } = renderLoginForm()
     await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith('/home', { replace: true })
+      expect(path.current).toBe('/home')
     })
     expect(localStorage.getItem('homescout.auth.user')).toContain('Demo User')
   })
@@ -128,7 +126,7 @@ describe('LoginForm', () => {
 
     await user.click(screen.getByRole('button', { name: 'Verify captcha' }))
     await user.click(
-      screen.getByRole('button', { name: 'Complete captcha challenge' }),
+      await screen.findByRole('button', { name: 'Complete captcha challenge' }),
     )
     expect(getSubmitButton()).not.toBeDisabled()
   })
@@ -141,12 +139,12 @@ describe('LoginForm', () => {
       data: { error: 'Invalid email or password' },
     })
 
-    renderLoginForm()
+    const { path } = renderLoginForm()
     await fillValidLoginFormWithCaptcha(user)
     await user.click(getSubmitButton())
 
     await findToastMessage(LOGIN_USER_MESSAGES.invalidCredentials)
-    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(path.current).toBe('/')
   })
 
   it('shows backend message on 429', async () => {
@@ -180,5 +178,29 @@ describe('LoginForm', () => {
     await user.click(getSubmitButton())
 
     await findToastMessage(LOGIN_USER_MESSAGES.connection)
+  })
+
+  it('allows submit without captcha when captcha is disabled in dev', async () => {
+    isCaptchaEnabledMock.mockReturnValue(false)
+    const user = userEvent.setup()
+    mockedLogin.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: {
+        message: 'Login successful',
+        user_id: 'user-1',
+        user_name: 'Demo User',
+      },
+    })
+
+    const { path } = renderLoginForm()
+    await fillValidLoginForm(user)
+    expect(getSubmitButton()).not.toBeDisabled()
+    await user.click(getSubmitButton())
+
+    await waitFor(() => {
+      expect(path.current).toBe('/home')
+    })
+    expect(screen.queryByRole('button', { name: 'Verify captcha' })).not.toBeInTheDocument()
   })
 })

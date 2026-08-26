@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from supabase import Client
 
 from src.app.api.dependencies.supabase import get_supabase_client
+from src.core.config import get_settings
 from src.schemas.login import LoginError, LoginRequest, LoginResponse
 from src.services.auth.login import (
     ACCESS_TOKEN_COOKIE_POLICY,
@@ -57,11 +58,13 @@ async def login(
     request: LoginRequest,
     supabase: Client = Depends(get_supabase_client),
 ) -> JSONResponse:
+    settings = get_settings()
     result = authenticate(
         supabase,
         request.email,
         request.password,
         request.captcha_token,
+        captcha_required=settings.captcha_enabled,
     )
 
     if result.outcome == LoginOutcome.SUCCESS and result.identity is not None:

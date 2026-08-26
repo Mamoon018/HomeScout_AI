@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { signUp } from '@/features/auth/api/authApi'
 import type { SignupCaptchaControls } from '@/features/auth/hooks/useSignupCaptcha'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 import {
   classifySignupError,
   isDuplicateSignupResponse,
@@ -20,28 +21,37 @@ const SUCCESS_MESSAGE = 'Successfully created an account for you!'
 
 /** Coordinates signup submission state and toast feedback for the signup form. */
 export function useSignup(captcha: SignupCaptchaControls) {
+  const captchaRequired = isCaptchaEnabled()
   const { getCaptchaToken, resetCaptcha, registerCaptchaErrorHandler } = captcha
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   useEffect(() => {
+    if (!captchaRequired) {
+      return
+    }
+
     registerCaptchaErrorHandler(() => {
       logSignupError('captcha-widget', 'connection', {
         source: 'turnstile',
       })
       toast.error(SIGNUP_USER_MESSAGES.connection)
     })
-  }, [registerCaptchaErrorHandler])
+  }, [captchaRequired, registerCaptchaErrorHandler])
 
   async function submitSignup(formData: SignUpFormData) {
-    const captchaToken = getCaptchaToken()
-    if (!captchaToken) {
-      toast.error(CAPTCHA_REQUIRED_MESSAGE)
-      return
+    if (captchaRequired) {
+      const captchaToken = getCaptchaToken()
+      if (!captchaToken) {
+        toast.error(CAPTCHA_REQUIRED_MESSAGE)
+        return
+      }
     }
 
     const validationCategory = validateSignupForm(formData)
     if (validationCategory) {
-      resetCaptcha()
+      if (captchaRequired) {
+        resetCaptcha()
+      }
       logSignupError('client-validation', validationCategory, formData)
       toast.error(SIGNUP_USER_MESSAGES[validationCategory])
       return
@@ -59,11 +69,13 @@ export function useSignup(captcha: SignupCaptchaControls) {
         country: formData.country,
         city: formData.city,
         zipCode: formData.zipCode,
-        captchaToken: getCaptchaToken()!,
+        captchaToken: captchaRequired ? getCaptchaToken()! : undefined,
       })
 
       if (error) {
-        resetCaptcha()
+        if (captchaRequired) {
+          resetCaptcha()
+        }
         const category = classifySignupError(error)
         logSignupError('supabase-signup', category, error)
         toast.error(SIGNUP_USER_MESSAGES[category])
@@ -71,16 +83,22 @@ export function useSignup(captcha: SignupCaptchaControls) {
       }
 
       if (isDuplicateSignupResponse(data)) {
-        resetCaptcha()
+        if (captchaRequired) {
+          resetCaptcha()
+        }
         logSignupError('supabase-signup', 'duplicate_credentials', data)
         toast.error(SIGNUP_USER_MESSAGES.duplicate_credentials)
         return
       }
 
       toast.success(SUCCESS_MESSAGE)
-      resetCaptcha()
+      if (captchaRequired) {
+        resetCaptcha()
+      }
     } catch (error) {
-      resetCaptcha()
+      if (captchaRequired) {
+        resetCaptcha()
+      }
       const category = classifySignupError(error)
       logSignupError('supabase-signup', category, error)
       toast.error(SIGNUP_USER_MESSAGES[category])

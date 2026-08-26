@@ -1,7 +1,19 @@
 import { login } from '@/features/auth/api/authApi'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
+
+vi.mock('@/features/auth/utils/captchaConfig', () => ({
+  isCaptchaEnabled: vi.fn(() => true),
+  getCaptchaSiteKey: () => 'test-site-key',
+}))
+
+const mockedIsCaptchaEnabled = vi.mocked(isCaptchaEnabled)
 
 describe('authApi.login', () => {
   const originalFetch = globalThis.fetch
+
+  beforeEach(() => {
+    mockedIsCaptchaEnabled.mockReturnValue(true)
+  })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
@@ -43,6 +55,35 @@ describe('authApi.login', () => {
     expect(result.status).toBe(200)
     expect(result.data?.user_id).toBe('user-1')
     expect(result.data?.user_name).toBe('Demo User')
+  })
+
+  it('omits captcha_token when captcha is disabled', async () => {
+    mockedIsCaptchaEnabled.mockReturnValue(false)
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        message: 'Login successful',
+        user_id: 'user-1',
+        user_name: 'Demo User',
+      }),
+    })
+    globalThis.fetch = fetchMock
+
+    await login({
+      email: 'demo@homescout.ai',
+      password: 'password123',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/auth/login',
+      expect.objectContaining({
+        body: JSON.stringify({
+          email: 'demo@homescout.ai',
+          password: 'password123',
+        }),
+      }),
+    )
   })
 
   it('returns aborted response when fetch times out at 15s', async () => {

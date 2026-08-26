@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase'
+import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
 export type SignUpParams = {
   email: string
@@ -8,13 +9,13 @@ export type SignUpParams = {
   country: string
   city: string
   zipCode: string
-  captchaToken: string
+  captchaToken?: string
 }
 
 export type LoginParams = {
   email: string
   password: string
-  captchaToken: string
+  captchaToken?: string
 }
 
 export type LoginApiData = {
@@ -32,10 +33,17 @@ export type AuthApiResponse<T> = {
   networkError?: boolean
 }
 
+export type WelcomeApiData = {
+  message?: string
+  error?: string
+}
+
 export type LoginApiResponse = AuthApiResponse<LoginApiData>
+export type WelcomeApiResponse = AuthApiResponse<WelcomeApiData>
 
 const AUTH_API_TIMEOUT_MS = 15000
 const LOGIN_PATH = '/api/auth/login'
+const USER_WELCOME_PATH = '/api/user_welcome'
 
 type SameOriginFetchResult<T> = AuthApiResponse<T>
 
@@ -94,12 +102,13 @@ async function fetchSameOriginJson<T>(
 export async function signUp(params: SignUpParams) {
   // age must be a JSON number (not string) so auth metadata stores a numeric value.
   const age = Math.trunc(params.age)
+  const captchaRequired = isCaptchaEnabled()
 
   return supabase.auth.signUp({
     email: params.email,
     password: params.password,
     options: {
-      captchaToken: params.captchaToken,
+      ...(captchaRequired ? { captchaToken: params.captchaToken } : {}),
       data: {
         full_name: params.fullName,
         age,
@@ -113,13 +122,22 @@ export async function signUp(params: SignUpParams) {
 
 /** Authenticates via a same-origin relative path so Vite can proxy the cookie. */
 export async function login(params: LoginParams): Promise<LoginApiResponse> {
+  const captchaRequired = isCaptchaEnabled()
+
   return fetchSameOriginJson<LoginApiData>(LOGIN_PATH, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email: params.email,
       password: params.password,
-      captcha_token: params.captchaToken,
+      ...(captchaRequired ? { captcha_token: params.captchaToken } : {}),
     }),
+  })
+}
+
+/** Loads the identity-scoped welcome message using the HttpOnly access-token cookie. */
+export async function getUserWelcome(): Promise<WelcomeApiResponse> {
+  return fetchSameOriginJson<WelcomeApiData>(USER_WELCOME_PATH, {
+    method: 'GET',
   })
 }

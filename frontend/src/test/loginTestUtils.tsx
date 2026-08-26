@@ -1,16 +1,33 @@
+import { useEffect } from 'react'
 import { render, screen } from '@testing-library/react'
 import type { UserEvent } from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { LoginForm } from '@/components/login-form'
 import { Toaster } from '@/components/ui/sonner'
 
+/** Records the current MemoryRouter pathname so tests can assert navigation. */
+function LocationProbe({ onPath }: { onPath: (path: string) => void }) {
+  const location = useLocation()
+  useEffect(() => {
+    onPath(location.pathname)
+  }, [location.pathname, onPath])
+  return null
+}
+
 export function renderLoginForm() {
-  return render(
+  const path = { current: '/' }
+  const result = render(
     <MemoryRouter>
       <LoginForm />
       <Toaster />
+      <LocationProbe
+        onPath={(pathname) => {
+          path.current = pathname
+        }}
+      />
     </MemoryRouter>,
   )
+  return { ...result, path }
 }
 
 export function getSubmitButton() {
@@ -33,7 +50,7 @@ export async function openLoginCaptchaWidget(user: UserEvent) {
 export async function completeLoginCaptcha(user: UserEvent) {
   await openLoginCaptchaWidget(user)
   await user.click(
-    screen.getByRole('button', { name: 'Complete captcha challenge' }),
+    await screen.findByRole('button', { name: 'Complete captcha challenge' }),
   )
 }
 

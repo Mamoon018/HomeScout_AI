@@ -20,6 +20,11 @@ import {
   renderSignupForm,
 } from '@/test/signupTestUtils'
 
+vi.mock('@/features/auth/utils/captchaConfig', () => ({
+  isCaptchaEnabled: () => true,
+  getCaptchaSiteKey: () => 'test-site-key',
+}))
+
 vi.mock('@marsidev/react-turnstile', () => ({
   Turnstile: MockTurnstile,
 }))

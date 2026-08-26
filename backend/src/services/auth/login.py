@@ -119,11 +119,16 @@ def _auth_error_code(error: AuthApiError | AuthError) -> str | None:
     return code if isinstance(code, str) else None
 
 
+CAPTCHA_REQUIRED_MESSAGE = "Please complete the captcha challenge and try again."
+
+
 def authenticate(
     client: Client,
     email: str,
     password: str,
-    captcha_token: str,
+    captcha_token: str | None,
+    *,
+    captcha_required: bool,
 ) -> LoginResult:
     normalized_email = email.lower()
 
@@ -133,19 +138,26 @@ def authenticate(
             error="Too many login attempts. Please try again later.",
         )
 
-    try:
-        response = client.auth.sign_in_with_password(
-            {
-                "email": normalized_email,
-                "password": password,
-                "options": {"captcha_token": captcha_token},
-            }
+    if captcha_required and (not captcha_token or not captcha_token.strip()):
+        return LoginResult(
+            outcome=LoginOutcome.INVALID_CREDENTIALS,
+            error=CAPTCHA_REQUIRED_MESSAGE,
         )
+
+    sign_in_payload: dict[str, object] = {
+        "email": normalized_email,
+        "password": password,
+    }
+    if captcha_required:
+        sign_in_payload["options"] = {"captcha_token": captcha_token}
+
+    try:
+        response = client.auth.sign_in_with_password(sign_in_payload)
     except (AuthApiError, AuthError) as error:
         if _auth_error_code(error) == "captcha_failed":
             return LoginResult(
                 outcome=LoginOutcome.INVALID_CREDENTIALS,
-                error="Please complete the captcha challenge and try again.",
+                error=CAPTCHA_REQUIRED_MESSAGE,
             )
 
         _failed_attempts[normalized_email] = _failed_attempts.get(normalized_email, 0) + 1

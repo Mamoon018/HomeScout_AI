@@ -18,6 +18,8 @@ cp .env.example .env
 |----------|---------|
 | `SUPABASE_URL` | Supabase project URL (server-side only) |
 | `SUPABASE_PUBLISHABLE_KEY` | Publishable API key for the Supabase SDK client |
+| `CAPTCHA_ENABLED` | When `false`, login skips Turnstile verification (local dev). Defaults to `true`. |
+| `LOG_LEVEL` | Application log level for `homescout.auth` (`INFO` or `DEBUG`). Set `DEBUG` locally to see verified token claims. |
 
 `.env` is gitignored. Do **not** use `VITE_` prefixes — those would be exposed to the frontend bundle. Do not put the service-role / secret key in this app or in the frontend.
 
