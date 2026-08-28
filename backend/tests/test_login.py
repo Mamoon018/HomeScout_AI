@@ -4,9 +4,12 @@ from httpx import ASGITransport, AsyncClient
 from src.app.api.dependencies.supabase import get_supabase_client
 from src.app.main import app
 from src.core.config import get_settings
-from src.services.auth.login import (
+from src.services.auth.session_cookies import (
     ACCESS_TOKEN_COOKIE_POLICY,
     REFRESH_TOKEN_COOKIE_POLICY,
+    REFRESH_TOKEN_MAX_AGE,
+)
+from src.services.auth.login import (
     CAPTCHA_REQUIRED_MESSAGE,
     MAX_FAILED_ATTEMPTS,
     authenticate,
@@ -170,7 +173,10 @@ def _cookie_header_for(headers: list[str], name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_login_route_success_sets_access_and_refresh_cookies(client: AsyncClient):
+async def test_login_route_success_sets_access_and_refresh_cookies(
+    client: AsyncClient,
+    auth_caplog,
+):
     response = await client.post(
         LOGIN_ENDPOINT,
         json=LOGIN_PAYLOAD,
@@ -181,6 +187,17 @@ async def test_login_route_success_sets_access_and_refresh_cookies(client: Async
         "user_id": "user-1",
         "user_name": TEST_USER_NAME,
     }
+    assert any(
+        "login succeeded user_id=user-1 jwt_expires_in=3600 access_cookie_max_age=2592000"
+        in record.message
+        for record in auth_caplog.records
+    )
+    assert any(
+        "session cookies sent" in record.message
+        and "jwt_expires_in=3600" in record.message
+        and "access_cookie_max_age=2592000" in record.message
+        for record in auth_caplog.records
+    )
     headers = _set_cookie_headers(response)
     access = _cookie_header_for(headers, "access_token")
     refresh = _cookie_header_for(headers, "refresh_token")
@@ -188,7 +205,7 @@ async def test_login_route_success_sets_access_and_refresh_cookies(client: Async
     assert "secure" in access
     assert "samesite=strict" in access
     assert "path=/" in access
-    assert "max-age=3600" in access
+    assert f"max-age={REFRESH_TOKEN_MAX_AGE}" in access
     assert "httponly" in refresh
     assert "secure" in refresh
     assert "samesite=strict" in refresh

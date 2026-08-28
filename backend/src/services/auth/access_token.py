@@ -2,16 +2,22 @@ from dataclasses import dataclass
 from typing import Any
 
 import jwt
-from jwt import InvalidTokenError, PyJWKClient
+from jwt import ExpiredSignatureError, InvalidTokenError, PyJWKClient
 
 from src.core.config import Settings
 
 # Publishable-key projects sign user access tokens with asymmetric keys, not HS256.
 ALLOWED_ALGORITHMS = ("ES256", "RS256")
+# Tolerate small clock skew between Supabase and this API when tokens are minted/refreshed.
+JWT_LEEWAY_SECONDS = 10
 
 
 class TokenVerificationError(Exception):
     """Raised when a JWT cannot be verified locally for this API."""
+
+
+class TokenExpiredError(TokenVerificationError):
+    """Raised when a JWT signature is valid but the token has expired."""
 
 
 @dataclass(frozen=True)
@@ -61,11 +67,14 @@ class AccessTokenVerifier:
                 algorithms=list(ALLOWED_ALGORITHMS),
                 audience=self._audience,
                 issuer=self._issuer,
+                leeway=JWT_LEEWAY_SECONDS,
                 options={
                     "require": ["aud", "exp", "sub", "iss"],
                     "verify_aud": True,
                 },
             )
+        except ExpiredSignatureError as exc:
+            raise TokenExpiredError("Access token has expired") from exc
         except InvalidTokenError as exc:
             raise TokenVerificationError("Token signature or claims are invalid") from exc
 

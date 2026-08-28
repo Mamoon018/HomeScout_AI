@@ -4,7 +4,8 @@ import pytest
 
 from src.app.api.dependencies.supabase import get_access_token_verifier, get_supabase_client
 from src.app.main import app
-from src.services.auth.login import ACCESS_TOKEN_COOKIE_POLICY, reset_failed_attempts
+from src.services.auth.session_cookies import ACCESS_TOKEN_COOKIE_POLICY
+from src.services.auth.login import reset_failed_attempts
 from src.services.welcome.message import get_welcome_message
 from tests.conftest import (
     FakeSupabaseClient,
@@ -75,7 +76,7 @@ async def test_welcome_expired_token_returns_401(client: AsyncClient):
     _set_access_cookie(client, mint_access_token(expires_in_seconds=-10))
     response = await client.get(WELCOME_ENDPOINT)
     assert response.status_code == 401
-    assert response.json() == UNAUTHENTICATED
+    assert response.json() == {"error": "Not authenticated", "code": "token_expired"}
 
 
 @pytest.mark.asyncio

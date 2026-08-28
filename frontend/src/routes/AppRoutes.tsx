@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { getUserWelcome } from '@/features/auth/api/authApi'
+import { clearAuthUser } from '@/features/auth/utils/authUserStore'
 import { welcomeMessageFromResponse } from '@/features/auth/utils/welcomeMessage'
 import { HomePage } from '@/pages/HomePage'
 import { LoginPage } from '@/pages/LoginPage'
@@ -10,6 +11,7 @@ function HomeRoute() {
   const navigate = useNavigate()
   const [message, setMessage] = useState<string | null>(null)
   const onUnauthenticated = useCallback(() => {
+    clearAuthUser()
     navigate('/auth/login', { replace: true })
   }, [navigate])
 

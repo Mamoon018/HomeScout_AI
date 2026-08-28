@@ -1,6 +1,6 @@
 import pytest
 
-from src.services.auth.access_token import TokenVerificationError
+from src.services.auth.access_token import TokenExpiredError, TokenVerificationError
 from tests.conftest import mint_access_token, make_access_token_verifier
 
 
@@ -42,5 +42,5 @@ def test_verify_rejects_hs256_even_if_decodeable():
 def test_verify_rejects_expired_token():
     verifier = make_access_token_verifier()
     token = mint_access_token(expires_in_seconds=-10)
-    with pytest.raises(TokenVerificationError):
+    with pytest.raises(TokenExpiredError):
         verifier.verify(token)

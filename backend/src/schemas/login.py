@@ -15,3 +15,4 @@ class LoginResponse(BaseModel):
 
 class LoginError(BaseModel):
     error: str
+    code: str | None = None

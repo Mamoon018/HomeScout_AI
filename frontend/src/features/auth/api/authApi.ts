@@ -1,3 +1,4 @@
+import { apiFetch, fetchJson } from '@/lib/apiClient'
 import { supabase } from '@/lib/supabase'
 import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
@@ -21,6 +22,7 @@ export type LoginParams = {
 export type LoginApiData = {
   message?: string
   error?: string
+  code?: string
   user_id?: string
   user_name?: string | null
 }
@@ -36,67 +38,23 @@ export type AuthApiResponse<T> = {
 export type WelcomeApiData = {
   message?: string
   error?: string
+  code?: string
+}
+
+export type RefreshApiData = {
+  message?: string
+  error?: string
 }
 
 export type LoginApiResponse = AuthApiResponse<LoginApiData>
 export type WelcomeApiResponse = AuthApiResponse<WelcomeApiData>
+export type RefreshApiResponse = AuthApiResponse<RefreshApiData>
 
-const AUTH_API_TIMEOUT_MS = 15000
 const LOGIN_PATH = '/api/auth/login'
+const REFRESH_PATH = '/auth/refresh'
 const USER_WELCOME_PATH = '/api/user_welcome'
 
-type SameOriginFetchResult<T> = AuthApiResponse<T>
-
-async function fetchSameOriginJson<T>(
-  path: string,
-  init: RequestInit,
-): Promise<SameOriginFetchResult<T>> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), AUTH_API_TIMEOUT_MS)
-
-  try {
-    const response = await fetch(path, {
-      ...init,
-      credentials: 'include',
-      signal: controller.signal,
-    })
-
-    let data: T | null = null
-    try {
-      data = (await response.json()) as T
-    } catch {
-      data = null
-    }
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      data,
-    }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      return {
-        ok: false,
-        status: 0,
-        data: null,
-        aborted: true,
-      }
-    }
-
-    if (error instanceof TypeError) {
-      return {
-        ok: false,
-        status: 0,
-        data: null,
-        networkError: true,
-      }
-    }
-
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
-}
+let welcomeInFlight: Promise<WelcomeApiResponse> | null = null
 
 /** Registers a new user via Supabase Auth browser client. */
 export async function signUp(params: SignUpParams) {
@@ -124,20 +82,44 @@ export async function signUp(params: SignUpParams) {
 export async function login(params: LoginParams): Promise<LoginApiResponse> {
   const captchaRequired = isCaptchaEnabled()
 
-  return fetchSameOriginJson<LoginApiData>(LOGIN_PATH, {
+  return apiFetch<LoginApiData>(
+    LOGIN_PATH,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: params.email,
+        password: params.password,
+        ...(captchaRequired ? { captcha_token: params.captchaToken } : {}),
+      }),
+    },
+    { skipRefresh: true },
+  )
+}
+
+/** Exchanges the path-scoped refresh cookie for rotated session cookies. */
+export async function refreshSession(): Promise<RefreshApiResponse> {
+  return fetchJson<RefreshApiData>(REFRESH_PATH, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      email: params.email,
-      password: params.password,
-      ...(captchaRequired ? { captcha_token: params.captchaToken } : {}),
-    }),
   })
 }
 
 /** Loads the identity-scoped welcome message using the HttpOnly access-token cookie. */
 export async function getUserWelcome(): Promise<WelcomeApiResponse> {
-  return fetchSameOriginJson<WelcomeApiData>(USER_WELCOME_PATH, {
+  if (welcomeInFlight) {
+    return welcomeInFlight
+  }
+
+  welcomeInFlight = apiFetch<WelcomeApiData>(USER_WELCOME_PATH, {
     method: 'GET',
+  }).finally(() => {
+    welcomeInFlight = null
   })
+
+  return welcomeInFlight
+}
+
+/** Resets welcome dedup state — for tests only. */
+export function resetWelcomeStateForTests(): void {
+  welcomeInFlight = null
 }

@@ -1,17 +1,26 @@
 import logging
 from typing import NoReturn
 
+import jwt
 from fastapi import Depends, HTTPException, Request, status
+from jwt import InvalidTokenError
 
 from src.app.api.dependencies.supabase import get_access_token_verifier
 from src.schemas.authenticated_user import AuthenticatedUser
 from src.schemas.login import LoginError
-from src.services.auth.access_token import AccessTokenVerifier, TokenVerificationError
-from src.services.auth.login import ACCESS_TOKEN_COOKIE_POLICY
+from src.services.auth.access_token import (
+    AccessTokenVerifier,
+    TokenExpiredError,
+    TokenVerificationError,
+)
+from src.services.auth.session_cookies import ACCESS_TOKEN_COOKIE_POLICY
 
 logger = logging.getLogger("homescout.auth")
 
-UNAUTHENTICATED_BODY = LoginError(error="Not authenticated").model_dump()
+UNAUTHENTICATED_BODY = LoginError(error="Not authenticated").model_dump(exclude_none=True)
+TOKEN_EXPIRED_BODY = LoginError(
+    error="Not authenticated", code="token_expired"
+).model_dump(exclude_none=True)
 
 
 def _reject_unauthenticated(reason: str) -> NoReturn:
@@ -19,6 +28,35 @@ def _reject_unauthenticated(reason: str) -> NoReturn:
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=UNAUTHENTICATED_BODY,
+    )
+
+
+def _log_verification_failure(token: str, exc: TokenVerificationError) -> None:
+    detail = str(exc)
+    claims_summary = "unavailable"
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+        if isinstance(claims, dict):
+            claims_summary = (
+                f"iss={claims.get('iss')!r} aud={claims.get('aud')!r} "
+                f"sub={claims.get('sub')!r} exp={claims.get('exp')!r}"
+            )
+    except InvalidTokenError:
+        claims_summary = "unparseable"
+
+    logger.info(
+        "token verification failed detail=%s claims=%s token_len=%s",
+        detail,
+        claims_summary,
+        len(token),
+    )
+
+
+def _reject_token_expired() -> NoReturn:
+    logger.info("identity rejected reason=token_expired")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=TOKEN_EXPIRED_BODY,
     )
 
 
@@ -33,7 +71,10 @@ def get_authenticated_user(
 
     try:
         verified = verifier.verify(token)
+    except TokenExpiredError:
+        _reject_token_expired()
     except TokenVerificationError as exc:
+        _log_verification_failure(token, exc)
         _reject_unauthenticated(str(exc))
 
     if not verified.email or not verified.user_name:
