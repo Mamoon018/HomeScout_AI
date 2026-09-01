@@ -1,0 +1,11 @@
+__pycache__/
+.venv
+.git
+.env
+.gitignore
+tests/
+certs/
+*.md
+pytest.ini
+Dockerfile
+.dockerignore

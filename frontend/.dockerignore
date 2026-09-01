@@ -1,0 +1,10 @@
+dist/
+node_modules/
+components.json
+eslint.config.js
+README.md
+.gitignore
+.env/
+**/*.test.ts
+**/*.test.tsx
+src/test/

@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from src.app.api.routes.auth import router as auth_router
+from src.app.api.routes.health_check import router as health_check_router
 from src.app.api.routes.welcome import router as welcome_router
 from src.clients.supabase import create_supabase_client
 from src.core.config import get_settings
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="HomeScout Auth", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(health_check_router)
 app.include_router(welcome_router)
 
 
