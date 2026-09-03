@@ -2,8 +2,9 @@ import logging
 import sys
 
 AUTH_LOGGER_NAME = "homescout.auth"
+PLACES_LOGGER_NAME = "homescout.places"
 _LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
-_auth_handler: logging.StreamHandler | None = None
+_shared_handler: logging.StreamHandler | None = None
 
 
 def _resolve_level(level_name: str) -> int:
@@ -11,19 +12,20 @@ def _resolve_level(level_name: str) -> int:
 
 
 def configure_logging(level_name: str = "INFO") -> None:
-    """Attach a dedicated handler to homescout.auth so uvicorn cannot silence it."""
-    global _auth_handler
+    """Attach a dedicated stderr handler to app loggers so uvicorn cannot silence them."""
+    global _shared_handler
 
     level = _resolve_level(level_name)
-    auth_logger = logging.getLogger(AUTH_LOGGER_NAME)
-    auth_logger.setLevel(level)
-    auth_logger.propagate = False
 
-    if _auth_handler is None:
-        _auth_handler = logging.StreamHandler(sys.stderr)
-        _auth_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-        auth_logger.addHandler(_auth_handler)
-    elif _auth_handler not in auth_logger.handlers:
-        auth_logger.addHandler(_auth_handler)
+    if _shared_handler is None:
+        _shared_handler = logging.StreamHandler(sys.stderr)
+        _shared_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
 
-    _auth_handler.setLevel(level)
+    _shared_handler.setLevel(level)
+
+    for name in (AUTH_LOGGER_NAME, PLACES_LOGGER_NAME):
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        logger.propagate = False
+        if _shared_handler not in logger.handlers:
+            logger.addHandler(_shared_handler)

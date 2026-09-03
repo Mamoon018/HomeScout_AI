@@ -8,7 +8,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    """Server-only auth settings loaded from environment variables."""
+    """Server-only settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
         env_file=_BACKEND_ROOT / ".env",
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         default="authenticated",
         validation_alias="SUPABASE_JWT_AUDIENCE",
     )
+    google_maps_api: str = Field(validation_alias="GOOGLE_MAPS_API")
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 

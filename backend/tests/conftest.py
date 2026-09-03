@@ -16,6 +16,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 os.environ["SUPABASE_URL"] = "https://example.supabase.co"
 os.environ["SUPABASE_PUBLISHABLE_KEY"] = "sb_publishable_test_key"
 os.environ["SUPABASE_JWT_AUDIENCE"] = "authenticated"
+os.environ["GOOGLE_MAPS_API"] = "test-google-maps-api-key"
 
 from src.core.config import get_settings
 from src.core.logging import AUTH_LOGGER_NAME
