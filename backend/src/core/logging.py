@@ -3,6 +3,7 @@ import sys
 
 AUTH_LOGGER_NAME = "homescout.auth"
 PLACES_LOGGER_NAME = "homescout.places"
+DEEP_SEARCH_LOGGER_NAME = "homescout.deep_search"
 _LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 _shared_handler: logging.StreamHandler | None = None
 
@@ -23,7 +24,7 @@ def configure_logging(level_name: str = "INFO") -> None:
 
     _shared_handler.setLevel(level)
 
-    for name in (AUTH_LOGGER_NAME, PLACES_LOGGER_NAME):
+    for name in (AUTH_LOGGER_NAME, PLACES_LOGGER_NAME, DEEP_SEARCH_LOGGER_NAME):
         logger = logging.getLogger(name)
         logger.setLevel(level)
         logger.propagate = False

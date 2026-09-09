@@ -26,6 +26,22 @@ class Settings(BaseSettings):
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
+    openai_api_key: str = Field(validation_alias="OPENAI_API_KEY")
+    openai_extraction_model: str = Field(
+        default="gpt-4o-2024-08-06",
+        validation_alias="OPENAI_EXTRACTION_MODEL",
+    )
+    groq_api_key: str = Field(validation_alias="GROQ_API_KEY")
+    groq_extraction_model: str = Field(
+        default="openai/gpt-oss-120b",
+        validation_alias="GROQ_EXTRACTION_MODEL",
+    )
+    # Comma-separated provider names; the first entry is the primary.
+    llm_provider_order: str = Field(
+        default="openai,groq",
+        validation_alias="LLM_PROVIDER_ORDER",
+    )
+
     @property
     def supabase_jwt_issuer(self) -> str:
         return f"{self.supabase_url.rstrip('/')}/auth/v1"
@@ -38,3 +54,20 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
