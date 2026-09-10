@@ -396,3 +396,8 @@ discards it.
 - **`model` on the provider protocol.** §4.3 and §4.4 both put the model id in the stage 4
   attempt line, so the protocol exposes a read-only `model` beside `name`. Without it the
   stage would have to reach into an SDK client to log what it was told to log.
+
+
+
+
+

@@ -28,9 +28,13 @@ BUCKETS
 (c) ambiguity_flags — a phrase that has two or more reasonable readings which would lead to
     different categories, different characteristics, or a different scope, where the text
     gives no confident basis to pick one. Set `target` to what the phrase is about:
-    "category", "characteristic", or "persona". Flagging a phrase does not remove it from
-    its bucket: an ambiguous category is still recorded in explicit_categories, and an
-    ambiguous quality is still recorded under its category.
+    "category", "characteristic", or "persona". Every flag also carries `category` and
+    `characteristic`: for a "characteristic" flag, set `category` to the named category the
+    quality belongs to and `characteristic` to the quality itself; for a "category" or
+    "persona" flag, set both to null. Both keys are always present, using null when they do
+    not apply. Flagging a phrase does not remove it from its bucket: an ambiguous category is
+    still recorded in explicit_categories, and an ambiguous quality is still recorded under
+    its category.
 
 (d) persona_facts — facts about who the customer is, their situation, and their lifestyle:
     household, work pattern, transport, routine, budget, timing, and anything else that is
@@ -135,9 +139,24 @@ _FEW_SHOT_PAIRS: tuple[tuple[str, dict], ...] = (
                 },
             ],
             "ambiguity_flags": [
-                {"phrase": "good school", "target": "characteristic"},
-                {"phrase": "somewhere decent to eat", "target": "characteristic"},
-                {"phrase": "a place to get my shopping done", "target": "category"},
+                {
+                    "phrase": "good school",
+                    "target": "characteristic",
+                    "category": "school",
+                    "characteristic": "good",
+                },
+                {
+                    "phrase": "somewhere decent to eat",
+                    "target": "characteristic",
+                    "category": "somewhere decent to eat",
+                    "characteristic": "decent",
+                },
+                {
+                    "phrase": "a place to get my shopping done",
+                    "target": "category",
+                    "category": None,
+                    "characteristic": None,
+                },
             ],
             "persona_facts": [],
         },

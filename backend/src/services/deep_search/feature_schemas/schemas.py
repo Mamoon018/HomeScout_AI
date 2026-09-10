@@ -1,10 +1,22 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.services.deep_search.feature_schemas.amenity_taxonomy import (
+    AMENITY_TAXONOMY_NODES,
+)
+
 # The schema name the provider echoes back with the constrained body.
 EXTRACTION_SCHEMA_NAME = "extracted_requirements"
+
+# Component 2A's two constrained operations echo these schema names back with their bodies.
+TAXONOMY_MAPPING_SCHEMA_NAME = "taxonomy_mapping_result"
+FLAG_RESOLUTION_SCHEMA_NAME = "flag_resolution_result"
+
+# Provenance values a resolved category can carry: a confident mapping, or a nearest-node
+# fallback applied only in Operation 2 once a user response exists.
+Provenance = Literal["confident", "nearest_node"]
 
 
 class ExtractedCategory(BaseModel):
@@ -40,6 +52,21 @@ class AmbiguityFlag(BaseModel):
             "itself is unclear, 'characteristic' when a stated quality is unclear, "
             "'persona' when a situation or lifestyle statement is unclear."
         )
+    )
+    category: str | None = Field(
+        default=None,
+        description=(
+            "The explicit category this flag belongs to, in the customer's own wording, "
+            "when the flag is about a quality of a named category. Null when the category "
+            "itself is what is ambiguous, or when the flag is about a persona fact."
+        ),
+    )
+    characteristic: str | None = Field(
+        default=None,
+        description=(
+            "The specific quality that is ambiguous, when the flag targets a "
+            "characteristic. Null for category and persona flags."
+        ),
     )
 
 
@@ -92,6 +119,120 @@ def _apply_strict_object_rules(node: Any) -> None:
             _apply_strict_object_rules(value)
 
 
+class MappedCategory(BaseModel):
+    """One confident Operation 1 mapping of a raw category onto a taxonomy node."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    taxonomy_node: str = Field(
+        description=(
+            "The single taxonomy node this raw category maps to. Must be one of the nodes "
+            "in the provided taxonomy exactly; do not invent, rename, or return a node "
+            "outside the list."
+        )
+    )
+    raw_name: str = Field(
+        description=(
+            "The raw category name exactly as it appeared in the extraction input, copied "
+            "verbatim so its characteristics can be reattached programmatically."
+        )
+    )
+
+
+class TaxonomyMappingResult(BaseModel):
+    """Operation 1 output: confident mappings plus flags for what could not be mapped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolved_categories: list[MappedCategory] = Field(
+        description=(
+            "Every raw category that maps confidently to exactly one taxonomy node. Empty "
+            "list when none mapped confidently."
+        )
+    )
+    ambiguity_flags: list[AmbiguityFlag] = Field(
+        description=(
+            "A raw category that cannot be confidently mapped to a single taxonomy node, "
+            "emitted as a flag with target 'category' and phrase set to the raw category "
+            "name. Empty list when every raw category mapped."
+        )
+    )
+
+
+class ResolvedFlagEntry(BaseModel):
+    """One Operation 2 resolution of a category flag against its paired user response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    taxonomy_node: str = Field(
+        description=(
+            "The single taxonomy node this category flag resolves to. Must be one of the "
+            "nodes in the provided taxonomy exactly."
+        )
+    )
+    raw_name: str = Field(
+        description=(
+            "The flag phrase exactly as it appeared, copied verbatim so characteristics "
+            "can be reattached programmatically."
+        )
+    )
+    provenance: Provenance = Field(
+        description=(
+            "'confident' when the paired user response gives clear evidence for the node; "
+            "'nearest_node' when the response is still insufficient and the nearest "
+            "most-fitting node was chosen."
+        )
+    )
+
+
+class FlagResolutionResult(BaseModel):
+    """Operation 2 output: one resolved entry per category flag that was submitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolved_categories: list[ResolvedFlagEntry] = Field(
+        description="One resolved taxonomy entry for every {flag, response} pair submitted."
+    )
+
+
+class UserResponse(BaseModel):
+    """One clarification answer Component 2B wrote, keyed on a state by the flag phrase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(description="The clarification question that was asked.")
+    response: str = Field(description="The customer's answer to that question.")
+
+
+def taxonomy_mapping_json_schema() -> dict:
+    """Strict Operation 1 schema derived from the wire model, with the taxonomy enum."""
+    schema = TaxonomyMappingResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    _inject_taxonomy_node_enum(schema)
+    return schema
+
+
+def flag_resolution_json_schema() -> dict:
+    """Strict Operation 2 schema derived from the wire model, with the taxonomy enum."""
+    schema = FlagResolutionResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    _inject_taxonomy_node_enum(schema)
+    return schema
+
+
+def _inject_taxonomy_node_enum(node: Any) -> None:
+    """Constrain every `taxonomy_node` property to the real maintained nodes by enum."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "taxonomy_node" and isinstance(value, dict):
+                value["enum"] = list(AMENITY_TAXONOMY_NODES)
+            else:
+                _inject_taxonomy_node_enum(value)
+    elif isinstance(node, list):
+        for value in node:
+            _inject_taxonomy_node_enum(value)
+
+
 @dataclass(frozen=True)
 class PayloadRecord:
     """The bounded, normalized input the extraction call is made against."""
@@ -101,8 +242,30 @@ class PayloadRecord:
 
 
 @dataclass
+class ResolvedCategory:
+    """One taxonomy-mapped category carried on the ResolvedRequirements output object."""
+
+    taxonomy_node: str
+    raw_name: str
+    characteristics: list[str]
+    provenance: Provenance
+
+
+@dataclass
+class ResolvedRequirements:
+    """Component 2A's output object; Operation 2 appends resolved categories in place."""
+
+    payload: PayloadRecord
+    resolved_explicit_categories: list[ResolvedCategory]
+    ambiguity_flags: list[AmbiguityFlag]
+    persona_facts: list[str]
+
+
+@dataclass
 class RequirementInterpretationState:
     """Handoff object for Component 2A, which appends its results to this same object."""
 
     payload: PayloadRecord
     extracted: ExtractedRequirements
+    user_responses: dict[str, UserResponse] = field(default_factory=dict)
+    resolved: ResolvedRequirements | None = None
