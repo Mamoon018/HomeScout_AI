@@ -36,6 +36,15 @@ class ExtractedCategory(BaseModel):
             "wording. Empty list when the category was named with no qualities attached."
         )
     )
+    # Assigned in code by list position after the extraction call. Excluded from the
+    # provider schema so the model never emits or invents it.
+    category_id: int | None = Field(
+        default=None,
+        description=(
+            "Stable identity of this explicit category, assigned programmatically by list "
+            "position when extraction is assembled. Not produced by the extraction model."
+        ),
+    )
 
 
 class AmbiguityFlag(BaseModel):
@@ -66,6 +75,15 @@ class AmbiguityFlag(BaseModel):
         description=(
             "The specific quality that is ambiguous, when the flag targets a "
             "characteristic. Null for category and persona flags."
+        ),
+    )
+    # Stamped in the same extraction-assembly pass as ExtractedCategory.category_id.
+    # Excluded from the extraction provider schema; required on every target=category flag.
+    category_id: int | None = Field(
+        default=None,
+        description=(
+            "The category_id of the backing explicit_categories entry, when this flag "
+            "targets a category. Null for characteristic and persona flags."
         ),
     )
 
@@ -99,10 +117,32 @@ class ExtractedRequirements(BaseModel):
 
 
 def extraction_json_schema() -> dict:
-    """Strict provider schema derived from the wire model."""
+    """Strict provider schema derived from the wire model.
+
+    `category_id` is stamped in code after the call, so it is stripped before the schema
+    is closed. The extraction model returns categories in order and flags without ids.
+    """
     schema = ExtractedRequirements.model_json_schema()
+    _strip_programmatic_identity_fields(schema)
     _apply_strict_object_rules(schema)
     return schema
+
+
+_PROGRAMMATIC_IDENTITY_FIELDS = frozenset({"category_id"})
+
+
+def _strip_programmatic_identity_fields(node: Any) -> None:
+    """Remove fields the extraction model must not emit from a JSON-schema tree."""
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for field_name in _PROGRAMMATIC_IDENTITY_FIELDS:
+                properties.pop(field_name, None)
+        for value in node.values():
+            _strip_programmatic_identity_fields(value)
+    elif isinstance(node, list):
+        for value in node:
+            _strip_programmatic_identity_fields(value)
 
 
 def _apply_strict_object_rules(node: Any) -> None:
@@ -120,41 +160,40 @@ def _apply_strict_object_rules(node: Any) -> None:
 
 
 class MappedCategory(BaseModel):
-    """One confident Operation 1 mapping of a raw category onto a taxonomy node."""
+    """One confident Operation 1 mapping of a labeled explicit category onto a taxonomy node."""
 
     model_config = ConfigDict(extra="forbid")
 
     taxonomy_node: str = Field(
         description=(
-            "The single taxonomy node this raw category maps to. Must be one of the nodes "
+            "The single taxonomy node this category maps to. Must be one of the nodes "
             "in the provided taxonomy exactly; do not invent, rename, or return a node "
             "outside the list."
         )
     )
-    raw_name: str = Field(
+    category_id: int = Field(
         description=(
-            "The raw category name exactly as it appeared in the extraction input, copied "
-            "verbatim so its characteristics can be reattached programmatically."
+            "The category_id of the explicit category being mapped, echoed from the input. "
+            "Do not invent an id or copy a name; echo only the id you were handed."
         )
     )
 
 
 class TaxonomyMappingResult(BaseModel):
-    """Operation 1 output: confident mappings plus flags for what could not be mapped."""
+    """Operation 1 output: confident mappings plus ids for what could not be mapped."""
 
     model_config = ConfigDict(extra="forbid")
 
     resolved_categories: list[MappedCategory] = Field(
         description=(
-            "Every raw category that maps confidently to exactly one taxonomy node. Empty "
-            "list when none mapped confidently."
+            "Every explicit category that maps confidently to exactly one taxonomy node. "
+            "Empty list when none mapped confidently."
         )
     )
-    ambiguity_flags: list[AmbiguityFlag] = Field(
+    unmapped_category_ids: list[int] = Field(
         description=(
-            "A raw category that cannot be confidently mapped to a single taxonomy node, "
-            "emitted as a flag with target 'category' and phrase set to the raw category "
-            "name. Empty list when every raw category mapped."
+            "The category_id of every explicit category that cannot be confidently mapped "
+            "to a single taxonomy node. Empty list when every category mapped."
         )
     )
 
@@ -170,10 +209,10 @@ class ResolvedFlagEntry(BaseModel):
             "nodes in the provided taxonomy exactly."
         )
     )
-    raw_name: str = Field(
+    category_id: int = Field(
         description=(
-            "The flag phrase exactly as it appeared, copied verbatim so characteristics "
-            "can be reattached programmatically."
+            "The category_id of the category flag being resolved, echoed from the input. "
+            "Do not invent an id or copy a name."
         )
     )
     provenance: Provenance = Field(
@@ -196,11 +235,14 @@ class FlagResolutionResult(BaseModel):
 
 
 class UserResponse(BaseModel):
-    """One clarification answer Component 2B wrote, keyed on a state by the flag phrase."""
+    """One clarification answer Component 2B wrote, keyed on the state by category_id."""
 
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(description="The clarification question that was asked.")
+    options: list[str] = Field(
+        description="The candidate interpretations that were shown with the question."
+    )
     response: str = Field(description="The customer's answer to that question.")
 
 
@@ -245,6 +287,7 @@ class PayloadRecord:
 class ResolvedCategory:
     """One taxonomy-mapped category carried on the ResolvedRequirements output object."""
 
+    category_id: int
     taxonomy_node: str
     raw_name: str
     characteristics: list[str]
@@ -267,5 +310,5 @@ class RequirementInterpretationState:
 
     payload: PayloadRecord
     extracted: ExtractedRequirements
-    user_responses: dict[str, UserResponse] = field(default_factory=dict)
+    user_responses: dict[int, UserResponse] = field(default_factory=dict)
     resolved: ResolvedRequirements | None = None

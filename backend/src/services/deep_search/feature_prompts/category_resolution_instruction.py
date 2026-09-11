@@ -16,36 +16,40 @@ from src.services.deep_search.feature_schemas.amenity_taxonomy import render_tax
 # ---------------------------------------------------------------------------------------
 
 MAPPING_TASK_STATEMENT = """\
-You map a customer's raw amenity categories onto a maintained amenity-category taxonomy. You
-receive the Mechanism 1 extraction (the raw categories with their characteristics, the
-ambiguity flags, and persona facts) and the full taxonomy. For each raw category, select the
-single taxonomy node that best fits what the customer meant, using the category name, its
-characteristics, and the surrounding persona context. You do not search, score, or answer the
-customer; you only decide which taxonomy node each raw category belongs to."""
+You map a customer's explicit amenity categories onto a maintained amenity-category taxonomy. You
+receive the Mechanism 1 extraction (each explicit category already labeled with a category_id,
+its characteristics, the ambiguity flags, and persona facts) and the full taxonomy. For each
+explicit category, select the single taxonomy node that best fits what the customer meant, using
+the category name, its characteristics, and the surrounding persona context. Echo only the
+category_id you were handed. You do not search, score, or answer the customer; you only decide
+which taxonomy node each labeled category belongs to."""
 
 MAPPING_RULES = """\
 MAPPING RULES
 
-- Map each raw category to exactly one node from the taxonomy below, chosen by meaning and
+- Map each explicit category to exactly one node from the taxonomy below, chosen by meaning and
   context, not by surface word overlap. "a large grocery store" is a supermarket, not a
   convenience_store.
 - Use the characteristics and persona facts to disambiguate scope. "somewhere to grab a quick
   coffee" is a coffee_shop; "a quiet place to read" near a mention of borrowing books is a
   library.
-- Copy `raw_name` verbatim from the extraction so its characteristics can be reattached later.
-- A raw category you can map confidently to one node goes in `resolved_categories`.
-- A raw category you cannot confidently map to a single node becomes an item in
-  `ambiguity_flags` with `target` set to "category", `phrase` set to the raw category name,
-  and `category` and `characteristic` both null. It does not go in `resolved_categories`."""
+- Echo `category_id` from the extraction input. Do not invent an id and do not return a name.
+- A category you can map confidently to one node goes in `resolved_categories` as
+  `{taxonomy_node, category_id}`.
+- A category you cannot confidently map to a single node has its `category_id` listed in
+  `unmapped_category_ids`. It does not go in `resolved_categories`.
+- Every category_id from the extraction appears in exactly one of those two lists."""
 
 MAPPING_NEGATIVE_RULES = """\
 DO NOT
 
 - Do not invent a taxonomy node, rename one, or return anything outside the taxonomy list.
-- Do not split one raw category across multiple nodes; each maps to exactly one node.
-- Do not resolve a category by guessing when the input gives no confident basis; flag it.
-- Do not copy characteristics, persona facts, or the payload into your output; return only
-  `taxonomy_node` and `raw_name` per mapping. Everything else is attached programmatically.
+- Do not split one category across multiple nodes; each maps to exactly one node.
+- Do not resolve a category by guessing when the input gives no confident basis; list its id as
+  unmapped.
+- Do not copy names, characteristics, persona facts, or the payload into your output; return only
+  `taxonomy_node` and `category_id` per mapping, plus `unmapped_category_ids`. Everything else is
+  attached programmatically by id.
 - Do not drop a key. Every key in the schema is always present."""
 
 # ---------------------------------------------------------------------------------------
@@ -54,17 +58,18 @@ DO NOT
 
 RESOLUTION_TASK_STATEMENT = """\
 You resolve category-level ambiguity flags into taxonomy nodes. You receive a list of
-{flag, response} pairs: each flag is a category the customer's original wording left unclear,
-and each response is the customer's answer to a clarification question about that flag. You
-also receive the full taxonomy. For each pair, select the single taxonomy node the customer
-means, using the flag phrase, the paired response, and any context in them."""
+{flag, response} pairs: each flag is a category the customer's original wording left unclear
+and already carries its category_id, and each response is the customer's answer to a
+clarification question about that flag. You also receive the full taxonomy. For each pair,
+select the single taxonomy node the customer means, using the flag phrase, the paired
+response, and any context in them. Echo only the category_id you were handed."""
 
 RESOLUTION_RULES = """\
 RESOLUTION RULES
 
 - Resolve every pair. Return one entry in `resolved_categories` for each {flag, response}
-  pair you were given, in the same spirit as the input.
-- Copy `raw_name` verbatim from the flag phrase so its characteristics can be reattached.
+  pair you were given.
+- Echo `category_id` from the flag. Do not invent an id and do not return a name.
 - Set `provenance` to "confident" when the paired response gives clear evidence for a node.
 - When the paired response is still insufficient to choose confidently, map the flag to the
   nearest most-fitting node in the taxonomy and set `provenance` to "nearest_node". Never
@@ -76,8 +81,8 @@ DO NOT
 - Do not invent a taxonomy node, rename one, or return anything outside the taxonomy list.
 - Do not look responses up yourself or re-pair flags; each flag is already paired with its
   own response.
-- Do not return characteristics or persona facts; return only `taxonomy_node`, `raw_name`,
-  and `provenance` per entry.
+- Do not return names, characteristics, or persona facts; return only `taxonomy_node`,
+  `category_id`, and `provenance` per entry.
 - Do not drop a key. Every key in the schema is always present."""
 
 # ---------------------------------------------------------------------------------------
@@ -102,14 +107,17 @@ _MAPPING_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
         {
             "explicit_categories": [
                 {
+                    "category_id": 0,
                     "name": "well-equipped gym",
                     "characteristics": ["open before 7am", "within walking distance"],
                 },
                 {
+                    "category_id": 1,
                     "name": "large grocery store",
                     "characteristics": ["not a corner shop", "reachable without a car"],
                 },
                 {
+                    "category_id": 2,
                     "name": "a place to get my shopping done",
                     "characteristics": ["without a long trip"],
                 },
@@ -120,40 +128,42 @@ _MAPPING_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                     "target": "category",
                     "category": None,
                     "characteristic": None,
+                    "category_id": 2,
                 },
             ],
             "persona_facts": ["cooks most nights", "only has one car between two people"],
         },
         {
             "resolved_categories": [
-                {"taxonomy_node": "gym", "raw_name": "well-equipped gym"},
-                {"taxonomy_node": "supermarket", "raw_name": "large grocery store"},
+                {"taxonomy_node": "gym", "category_id": 0},
+                {"taxonomy_node": "supermarket", "category_id": 1},
             ],
-            "ambiguity_flags": [
-                {
-                    "phrase": "a place to get my shopping done",
-                    "target": "category",
-                    "category": None,
-                    "characteristic": None,
-                },
-            ],
+            "unmapped_category_ids": [2],
         },
     ),
     (
         {
             "explicit_categories": [
-                {"name": "daycare", "characteristics": ["within a short walk"]},
-                {"name": "somewhere to run", "characteristics": ["can loop around"]},
+                {
+                    "category_id": 0,
+                    "name": "daycare",
+                    "characteristics": ["within a short walk"],
+                },
+                {
+                    "category_id": 1,
+                    "name": "somewhere to run",
+                    "characteristics": ["can loop around"],
+                },
             ],
             "ambiguity_flags": [],
             "persona_facts": ["has a four-year-old", "runs early mornings"],
         },
         {
             "resolved_categories": [
-                {"taxonomy_node": "daycare", "raw_name": "daycare"},
-                {"taxonomy_node": "park", "raw_name": "somewhere to run"},
+                {"taxonomy_node": "daycare", "category_id": 0},
+                {"taxonomy_node": "park", "category_id": 1},
             ],
-            "ambiguity_flags": [],
+            "unmapped_category_ids": [],
         },
     ),
 )
@@ -168,12 +178,14 @@ _RESOLUTION_FEW_SHOT_PAIRS: tuple[tuple[list, dict], ...] = (
                     "target": "category",
                     "category": None,
                     "characteristic": None,
+                    "category_id": 2,
                 },
                 "response": {
                     "question": (
                         "When you say a place to get your shopping done, do you mean a full "
                         "supermarket, a convenience store, or a shopping mall?"
                     ),
+                    "options": ["full supermarket", "convenience store", "shopping mall"],
                     "response": "A full supermarket for a big weekly shop.",
                 },
             },
@@ -183,9 +195,11 @@ _RESOLUTION_FEW_SHOT_PAIRS: tuple[tuple[list, dict], ...] = (
                     "target": "category",
                     "category": None,
                     "characteristic": None,
+                    "category_id": 4,
                 },
                 "response": {
                     "question": "What did you have in mind for the evenings?",
+                    "options": ["bar", "restaurant", "not sure"],
                     "response": "Not sure really, just somewhere to go out sometimes.",
                 },
             },
@@ -194,12 +208,12 @@ _RESOLUTION_FEW_SHOT_PAIRS: tuple[tuple[list, dict], ...] = (
             "resolved_categories": [
                 {
                     "taxonomy_node": "supermarket",
-                    "raw_name": "a place to get my shopping done",
+                    "category_id": 2,
                     "provenance": "confident",
                 },
                 {
                     "taxonomy_node": "bar",
-                    "raw_name": "something for the evenings",
+                    "category_id": 4,
                     "provenance": "nearest_node",
                 },
             ],

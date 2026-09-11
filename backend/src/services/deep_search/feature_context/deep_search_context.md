@@ -1,9 +1,22 @@
+Google Places API Integration with Deep Search feature
+
+Hierarchy in deep search feature:
+
+Listings & their Quality
+2. Apartment Amenities
+3. Neighborhood Quality
+Essentially Deep search is just going to be an orchestrator. And we can consider its responsibilities as feature itself and they will be orchestrated by Deep Search.
+
+
+
+
+
 Problem Context of the feature (Neighborhood Quality):
 Overall Feature Problem:
 The feature needs to determine whether the neighborhood surrounding an apartment meets the user's stated preferences by identifying relevant amenities and providing reliable information about their proximity, accessibility, characteristics, and quality. The information must be sufficiently specific to the user's requirements at the required level of depth rather than presenting a generic list of nearby amenities, while distinguishing factual information and information in the form of metrics about each amenity from assessments derived from that information.
 
-User:
 
+User:
 Stakeholder 1: Customer
 Want (Preference Match): knowing which of the amenities he actually cares about exist nearby. Friction: manually checking a map means searching for each preferred amenity type one at a time and cross-referencing distance himself, with no single view of whether his actual list of priorities is met.
 
@@ -59,8 +72,10 @@ Completeness check: each fact explains why a naive, fixed-tool, fixed-depth, fix
 Problem relevance:
 If amenity information isn't matched to what the user actually cares about, at the depth and characteristic level he cares about, and isn't clearly separated from the judgment drawn on top of it, he's left to manually re-derive relevance and quality himself from a generic report, which defeats the purpose of the feature responsibility doing that evaluation for him, and undermines his ability to trust the assessment when deciding whether a listing's surroundings actually fit his needs.
 
+
 Actual Problem Statement:
 The feature must first identify amenities within a user-defined radius of the listing, covering the amenity categories the user explicitly specified at full priority and a smaller, fixed set of common categories he did not specify, based on the understanding of his explicit and hidden requirements. For each identified amenity (in each category), it must retrieve a fixed baseline set of metrics using whichever available tool is best suited to that data (Google Places New API) and extending to deeper, page-level detail only where the user's stated need calls for it using additional tools like LLMs, Diffbot extractor and Parallel Web Search. For every amenity, it must compute travel-based accessibility (route, mode, time), not straight-line distance alone. Within each category, it must narrow results to a representative set, keeping only amenities that match a user-specified characteristic or a reasonably close alternative where such criteria were given, rather than returning every instance found. From this factual data, it must produce an assessment for every amenity (of every category), specified or baseline, keeping that assessment structurally separate from the underlying facts while carrying the specific facts it was derived from. Finally, the output must be organized by amenity category and metric, with depth scaled to how much the user specified about that category, and each result phrased against the user's stated requirement rather than as a generic summary.
+
 
 Workflow of the Feature:
 Shortlist the categories of amenities that we need to look for as per user preference
@@ -146,7 +161,6 @@ Filter check (problem relevance): every clause traces back to producing an accur
 
 Implementation Mechanisms of the User's Requirement Interpretation:
 
-
 Process Flow — "User's Requirement Interpretation" Responsibility
 
 Scope reminder: everything below stops at producing a per-category specification (reason, priority, depth, metrics). Nothing here searches, retrieves, or scores an actual amenity — that starts in the next responsibility, which consumes this one's output as its only input.
@@ -189,35 +203,46 @@ Goal of Component: Convert the customer's raw natural-language input into a stru
 Problem It Aims to Solve: Every later component needs to know whether it's looking at "something the customer asked for" or "background about who he is" — if these get conflated at extraction time, reasoning capture and inference downstream have no reliable signal to work from.
 
 Approach:
-Single-pass structured extraction: one LLM call with a fixed output schema that extracts categories, characteristics, ambiguity flags, and persona/lifestyle/situation facts together. At this stage, we are not mapping the categories to our amenity-categories list. We just want to extract the amenities which user has mentioned in their response.
+Single-pass structured extraction: one LLM call with a fixed output schema that extracts categories, characteristics, ambiguity flags, and persona/lifestyle/situation facts together. At this stage, we are not mapping the categories to our amenity-categories list. We just want to extract the amenities which user has mentioned in their response. The extraction model does not emit identifiers.
+
+Extraction-owned category identity (`category_id`):
+When Mechanism 1 assembles `ExtractedRequirements`, each `explicit_categories` entry is labeled with a stable `category_id` in code, by list position. Flagging a phrase does not remove it from its bucket, so every `target: "category"` flag has exactly one backing explicit entry; that flag is stamped with the same `category_id` in the same assembly pass. A category flag that does not resolve to exactly one backing entry is a validation failure, not a defensive workaround. There is no separate `flag_id`. This id is the single key for the Mechanism 2 clarification loop (`user_responses`, 2B questions, 2A Operation 2). Names stay on the extracted entry; later models echo ids only.
 
 
-Mechanism 2 — Explicit Category Resolution & Global requirement sufficiency Gate
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+Mechanism - 2 
+
 # Component 2A: Category Scope & Ambiguity Resolution
 
 ## Goal of Component
 
 Two operations, run in sequence:
 
-1. **Taxonomy mapping (always runs):** Map every raw category from the extraction
-   to its correct node in the maintained amenity-category taxonomy, using the
-   category name, its characteristics, and surrounding persona context to select
-   the right node. Any raw category that cannot be confidently mapped becomes an
-   unresolved-category ambiguity flag.
+1. **Taxonomy mapping (always runs):** Map every explicit category from the
+   extraction to its correct node in the maintained amenity-category taxonomy,
+   using the category name, its characteristics, and surrounding persona context
+   to select the right node. The mapping model receives each category already
+   labeled with `category_id` and echoes only that id plus a taxonomy node (or
+   lists the id as unmapped). Assembly looks up `explicit_categories[category_id]`
+   for `raw_name` and characteristics. Any category that cannot be confidently
+   mapped becomes an unresolved-category ambiguity flag carrying that same
+   `category_id`.
 
 2. **Ambiguity resolution (conditional — runs only when user responses exist
    on the `RequirementInterpretationState`):**
-   Take only the ambiguity flags whose target is **"category"** (both those
-   carried from mechanism-1 and those created by failed taxonomy mapping in
-   operation 1) and resolve each one against its paired user response and
-   surrounding context. A resolved "category" flag becomes a taxonomy-mapped
-   entry in resolved explicit categories. If a flag's paired user response
-   still does not provide enough evidence to resolve confidently, the
-   component maps it to the nearest most-fitting node in the taxonomy rather
-   than leaving it unresolved — once user responses exist, every category
-   flag must exit this operation as a resolved taxonomy entry. Flags with
-   target "characteristic" are **not processed** by this component — they
-   pass through to ambiguity_flags as-is.
+   Take only the ambiguity flags whose target is **"category"** (those created
+   from unmapped `category_id`s in operation 1, which already include categories
+   Mechanism 1 had flagged) and resolve each one against
+   `user_responses[category_id]` and surrounding context. A resolved "category"
+   flag becomes a taxonomy-mapped entry in resolved explicit categories, with
+   name and characteristics attached from `explicit_categories[category_id]`. If
+   a flag's paired user response still does not provide enough evidence to
+   resolve confidently, the component maps it to the nearest most-fitting node
+   in the taxonomy rather than leaving it unresolved — once user responses
+   exist, every category flag must exit this operation as a resolved taxonomy
+   entry. Flags with target "characteristic" are **not processed** by this
+   component — they pass through to ambiguity_flags as-is.
 
 When `user_responses` on the `RequirementInterpretationState` is empty (first
 pass, before any clarification round has occurred), operation 2 is skipped
@@ -242,21 +267,23 @@ components to handle.
 
 ## Approach: Context-Aware Taxonomy Mapping
 
-For each raw category, provide the LLM with:
-- the mechanism-1 output that this component received,
+For each explicit category, provide the LLM with:
+- the mechanism-1 output that this component received (categories already labeled
+  with `category_id`),
 - the full maintained amenity-category taxonomy.
 
 The LLM selects the taxonomy node that best fits the customer's intended amenity
-given all available context. It does not invent new taxonomy nodes, rename
-existing ones, or return a category outside the taxonomy.
+given all available context. It echoes the `category_id` it was handed; it does
+not invent new taxonomy nodes, rename existing ones, echo category names, or
+return a category outside the taxonomy.
 
 For ambiguity resolution (when user responses are present), the same context-
 aware approach applies but only to flags with target "category": each such
-flag is evaluated together with its paired user response and surrounding
-context to select a taxonomy node. If the user response is still insufficient,
-the LLM maps the flag to the nearest most-fitting taxonomy node rather than
-leaving it unresolved. Characteristic flags are outside this component's
-resolution scope.
+flag is evaluated together with `user_responses[category_id]` and surrounding
+context to select a taxonomy node, and the model echoes that same `category_id`.
+If the user response is still insufficient, the LLM maps the flag to the nearest
+most-fitting taxonomy node rather than leaving it unresolved. Characteristic
+flags are outside this component's resolution scope.
 
 
 ## Critical Decision Choices
@@ -281,27 +308,30 @@ fields:
 | Field | Type | Content |
 |---|---|---|
 | `payload` | `PayloadRecord` | Carried from the mechanism-1 object unchanged. This component does not add, remove, or modify the payload. |
-| `resolved_explicit_categories` | `list[ResolvedCategory]` | Every category that was successfully mapped to a taxonomy node. Each entry carries: `taxonomy_node` (the matched taxonomy identifier), `raw_name` (the original wording from mechanism-1), `characteristics: list[str]` (carried from mechanism-1 unchanged — this component does not modify characteristics), and `provenance` (one of `"confident"`, `"nearest_node"` — indicates whether the mapping was a confident match or a nearest-node fallback). |
-| `ambiguity_flags` | `list[AmbiguityFlag]` | All flags this component did not resolve. Contents depend on the pass: **First pass (no user responses):** the union of (a) all mechanism-1 flags with target "characteristic" (passed through untouched — outside this component's scope), (b) mechanism-1 flags with target "category" (unresolvable without user input), and (c) new flags created when a raw category failed taxonomy mapping in operation 1 (target: "category"). **Second pass (user responses present):** only mechanism-1 flags with target "characteristic" remain — all category flags are resolved (confidently or to the nearest taxonomy node), so no category flags survive into this field. |
+| `resolved_explicit_categories` | `list[ResolvedCategory]` | Every category that was successfully mapped to a taxonomy node. Each entry carries: `category_id` (the extraction-owned identity of the backing explicit category), `taxonomy_node` (the matched taxonomy identifier), `raw_name` (the original wording from mechanism-1), `characteristics: list[str]` (carried from mechanism-1 unchanged — this component does not modify characteristics), and `provenance` (one of `"confident"`, `"nearest_node"` — indicates whether the mapping was a confident match or a nearest-node fallback). |
+| `ambiguity_flags` | `list[AmbiguityFlag]` | All flags this component did not resolve. Contents depend on the pass: **First pass (no user responses):** (a) all mechanism-1 flags whose target is not `"category"` (characteristic/persona, passed through untouched), plus (b) one `target: "category"` flag per unmapped `category_id` from Operation 1, carrying that id. Mechanism-1 category flags are not unioned on top of (b) — that would duplicate the same `category_id`. **Second pass (user responses present):** only mechanism-1 flags with target "characteristic" (and persona) remain — all category flags are resolved (confidently or to the nearest taxonomy node), so no category flags survive into this field. |
 | `persona_facts` | `list[str]` | Carried from the mechanism-1 object unchanged. This component does not add, remove, or modify persona facts. |
 
 
 ### How raw categories that fail taxonomy mapping are handled
 
-When a raw category cannot be confidently mapped to a single taxonomy node, it
-is **not** silently dropped. It is converted into an ambiguity flag with
-`target: "category"` and the `phrase` set to the raw category name. This
-ensures the downstream clarification component (2B) can ask the customer
-about it.
+When an explicit category cannot be confidently mapped to a single taxonomy
+node, it is **not** silently dropped. Assembly converts each id in
+`unmapped_category_ids` into an ambiguity flag with `target: "category"`,
+`category_id` set to that id, and `phrase` taken from
+`explicit_categories[category_id].name`. This is the flag 2B keys its question
+and the customer's answer on. No name string is echoed by the mapping model.
 
 
 ### How mechanism-1 ambiguity flags are carried
 
-All ambiguity flags from the mechanism-1 extraction are brought into this
-component's `ambiguity_flags` field **before** operation 2 runs. They are
-merged with any new flags from failed taxonomy mapping. This merged list is
-the starting set that operation 2 works on (if user responses exist) or the
-final set (if user responses are empty).
+Mechanism-1 flags whose target is not `"category"` are copied into this
+component's `ambiguity_flags` field unchanged. Category flags after Operation 1
+come only from `unmapped_category_ids` (one flag per id). If Mechanism 1 had
+already flagged a category and Operation 1 maps it confidently, that category
+enters `resolved_explicit_categories` and no category flag remains for it. This
+merged list is the starting set that operation 2 works on (if user responses
+exist) or the final set (if user responses are empty).
 
 
 ### Conditional gate: user responses empty vs. present
@@ -314,168 +344,143 @@ plus any failed-mapping flags, and nothing is resolved further.
 
 **User responses present (after a clarification round):**
 Both operations run. Component 2A reads `user_responses` from the
-`RequirementInterpretationState`. Only flags with target "category" are
-processed:
+`RequirementInterpretationState`, keyed by `category_id`. Only flags with
+target "category" are processed:
 
-- **Flag target is "category":** Read its paired user response and the
+- **Flag target is "category":** Read `user_responses[category_id]` and the
   surrounding context. Attempt to map it to a taxonomy node. If the user
   response provides enough evidence, map it confidently. If the user
   response is still insufficient, map it to the **nearest most-fitting
   taxonomy node** — once user responses exist, every category flag must
-  exit as a resolved taxonomy entry. In either case, add it to
-  `resolved_explicit_categories` and remove it from `ambiguity_flags`.
+  exit as a resolved taxonomy entry. In either case, attach `raw_name` and
+  characteristics from `explicit_categories[category_id]`, add it to
+  `resolved_explicit_categories`, and remove it from `ambiguity_flags`.
 
 - **Flag target is "characteristic":** Not processed by this component.
   These flags remain in `ambiguity_flags` exactly as received.
 
 
 
-# Router: Category Resolution Check
-
-## What it is
-
-A conditional check between Component 2A and the next stage. It is not a
-component — it has no LLM call, no transformation, and no output object of
-its own. It inspects the `ResolvedRequirements` object that 2A produced and
-makes one binary decision.
-
-## Input
-
-The `ResolvedRequirements` object from Component 2A.
-
-## Decision
-
-Check whether `ambiguity_flags` contains any item with `target: "category"`.
-
-- **Yes (at least one category flag exists):** Forward the
-  `ResolvedRequirements` object to Component 2B. Category-level ambiguity
-  must be resolved before downstream mechanisms can use the categories.
-
-- **No (zero category flags — only characteristic flags or empty):** Forward
-  the `ResolvedRequirements` object to Mechanism 3. All categories are
-  taxonomy-mapped and no further clarification is needed.
-
-## Loop constraint
-
-This check runs at most twice for a given request:
-
-1. **After 2A's first pass** (no user responses): category flags may exist
-   → router may send to 2B.
-2. **After 2A's second pass** (with user responses): 2A's rule guarantees
-   that every category flag is resolved — confidently or to the nearest
-   taxonomy node — so zero category flags remain. The router always clears
-   to Mechanism 3 on the second check.
-
-No retry logic or third pass is needed. If the router fires 2B once, the
-next 2A pass is guaranteed to clear the router.
-
+Here are the revised **Router** and **Component 2B** specs, aligned to the final `category_id` pre-requisite (no `flag_id`, no echoed names, single loop key).
 
 ---
 
+# Router: Category Resolution Check
+
+## What it is
+A conditional check that is one step inside **Mechanism 2** (alongside 2A and 2B), sequenced by a Mechanism-2 orchestrator. It is not a component: no LLM call, no transformation, no output object. After each 2A pass it reads the workflow state, owns the pass counter, and makes one binary branch decision.
+
+## Input
+The full `RequirementInterpretationState`. It reads `state.resolved.ambiguity_flags` to decide and forwards the **whole state** onward, so 2B can write to it and 2A's second pass can read it.
+
+## Decision
+Let `has_category_flag = any(f.target == "category" for f in state.resolved.ambiguity_flags)`.
+
+| Condition | Branch |
+|---|---|
+| `has_category_flag` is True | Forward state to **Component 2B** |
+| `has_category_flag` is False (only `characteristic` and/or `persona` flags, or none) | Forward state to **Mechanism 3** |
+
+`characteristic` and `persona` flags never route to 2B; both fall through to Mechanism 3.
+
+## Loop constraint (enforced structurally)
+The router owns `state.category_resolution_passes`, incremented each time it inspects a fresh 2A output.
+
+1. **Pass 1** (`user_responses` empty): category flags may exist → route to 2B.
+2. **Pass 2** (`user_responses` populated by 2B): 2A Operation 2 guarantees zero surviving category flags — the customer cannot skip a question, so every category flag has a response keyed by its `category_id`, and each resolves confidently or via nearest-node. Router clears to Mechanism 3.
+
+Hard cap: the router MUST NOT route to 2B when `category_resolution_passes >= 2`; it routes to Mechanism 3 unconditionally. This is a defensive guard; the guarantee should make it unreachable.
+
+---
 
 # Component 2B: Category Clarification Questions
 
 ## Goal of Component
+Three ordered operations, each depending on the previous completing:
 
-Generate one clarification question per unresolved category flag, present
-them to the customer (human in the loop), and attach the customer's
-responses to the `RequirementInterpretationState` so that Component 2A can
-re-run with the additional context needed to resolve every category flag.
+1. **Generate questions (LLM):** one clarification question (with options) per category flag, in a single batched call.
+2. **Present and collect (CLI):** show each question and its options in the CLI and block until the customer provides a response. A response is mandatory.
+3. **Write to state:** write each `{question, options, response}` into `state.user_responses`, keyed by the category flag's `category_id`.
 
 ## Problem It Aims to Solve
+When 2A's first pass leaves category flags unresolved, those categories have no taxonomy mapping and cannot enter `resolved_explicit_categories`. 2B is solely responsible for generating grounded clarification questions, collecting the customer's answers, and handing them to 2A via the state under each flag's `category_id`. What 2A does with those answers afterward (confident mapping vs. nearest-node fallback) is 2A's concern, not 2B's.
 
-When 2A's first pass leaves category flags unresolved, those categories
-have no taxonomy mapping and cannot enter `resolved_explicit_categories`.
-Downstream mechanisms (search, scoring, depth assignment) require a
-taxonomy-mapped category to operate. Without a clarification step, those
-categories are either silently dropped or 2A maps them to a nearest node
-with no customer input — both risk evaluating the wrong scope. The
-clarification round gives the customer one opportunity to specify what
-they meant before 2A applies its nearest-node fallback on the second pass.
+## Approach: Instruction-Grounded, Batched Question Generation
+A single LLM call receives all `target: "category"` flags (each carrying its `category_id`) plus grounding context from `state.resolved` (`resolved_explicit_categories`, `payload`, `persona_facts`, `ambiguity_flags`) and returns one question per flag. Constraints:
 
+- Grounded strictly in the customer's own wording and existing context; introduces no assumptions about unstated needs.
+- Purpose is only to clarify **what the stated category maps to in the amenity taxonomy** — not a preference, discovery, or new-requirement prompt.
+- One question per category flag; no bundling, so answers map back by `category_id`.
 
-## Approach: Instruction-Grounded Question Generation
+### Output contract — question-generation call
+LLM output `ClarificationResult`:
 
-For each category flag (target: "category") in the `ResolvedRequirements`
-object's `ambiguity_flags`, generate a question using an LLM with the
-following constraints:
+| Field | Type | Content |
+|---|---|---|
+| `questions` | `list[ClarificationQuestion]` | One entry per submitted category flag |
 
-- The question must be grounded in the customer's own wording and the
-  existing context (the mechanism-1 output: explicit categories,
-  characteristics, persona facts). It must not introduce assumptions about
-  unstated preferences or needs.
-- The question's purpose is to get clarity on **what the customer's stated
-  category could refer to in the maintained amenity-category taxonomy.**
-  It is not a general preference question, not a discovery question, and
-  not a prompt for new requirements.
-- One question per category flag. No bundling of multiple flags into one
-  question — each flag gets its own question so responses can be mapped
-  back unambiguously.
+`ClarificationQuestion`:
 
+| Field | Type | Content |
+|---|---|---|
+| `category_id` | `int` | Identity of the category flag this question is for (echoed from input) |
+| `category` | `str` | The flagged category phrase, for display and grounding |
+| `question` | `str` | The clarification question |
+| `options` | `list[str]` | Candidate interpretations to show the customer |
+
+Reuses `self._providers` and the `_call_providers` helper with a new `CLARIFICATION_SCHEMA_NAME`; total provider failure raises a typed `ClarificationProviderError`.
 
 ## Critical Decision Choices
 
-
 ### What 2B reads
-
-The `ResolvedRequirements` object from 2A (passed by the router). It uses
-the `ambiguity_flags` field (filtered to target: "category") to know which
-categories need questions, and the `payload` and `persona_facts` fields to
-ground the questions in the customer's context.
-
+`state.resolved` (`ResolvedRequirements`): `ambiguity_flags` filtered to `target: "category"` (which flags need questions, each carrying its `category_id`), plus `resolved_explicit_categories`, `payload`, and `persona_facts` for grounding. 2B receives the full state (the router passes it through) so it can also write `user_responses`.
 
 ### What 2B produces
+No new object. It populates `state.user_responses`, keyed by `category_id`:
 
-2B does not produce a new object. It **populates the `user_responses` field
-on the `RequirementInterpretationState`**.
-
-The `user_responses` field is a mapping where:
-
-| Key | Value |
+| Key | Value (`UserResponse`) |
 |---|---|
-| The ambiguity flag's `phrase` (the exact raw category wording that was flagged) | An object containing: `question` (the question that was asked) and `response` (the customer's answer) |
+| `category_id` (int, from the category flag) | `{ question: str, options: list[str], response: str }` |
 
-This structure ensures that when 2A re-runs, it can look up the user
-response for each category flag by the flag's own phrase — no positional
-matching, no guessing which response belongs to which flag.
+`category_id` is unique per explicit category by construction (assigned at extraction), so keys never collide and no string matching is involved.
 
-
-### Human-in-the-loop step
-
-After generating the questions, 2B presents them to the customer and waits
-for responses. This is a synchronous blocking step — the workflow does not
-proceed until the customer has answered. Each response is attached to its
-question and both are written into the `user_responses` mapping on the
-`RequirementInterpretationState` under the flag phrase they were generated for.
-
+### Human-in-the-loop step (CLI)
+After generation, 2B prints each question and its options to the CLI and reads the customer's typed answer. Synchronous and blocking; the workflow does not proceed until answered. A response is mandatory — a blank/empty answer is re-prompted, never accepted. This mandatory-response rule is what lets the Router guarantee hold.
 
 ### What happens after 2B completes
-
-The `RequirementInterpretationState` now has `user_responses` populated.
-Component 2A re-runs for a second pass, reading the state. On this pass:
-
-- 2A's operation 1 (taxonomy mapping) re-runs on the same raw categories
-  (unchanged in the mechanism-1 extraction on the state).
-- 2A's operation 2 (ambiguity resolution) runs because `user_responses` on
-  the state is now present. Every category flag is resolved — confidently
-  if the user response provides enough evidence, or to the nearest taxonomy
-  node if it does not.
-- The router then checks the new `ResolvedRequirements`. Because 2A's
-  second-pass rule guarantees zero surviving category flags, the router
-  clears to Mechanism 3.
-
+`state.user_responses` now has one entry per category flag, keyed by `category_id`. The Mechanism-2 orchestrator re-enters **2A for a second pass that reuses the existing `state.resolved`** (it does NOT rebuild it from scratch): Operation 1 taxonomy mapping is skipped, and Operation 2 runs over the surviving category flags, each paired with `user_responses[category_id]`. Every category flag exits resolved (name and characteristics attached from `explicit_categories[category_id]`); the router then clears to Mechanism 3.
 
 ### What 2B does NOT do
+- Does not resolve ambiguity (2A's job).
+- Does not generate questions for `characteristic` or `persona` flags.
+- Does not modify `resolved_explicit_categories`, `ambiguity_flags`, or `persona_facts`. Its only write is `state.user_responses`.
+- Does not run more than once per request.
 
-- It does not resolve ambiguity itself. Resolution is 2A's job.
-- It does not generate questions for characteristic flags. Those are
-  outside the clarification scope defined by the router's check.
-- It does not modify `resolved_explicit_categories`, `ambiguity_flags`, or
-  `persona_facts` in any object. Its only write is to `user_responses` on
-  the `RequirementInterpretationState`.
-- It does not run more than once per request. The loop is: 2A first pass →
-  router → 2B → 2A second pass → router → Mechanism 3. There is no third
-  pass.
+---
+
+# Part 3 — Before/After state and residual gaps
+
+**Before 2B** (state after 2A pass 1, category flags present):
+- `state.resolved.ambiguity_flags`: at least one with `target: "category"` (each carrying a `category_id`), plus any characteristic/persona flags
+- `state.user_responses`: `{}`
+- `state.category_resolution_passes`: 1
+
+**After 2B** (before 2A pass 2):
+- `state.resolved.*`: unchanged (2B writes nothing here)
+- `state.user_responses`: one `{question, options, response}` per category flag, keyed by `category_id`
+- `state.category_resolution_passes`: 1 (router increments on its next inspection)
+
+| State field | Before 2B | After 2B |
+|---|---|---|
+| `resolved.resolved_explicit_categories` | Op1 confident mappings | unchanged |
+| `resolved.ambiguity_flags` | category + characteristic/persona | unchanged |
+| `resolved.persona_facts` / `payload` | carried | unchanged |
+| `user_responses` | `{}` | one entry per category flag, keyed by `category_id` |
+| `category_resolution_passes` | 1 | 1 |
+
+---------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------
+
 
 
 Mechanism - 3: Category Reasoning, Priority Tagging and Category reasoning exploration
@@ -497,7 +502,6 @@ NOTE: In the output component must provide the verdict if it is able to find out
 
 
 Component 3B: Explicit Category Detail Elicitation
-
 Goal of Component: For each explicit category that has passed scope resolution, initial check by Explicit Reason Capture & Priority Tagging (3A) but carries no/vague attached characteristic or contextual detail, ask a targeted follow-up question to surface what the customer actually cares about within that category — before reason capture or metric definition treats it as finalized.
 
 Problem It Aims to Solve: A category named with zero accompanying detail ("gym," nothing else) gives reason capture nothing to differentiate it from a generic default — this is exactly the "plain keyword match drops the reason" friction the problem context calls out. Left unaddressed, it produces a technically-present but practically-generic reason, which then produces generic purpose-fit metrics, silently degrading the one category the customer explicitly cared about most.
@@ -607,14 +611,189 @@ Context-specific: whether cross-category consistency is checked automatically at
 
 
 
+
+
+
 			********-------------------------------------------------------------------------------------------------------------*************
 *******-------------------------------------------------------------------------------------------------------------------------------------------------------------------*******
 			********-------------------------------------------------------------------------------------------------------------*************
 
 
+
+
+# Implementation of components of the User Requirements Interpretation Mechanisms: 
+
+## Mechanism 1 -- Unstructured Input Parsing
+Component-1: Requirement & Persona Extraction
+
+Goal of Component: Convert the customer's raw natural-language input into a structured intermediate representation that keeps three things separate: (a) explicit category (b) category characteristics, (c) phrases flagged as ambiguous, (d) general persona/situation/lifestyle facts.
+
+Problem It Aims to Solve: Every later component needs to know whether it's looking at "something the customer asked for" or "background about who he is" — if these get conflated at extraction time, reasoning capture and inference downstream have no reliable signal to work from.
+
+Approach:
+Single-pass structured extraction: one LLM call with a fixed output schema that extracts categories, characteristics, ambiguity flags, and persona/lifestyle/situation facts together. At this stage, we are not mapping the categories to our amenity-categories list. We just want to extract the amenities which user has mentioned in their response. The extraction model does not emit identifiers.
+
+After validation, each explicit category is assigned `category_id` by list position, and every `target: "category"` flag is stamped with the `category_id` of its backing explicit entry. That identity is the single key Mechanism 2 uses; names are not re-derived later.
+
+
+
+
+IMPLEMENTATION OF THE COMPONENT: REQUIREMENT & PERSONA EXTRACTION :-
+
+Locked constraints carried into this breakdown
+These are fixed at component level and are not reopened by any sub-component below.
+
+* This component is the entry point of the responsibility. Its only input is the customer's raw natural-language input. Nothing upstream feeds it, and no state from any later component returns to it.
+* Extraction happens in one model call with a fixed output schema (single-pass structured extraction). The model does not emit `category_id`.
+* The call produces four separated buckets in one object: explicit categories, category characteristics, ambiguity flags, persona/situation/lifestyle facts.
+* After the body validates, Mechanism 1 stamps `category_id` on each `explicit_categories` entry by list position, and stamps the same id onto every `target: "category"` flag from its backing entry (`phrase` must equal that entry's `name`). Zero or many matches is a validation failure.
+* No taxonomy mapping happens here. Category strings are kept as the customer stated them. Mapping to the maintained amenity taxonomy is Component 2A, which echoes `category_id` rather than names.
+* Counting resolved categories, applying the sufficiency threshold, and generating clarifying questions are not done here. Those depend on taxonomy-resolved categories, so they sit in Component 2A, the router, and Component 2B.
+* No search, retrieval, depth assignment, or metric definition happens here.
+
+### Sub-components
+
+1. Input Intake and Payload Assembly
+2. Intermediate Representation Schema
+3. Extraction Instruction and Bucket Separation Rules
+4. Constrained Call Execution and Response Validation
+5. Parsed Output Assembly and Handoff Contract
+6. Extraction Fixture Set and Bucket Placement Checks
+
+Order: 1 → 2 → 3 → 4 → 5 → 6.
+
+Sub-component 3 consumes the schema from 2. Sub-component 4 consumes the payload from 1 and the instruction plus schema from 2 and 3. Sub-component 5 wraps the validated object from 4 for Component 2A. Sub-component 6 runs the assembled path end to end.
+
+---
+
+### Sub-component 1: Input Intake and Payload Assembly ###
+
+Goal of Component:
+Turn the customer's raw natural-language input into one bounded, normalized payload that the extraction call receives.
+
+Problem It Aims to Solve:
+The customer's requirements arrive as unstructured text of unknown length, encoding, and formatting. The extraction call needs one fixed, bounded payload. Without an intake step, the call receives a string of arbitrary size and shape, and behavior changes with input length and formatting rather than with input content.
+
+Finalized Approach:
+3. Validate by checking encoding & length, Normalize and envelope. Produce a payload record holding the normalized text, a preserved copy of the raw text.
+    Motive: “Validate and Clean the input, preserve the original as well.”
+
+Critical Decision Choices:
+* Minimum accepted input length should be 100 words and maximum length does not matter here and under-limit input is rejected with error "Instructions must be of more than 100 words"
+* In case of empty or whitespace-only, input rejected at intake and will be shown error related to under-limit input.
+* character offsets will not be preserved. 
+* Yes, raw text will be stored alongside the normalized form.
+* Yes, formatting markup (line breaks, bullets, quotes) is supposed to be preserved, since it can carry list structure the model reads as separate statements.
+* Non-English input will be rejected.
+
+---
+
+### Sub-component 2: Intermediate Representation Schema ####
+
+Goal of Component:
+Define the machine-checkable output contract that holds the four buckets as separate fields, with a per-item field set for each.
+
+Problem It Aims to Solve:
+The four kinds of information must stay separated at extraction time. Without an enforced contract, the model response mixes a stated requirement with a background fact about the customer, and every later component reads a signal that cannot be trusted. The schema is also what constrains the model at call time, so it has to exist before the call is built.
+
+Finalized Approach:
+Typed model with provider-constrained structured output: Define the output contract using a typed model such as Pydantic. Generate or derive the provider's structured-output schema from that model, pass it to the LLM provider, and use the same Pydantic model to parse and validate the returned object.
+
+Critical Decision Choices:
+* Yes, characteristics are nested under their category object.
+* Persona facts are represented as plain strings
+* Ambiguity is a separate array of flagged phrases
+* Representation of a category stated with no characteristic (must be empty array rather than null).
+* Schema must be  closed.
+* additionalProperties set to false
+* `ExtractedCategory` carries `category_id: int`, assigned in code after the call, not by the extraction model. The provider schema strips this field so the model cannot emit it.
+* `AmbiguityFlag` carries `category_id` for `target: "category"` flags (null for characteristic/persona). Also stamped in code; stripped from the extraction provider schema. No `flag_id`.
+
+---
+
+### Sub-component 3: Extraction Instruction and Bucket Separation Rules ####
+
+Goal of Component:
+Build the instruction text that makes one call fill the schema and place each piece of the customer's input into exactly one bucket.
+
+Problem It Aims to Solve:
+The schema names the buckets but does not define the boundary between them. "I run every morning" can be read as an explicit category request or as a lifestyle fact. Without written separation rules, the same phrase lands in a different bucket on different runs, and the explicit versus inferred priority distinction that Mechanism 4 and Mechanism 6 depend on is set arbitrarily at extraction time.
+
+Three combined Finalized approaches will work together to achieve goal of the component:
+1. Rule-only instruction. Written definitions per bucket plus negative rules ("do not map to a category list", "do not add a category the customer did not state").
+2. Few-shot instruction. Definitions plus fixed worked input and output pairs covering a rich input, a thin input, an ambiguous phrase, and a negation.
+3. Field-level descriptions. Bucket definitions carried inside the schema field descriptions, with a short global rule set in the instruction covering only the cross-bucket boundary.
+
+Critical Decision Choices:
+* Definition of "explicit category": An amenity or neighborhood feature that the user directly names or clearly refers to as something they want, prefer, need, avoid, or consider, without requiring the system to infer the underlying category from unrelated context.
+* A phrase qualifies as ambiguous when "A phrase is ambiguous when it has two or more reasonable interpretations that would lead to different categories, characteristics, or scopes, and the user's input does not provide enough evidence to select one interpretation confidently.", and Yes, ambiguity can be flagged on the category, the characteristic, persona/lifestyle/situation.
+* Handling of negations ("I do not need a gym") and of conditional statements by putting them as lifestyle/situation/persona facts.
+* Yes, examples use project amenity vocabulary. Using it pulls the model toward taxonomy mapping, which is locked out of this component.
+* There is no upper bound on items per bucket, and what happens when the input names many categories.
+
+---
+
+### Sub-component 4: Constrained Call Execution and Response Validation ####
+
+Goal of Component:
+Execute the single extraction call and return either a schema-valid object or a typed failure.
+
+Problem It Aims to Solve:
+The response can be truncated, wrapped in surrounding text, missing a required field, or carrying a field outside the contract. Downstream components cannot consume an unvalidated response, and an invalid response with no defined failure path stops the responsibility with no signal any caller can act on.
+
+Finalized Approach:
+1. Provider-constrained output. Pass the schema through structured outputs or strict tool use so the response is constrained to the schema at generation time, then validate as a second check. After schema validation, stamp `category_id` by list position and attach it to every category flag; reject the extraction if a category flag does not resolve to exactly one backing explicit entry.
+
+Critical Decision Choices:
+* Model selection: We can use OpenAI API as primary API call and Groq API as fallback API call. We need to ensure that we can switch between these two as primary and fallback entity.
+* In case of invalid response, the whole response is rejected.
+* Failure surface: a raised exception versus a typed error object.
+* Category identity is not a third model check. It is programmatic labeling of an already-valid body, then a hard guarantee that every category flag has exactly one `category_id`.
+
+---
+
+### Sub-component 5: Parsed Output Assembly and Handoff Contract
+
+Goal of Component:
+Produce the single parsed output object that Component 2A receives as its only input, with a stable identity and a defined signal for the case where extraction did not produce a valid object.
+
+Problem it aims to solve:
+This object is the only thing the rest of the responsibility works from, and it is read more than once: Component 2A reads it, and after a clarification round Component 2B attaches the customer's answers to it and 2A reads it again. Without a storage rule, each read reconstructs the object and the two reads can differ. Without a defined failure signal, a failed extraction is indistinguishable from an extraction that legitimately found nothing.
+
+Finalized Approach:
+1. In-memory typed return. The validated object is returned directly to the caller, which passes it to Component 2A in the same process.
+
+Critical Decision Choices:
+* Parsed object must mutable, allowing downstream components such as Component 2A and 2B to add their results to the same object.
+* Empty bucket is represented as an empty array in the handed-off object rather than an omitted field.
+* `RequirementInterpretationState.user_responses` is a mapping keyed by `category_id` (default `{}`). `UserResponse` is `{question, options, response}`. Component 2B writes it; Mechanism 1 only provides the empty container and the ids 2B will key on.
+
+---
+
+### Sub-component 6: Test for Mechanism - 1 (Must be designed in a way that it can test the workflow with Dummy LLM Output (DO NOT MAKE API CALL FOR TESTING!!)) 
+
+Goal of Component:
+Run a fixed set of input samples with expected bucket assignments through the assembled path and produce a pass or fail per check.
+
+Problem it aims to solve:
+The output of this component is the only input the rest of the responsibility receives, and an error here propagates with nothing downstream positioned to catch it. Bucket placement is not verifiable by inspection at run time, and a change to the instruction, the schema, or the model shifts placement without any visible failure.
+
+Finalized Approach:
+1. Rubric-based scoring. A second model call scores the produced object against a written rubric per fixture, with a numeric pass threshold.  (For only 1 run!!)
+
+Critical Decision Choices:
+* Fixture coverage: rich input, thin input, input naming no category at all, input carrying only persona facts, ambiguous phrasing, negation, and a lifestyle statement that could read as a category request.
+* Given that repeat runs on the same input can differ therefore, only one run will be executed for this test.
+* The checks gate changes to the instruction and schema
+* A category the customer did not state must not appear in the explicit bucket.
+* Run artifacts are stored (payload, raw response, validated object) in memory and will be kept in memory during the entire workflow.
+
+
+
+
                    ************* IMPLEMENTATION DETAILS OF MECHANISM - 1 OF USER REQUIREMENT INTERPRETATION *************
 
-Class and Method Blueprint  (Mechanism -1 Implementation Class & Methods)
+D. Class and Method Blueprint  (Mechanism -1 Implementation Class & Methods)
 
 Class: UserRequirementsInterpretation
 File: requirement_interpretation.py
@@ -637,12 +816,450 @@ Responsibility: Responsibility 1 entry; holds the ordered providers. Mechanisms 
 | build_extraction_instruction| (json_schema: dict) -> str                                               | Assemble bucket rules, negative rules, few-shot      |
 |                             |                                                                          | pairs                                                |
 +-----------------------------+--------------------------------------------------------------------------+------------------------------------------------------+
-| execute_and_validate        | (payload: PayloadRecord, instruction: str) -> ExtractedRequirements     | Try llm providers in order, then validate independently|
+| execute_and_validate        | (payload: PayloadRecord, instruction: str) -> ExtractedRequirements     | Try llm providers in order, validate, stamp category_id |
 |                             | [raises: ExtractionProviderError, ExtractionValidationError]            |                                                      |
 +-----------------------------+--------------------------------------------------------------------------+------------------------------------------------------+
 | assemble_handoff            | (payload: PayloadRecord, extracted: ExtractedRequirements)               | Pair payload and buckets as the mutable handoff      |
 |                             | -> RequirementInterpretationState                                       |                                                      |
 +-----------------------------+--------------------------------------------------------------------------+------------------------------------------------------+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------*************** Mechanism - 2 , Responsibility - 1 of feature Deep Search ******************------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Mechanism 2 (Explicit Category Resolution & Global Requirement Sufficiency Gate) ,Responsibility 1 (User's Requirement Interpretation)
+
+## Process Flow — Component 2A: Category Scope & Ambiguity Resolution
+
+Locked constraints carried into this breakdown:
+
+These are fixed at the component level and are not reopened by any sub-component below.
+
+Input is the RequirementInterpretationState produced by Mechanism 1 (payload, extracted buckets with extraction-owned `category_id` on every explicit category and on every category flag, and user_responses defaulting to an empty mapping keyed by `category_id`).
+Operation 1 (taxonomy mapping) always runs. Operation 2 (ambiguity resolution) runs only when user_responses is populated.
+Mapping is constrained to the maintained amenity-category taxonomy. The call selects an existing node. It does not invent, rename, split across, or return anything outside the taxonomy.
+The mapping model echoes `category_id` only. It does not echo category names. An unmapped category becomes an AmbiguityFlag with target: "category" and that same `category_id`; phrase and characteristics are looked up from `explicit_categories[category_id]`. It is not dropped.
+Mechanism-1 flags whose target is not "category" are carried into ambiguity_flags. Category flags after Operation 1 come from `unmapped_category_ids` (one flag per id).
+Operation 2 processes only flags with target: "category", paired with `user_responses[category_id]`. Flags with target: "characteristic" pass through unchanged.
+Once user_responses is present, every category flag exits Operation 2 as a resolved taxonomy entry (confidently, or mapped to the nearest fitting node). Zero category flags survive the second pass.
+Output is a new ResolvedRequirements object with four fields: payload (carried unchanged), resolved_explicit_categories, ambiguity_flags, persona_facts (carried unchanged).
+This component does not count categories, apply the sufficiency threshold, generate clarifying questions, or write user_responses. Those belong to the router and Component 2B.
+
+Sub-components
+Input State and Flag Contract Preparation
+Output Contract Definition
+Taxonomy Provision and Access
+Operation 1: Taxonomy Mapping and First-Pass Flag Set
+Operation 2: User-Response Gate and Category-Flag Resolution
+
+
+### Sub-component 1: Input State and Flag Contract Preparation
+
+Goal of Component:
+Extend the mechanism-1 data contracts so 2A can read the gate signal and can carry, create, and resolve category flags. This covers `user_responses` on the RequirementInterpretationState (default empty, keyed by `category_id`) and `category_id` on AmbiguityFlag for category flags.
+
+Problem It Aims to Solve
+2A branches on user_responses and works over AmbiguityFlag objects. If the state has no user_responses field, the conditional gate has nothing to read. If category flags lack `category_id`, 2A cannot pair a flag with its answer without string matching — the paraphrase/mismatch path this pre-requisite removes.
+
+Finalized Approach:
+Additive field extension. `user_responses` is keyed by `category_id`. `AmbiguityFlag.category_id` is stamped by Mechanism 1 for category flags. No `flag_id`.
+
+
+Ambiguity fields Meaning:
+phrase — the exact ambiguous phrase from the customer.
+target — whether the ambiguity concerns a category or characteristic.
+category — the category associated with the phrase, when known.
+characteristic — the characteristic associated with the phrase, when known.
+category_id — the extraction-owned identity of the backing explicit category, when target is "category"; null otherwise.
+
+
+
+Critical Decision Choices
+The container type for user_responses. Component 2B writes a mapping keyed by `category_id` (not flag phrase). 2A looks up `user_responses[category_id]`.
+Decision: `dict[int, UserResponse]` keyed by `category_id`, not a list and not phrase-keyed.
+2. Which AmbiguityFlag fields are required versus optional, given that a mechanism-1 flag may arrive with category or characteristic null.
+    1. Decision: phrase, target, category, characteristic remain as before (category/characteristic default None). `category_id` is required to be set on every `target: "category"` flag; null on characteristic/persona flags.
+4. Whether mechanism-1 is updated to populate phrase, target, category, characteristic, and category_id on every flag it emits.
+    1. Decision: Yes. Identity is assigned in code after extraction, not by the extraction model. 
+
+
+
+### Sub-component 2: Output Contract Definition
+
+Goal of Component:
+Define the ResolvedRequirements object and the ResolvedCategory entry type that Operations 1 and 2 populate and that the router reads.
+
+Problem It Aims to Solve:
+Operation 1 and Operation 2 both produce resolved category entries and a flag set, and both must write into a fixed shape. Without a declared output contract, each operation invents its own entry structure and the router receives an object whose fields it cannot depend on. The ResolvedCategory entry type in particular is needed before the operations run, because both operations create entries of that type.
+
+Finalized Approach:
+Typed model classes. Declare ResolvedRequirements and ResolvedCategory as typed model classes (Pydantic or equivalent), generating validation from the type definitions. ResolvedRequirements would become the part of the RequirementInterpretationState (which is essentially a state of the workflow)
+
+
+Critical Decision Choices:
+Yes, Field set on ResolvedCategory: `category_id` (copied from the echoed mapping/resolution id, not re-derived), `taxonomy_node`, `raw_name`, and `characteristics` are fixed by the component spec. Whether the entry also carries provenance (whether it came from Operation 1 confident mapping, Operation 2 confident resolution, or Operation 2 nearest-node fallback) is decided here.
+Yes, Characteristic in ResolvedCategory is copied by value from the mechanism-1 flag or category, given the locked rule that this component does not modify characteristics.
+In case of ResolvedRequirements, the same object is updated in place across the two passes.
+
+
+### Sub-component 3: Taxonomy Provision and Access
+
+Goal of Component:
+Make the maintained amenity-category taxonomy available to the mapping call and the nearest-node fallback in a consumable, node-identified form.
+
+Problem It Aims to Solve:
+Both operations select a taxonomy node, so both need the taxonomy present at call time with stable node identifiers. Without a defined access path, the taxonomy gets embedded ad hoc in each prompt, node identifiers drift between calls, and a taxonomy change requires editing the mapping logic. The taxonomy is also the boundary that keeps the mapping constrained, so its representation determines whether a returned node can be checked as a real node.
+
+Finalized approach:
+Inline full taxonomy. Render the entire taxonomy into the prompt as a flat or nested list of nodes with identifiers, suitable when the taxonomy is small enough to fit the context.
+
+Critical decision choices:
+1. Full taxonomy vs. retrieved candidate subset
+	Decision: Full taxonomy, always.
+
+
+### Sub-component 4: Operation 1 — Taxonomy Mapping and First-Pass Flag Set    (SUB - COMPONENT 4 )
+
+
+ Goal of Component
+
+For each raw category from the mechanism-1 extraction, select a single taxonomy node using the category name, its characteristics, and persona context. Convert any category that cannot be confidently mapped into a category flag, merge in the carried mechanism-1 flags, and produce the resolved-category entries plus the working ambiguity_flags set.
+
+ Problem It Aims to Solve
+
+A raw category label alone does not identify a real-world scope ("grocery" and "convenience store" overlap but differ). Downstream mechanisms need a taxonomy node, not a raw string. A category the model cannot place must be recorded as a flag so 2B can ask about it, rather than being dropped or guessed. This operation is the always-run core of 2A and produces the object the router inspects on the first pass.
+
+
+Finalized Approach
+
+Single LLM call with sorting output. One call receives all labeled explicit categories together with the full mechanism-1 output and the full amenity-category taxonomy. The model sorts each `category_id` into one of two arrays: resolved_categories (confidently mapped as `{taxonomy_node, category_id}`) or unmapped_category_ids (could not map). Constrained decoding on the taxonomy_node field prevents out-of-taxonomy returns for resolved entries. After the call, `category_id` is kept on each `ResolvedCategory`, `raw_name` and characteristics are attached by looking up `explicit_categories[category_id]`, unmapped ids become category flags carrying that id, non-category mechanism-1 flags are merged, and persona facts and payload are copied unchanged to assemble the full ResolvedRequirements object.
+
+
+ Critical Decision Choices
+
+
+ 1. Call Granularity
+
+One call for all categories. The model sees the full set of raw categories together, allowing cross-category context to inform each mapping. A single call is cheaper and produces one response to validate. Partial failure (one category invalid in an otherwise valid response) is handled at the post-call assembly step, not by retrying individual categories.
+
+
+ 2. What the Model Receives
+
+The full mechanism-1 output (explicit_categories already labeled with `category_id`, characteristics, ambiguity_flags, persona_facts, and payload) plus the full maintained amenity-category taxonomy with node identifiers.
+
+The prompt explicitly instructs the model that the richer context (persona facts, characteristics) is provided for understanding what the user wanted or intended to say for their explicit categories — not for inferring new categories. The model must not add a category the customer did not state.
+
+
+ 3. What the Model Returns — Schema Shape
+
+Two arrays, nothing else.
+
+**resolved_categories** — one entry per confidently mapped category:
+
+| Field | Constraint |
+|---|---|
+| `taxonomy_node` | Constrained to valid taxonomy node identifiers only. |
+| `category_id` | The id of the explicit category being mapped, echoed from the input. The model must not invent an id or return a name. |
+
+**unmapped_category_ids** — the `category_id` of every explicit category the model could not confidently place. Empty list when every category mapped.
+
+Every extracted `category_id` appears in exactly one of the two arrays. The model does not return names, characteristics, persona facts, payload, or AmbiguityFlag objects. Those are handled programmatically.
+
+
+ 4. How the Model Signals Low Confidence
+
+The model places the category's `category_id` into `unmapped_category_ids` instead of `resolved_categories`. There is no sentinel value, no confidence score, and no secondary field. The sorting decision itself is the confidence signal — if it is in resolved_categories, the model was confident; if it is in unmapped_category_ids, it was not.
+
+
+ 5. Characteristics Handling
+
+Attached programmatically after the call, not by the model. The model returns only `category_id` and `taxonomy_node` for each resolved entry.
+
+After the call, each resolved entry's `category_id` is copied onto the `ResolvedCategory` and looked up in the mechanism-1 extraction's `explicit_categories` to copy `name` (as `raw_name`) and the characteristics list onto the entry.
+
+Paraphrase and match-failure are structurally impossible because no name string is ever echoed by the mapping model.
+
+
+ 6. Mechanism-1 Ambiguity Flag Merge
+
+Programmatic, post-call. Non-category mechanism-1 flags (characteristic, persona) are copied unchanged. Category flags are rebuilt from `unmapped_category_ids` so each `category_id` appears at most once. If Operation 1 maps a category that Mechanism 1 had flagged, that category enters `resolved_explicit_categories` and no category flag remains for it.
+
+
+ 7. Persona Facts and Payload
+
+Copied unchanged from the `RequirementInterpretationState` into the `ResolvedRequirements` object. Programmatic, post-call. The model does not return these and this component does not modify them.
+
+
+ 8. Post-Call Assembly Sequence
+
+After the call returns and is validated, the following steps run in order:
+
+1. **Attach identity, name, and characteristics:** For each entry in the model's resolved_categories — copy `category_id` from the mapping, look up `explicit_categories[category_id]`, copy name and characteristics onto the entry to produce a full `ResolvedCategory`.
+2. **Carry non-category mechanism-1 flags.**
+3. **Create category flags** from `unmapped_category_ids`, each carrying that `category_id` and `phrase` from the backing explicit entry.
+4. **Copy persona facts** from the state unchanged.
+5. **Copy payload** from the state unchanged.
+6. **Assemble** the full `ResolvedRequirements` object from steps 1–5.
+
+
+ 9. Coverage Handling
+
+If the model returns an unknown `category_id`, duplicates an id across the two arrays, or omits an extracted id from both arrays, the Operation 1 body is a validation failure. There is no paraphrase-to-flag conversion, because names are not in the wire contract.
+
+
+
+# Sub-component 5: Operation 2 — User-Response Gate and Category-Flag Resolution
+
+
+ Goal of Component
+
+Branch on whether `user_responses` on the `RequirementInterpretationState` is populated. When it is empty, skip resolution and leave the flag set from Operation 1 as final. When it is present, resolve every `target: "category"` flag against its paired user response and surrounding context, mapping to a taxonomy node confidently where the response gives enough evidence and to the nearest fitting node where it does not, so no category flag survives. Leave `target: "characteristic"` flags untouched.
+
+
+ Problem It Aims to Solve
+
+A category-level flag ("a place to get my shopping done") cannot be taxonomy-mapped until the customer clarifies. After a clarification round, the paired responses provide that evidence, and this operation converts the flags into resolved entries. Without the gate, a first pass with no responses would attempt resolution with nothing to resolve against. Without the nearest-node fallback, a still-vague response would leave a category flag in place, and the router would loop with no path to clear.
+
+
+ Finalized Approach
+
+Single LLM call with paired input and two-stage judgment. One call receives all `target: "category"` flags from the working flag set, each paired with `user_responses[category_id]`, as a structured list of {flag, user_response} pairs. The model performs two judgments per flag in a single pass: first, whether the user response provides enough evidence for a confident taxonomy mapping; second, if not, which taxonomy node is the nearest fit. Every flag exits with a taxonomy node — either confident or nearest-node — echoing the `category_id` it was handed. After the call, name and characteristics are attached from `explicit_categories[category_id]`, resolved entries are added to the existing `ResolvedRequirements` object, and resolved flags are removed from `ambiguity_flags`.
+
+
+ Critical Decision Choices
+
+
+ 1. Gate Condition
+
+Check whether `user_responses` on the `RequirementInterpretationState` is populated. If empty, this entire operation is skipped — the flag set from Operation 1 is final and the `ResolvedRequirements` object passes to the router unchanged. If present, proceed with resolution.
+
+
+ 2. Call Granularity
+
+One call for all category flags. The model receives every `target: "category"` flag with its paired user response as a structured list of {flag, user_response} pairs. The pairing is given explicitly in the input — the model does not look up or match responses itself. Responses are returned in the same order as the input list.
+
+
+ 3. Two-Stage Judgment in a Single Call
+
+The model performs both the confident-mapping and nearest-node judgments in one pass per flag. For each {flag, user_response} pair, the model returns:
+
+| Field | Constraint |
+|---|---|
+| `taxonomy_node` | Constrained to valid taxonomy node identifiers only. Always filled — the model's best pick regardless of confidence. |
+| `category_id` | The id of the category flag being resolved, echoed from the input. Must not invent an id or return a name. |
+| `provenance` | One of: `"confident"` (user response gave enough evidence to map clearly) or `"nearest_node"` (user response was still insufficient, model selected the nearest fitting node). |
+
+No category flag survives this operation. Every flag exits as a resolved entry with a taxonomy node.
+
+
+ 4. What the Model Receives
+
+The full context available at this point:
+
+- The list of {flag, user_response} pairs to resolve (from the working `ambiguity_flags` filtered to `target: "category"`, each paired with `user_responses[category_id]` on the state).
+- The full mechanism-1 output (explicit categories, characteristics, persona facts) — for understanding what the user wanted, not for inferring new categories.
+- The Operation 1 resolved categories already in the `ResolvedRequirements` object — so the model sees what was already mapped and avoids duplicate or conflicting nodes.
+- The full maintained amenity-category taxonomy with node identifiers.
+
+The prompt explicitly instructs the model that mechanism-1 context and Operation 1 results are provided for understanding and avoiding conflicts — not for adding categories the customer did not state.
+
+
+ 5. What the Model Does Not Return
+
+The model does not return characteristics, persona facts, payload, mechanism-1 ambiguity flags, or `target: "characteristic"` flags. Those are handled programmatically.
+
+
+ 6. Characteristics Handling
+
+Attached programmatically after the call, same as Operation 1. Each resolved entry's `category_id` is copied onto the `ResolvedCategory` and looked up in mechanism-1's `explicit_categories` for `raw_name` and characteristics.
+
+Every `target: "category"` flag in the working set was originally an explicit category from mechanism-1 that Operation 1 could not map. The raw category never left `explicit_categories`. The id lookup always finds the backing entry.
+
+
+ 7. How Operation 2 Merges into Operation 1's Output
+
+Update in place on the existing `ResolvedRequirements` object that Operation 1 produced:
+
+1. **Add resolved entries:** For each entry the model returned — copy `category_id`, attach name and characteristics from `explicit_categories[category_id]`, then append the full `ResolvedCategory` (with provenance) to the existing `resolved_explicit_categories` array.
+2. **Remove resolved flags:** Remove every `target: "category"` flag from `ambiguity_flags`. After this operation, zero category flags remain — only `target: "characteristic"` flags (if any) survive.
+3. **No other fields change:** `persona_facts`, `payload`, and `target: "characteristic"` flags are untouched.
+
+
+ 8. Post-Operation State
+
+After Operation 2 completes, the `ResolvedRequirements` object contains:
+
+| Field | Content after Operation 2 |
+|---|---|
+| `resolved_explicit_categories` | All entries from Operation 1 (confident first-pass mappings) plus all entries from Operation 2 (user-response-driven mappings, each with provenance). |
+| `ambiguity_flags` | Only `target: "characteristic"` flags remain. Zero `target: "category"` flags — guaranteed by the nearest-node fallback. |
+| `persona_facts` | Unchanged from mechanism-1. |
+| `payload` | Unchanged from mechanism-1. |
+
+This is the object the router inspects on the second pass. Because zero category flags remain, the router always clears to Mechanism 3.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### 2. Amenity discovery 
+
+**Responsibility:** Find the actual amenities that exist within the defined neighborhood.
+
+This includes:
+
+* Searching by amenity category.
+* Applying the user's geographic boundary.
+* Producing candidate amenities.
+
+**Boundary:**
+Its output is essentially:
+
+> "These are the candidate gyms/restaurants/parks within the defined area."
+
+It should **not decide whether those amenities satisfy the user's preferences**.
+
+---
+
+### 3. Amenity data acquisition
+
+**Responsibility:** Collect the factual information needed about each candidate.
+
+This includes:
+
+* Name
+* Website
+* Address
+* Baseline metrics
+* User-specific metrics
+* Deeper information when required
+* Information from different sources/tools
+
+This is where your Google Maps, website extraction, web search, etc. belong conceptually. Your environment explicitly says that different tools provide different kinds and depths of information. 
+
+**Boundary:**
+Its output should be **facts and metrics**, not conclusions.
+
+---
+
+### 4. Accessibility evaluation
+
+I would consider this a **separate responsibility**, because it answers a different question from amenity discovery.
+
+**Responsibility:** Determine how accessible an identified amenity actually is.
+
+For example:
+
+> Gym A → walking → 8 minutes → specific route
+
+This is different from:
+
+> Gym A exists 600 m away.
+
+Your own problem explicitly distinguishes route-based accessibility from geographic distance. 
+
+**Boundary:**
+It takes an identified amenity and produces accessibility data. It does not decide whether the gym is a good match.
+
+---
+
+### 5. Candidate selection
+
+**Responsibility:** Determine which amenities within each category are worth presenting.
+
+This includes:
+* Matching user-specified characteristics.
+* Considering reasonable alternatives.
+* Removing unnecessary duplicates or excessive results.
+* Selecting a representative set.
+
+This is different from discovery: **discovery finds what exists; selection decides what is relevant enough to continue with.**
+
+Your workflow explicitly has this narrowing step after the deeper search. 
+
+---
+
+### 6. Assessment / judgment
+
+This is another very clear boundary.
+
+**Responsibility:** Use the collected facts and metrics to determine how well each category or amenity satisfies the user's requirements.
+
+For example:
+
+> Facts: Gym A is 700 m away, 4.6 rated, open 24 hours.
+> Assessment: Gym A is a strong match for the user's requirement for a nearby 24-hour gym.
+
+The assessment should remain separate from the facts, while retaining the facts it was based on. This separation is explicitly part of your problem definition. 
+
+---
+
+### 7. Presentation
+
+**Responsibility:** Convert the resulting information into the structure the user should see.
+
+This includes:
+
+* Organizing by amenity category.
+* Organizing by metric.
+* Adjusting depth.
+* Phrasing results against the user's requirements.
+
+This should **not perform new research or make new judgments**.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -45,6 +45,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     FLAG_RESOLUTION_SCHEMA_NAME,
     TAXONOMY_MAPPING_SCHEMA_NAME,
     AmbiguityFlag,
+    ExtractedCategory,
     ExtractedRequirements,
     FlagResolutionResult,
     PayloadRecord,
@@ -279,6 +280,22 @@ class UserRequirementsInterpretation:
                 f"The body returned by {answered_by} does not match the extraction contract"
             ) from exc
 
+        try:
+            extracted = _stamp_category_identities(extracted)
+        except ExtractionValidationError:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "extraction.validated",
+                        "timestamp": _timestamp(),
+                        "provider": answered_by,
+                        "verdict": "rejected",
+                        "reason": "category_identity",
+                    }
+                )
+            )
+            raise
+
         logger.info(
             json.dumps(
                 {
@@ -396,6 +413,12 @@ class UserRequirementsInterpretation:
             provider=answered_by,
             stage="execute_taxonomy_mapping",
         )
+        self._assert_mapping_covers_extracted(
+            mapping,
+            state.extracted,
+            provider=answered_by,
+            stage="execute_taxonomy_mapping",
+        )
 
         logger.info(
             json.dumps(
@@ -405,7 +428,7 @@ class UserRequirementsInterpretation:
                     "provider": answered_by,
                     "verdict": "accepted",
                     "resolved_count": len(mapping.resolved_categories),
-                    "flag_count": len(mapping.ambiguity_flags),
+                    "unmapped_count": len(mapping.unmapped_category_ids),
                 }
             )
         )
@@ -416,39 +439,38 @@ class UserRequirementsInterpretation:
         state: RequirementInterpretationState,
         mapping: TaxonomyMappingResult,
     ) -> ResolvedRequirements:
-        """Op1 Stage 3: attach chars, convert match-fails, merge M1 flags, set state.resolved."""
-        characteristics_by_name = {
-            category.name: list(category.characteristics)
-            for category in state.extracted.explicit_categories
-        }
+        """Op1 Stage 3: attach name/chars by category_id, flag unmapped ids, set state.resolved."""
+        by_id = _explicit_categories_by_id(state.extracted)
 
         resolved_categories: list[ResolvedCategory] = []
-        # The model's flags come first, then any paraphrase that failed the exact match.
-        flags: list[AmbiguityFlag] = list(mapping.ambiguity_flags)
         for entry in mapping.resolved_categories:
-            if entry.raw_name in characteristics_by_name:
-                resolved_categories.append(
-                    ResolvedCategory(
-                        taxonomy_node=entry.taxonomy_node,
-                        raw_name=entry.raw_name,
-                        characteristics=characteristics_by_name[entry.raw_name],
-                        provenance="confident",
-                    )
+            source = by_id[entry.category_id]
+            resolved_categories.append(
+                ResolvedCategory(
+                    category_id=entry.category_id,
+                    taxonomy_node=entry.taxonomy_node,
+                    raw_name=source.name,
+                    characteristics=list(source.characteristics),
+                    provenance="confident",
                 )
-            else:
-                # No exact match means the model paraphrased the raw name, so it re-enters
-                # as a category flag rather than being silently dropped.
-                flags.append(
-                    AmbiguityFlag(
-                        phrase=entry.raw_name,
-                        target="category",
-                        category=None,
-                        characteristic=None,
-                    )
-                )
+            )
 
-        # Mechanism-1 flags are appended as a union: no dedup, no filtering.
-        flags.extend(state.extracted.ambiguity_flags)
+        # Characteristic and persona flags pass through. Category flags are rebuilt from
+        # unmapped ids so each category_id appears at most once as a category flag.
+        flags: list[AmbiguityFlag] = [
+            flag for flag in state.extracted.ambiguity_flags if flag.target != "category"
+        ]
+        for category_id in mapping.unmapped_category_ids:
+            source = by_id[category_id]
+            flags.append(
+                AmbiguityFlag(
+                    phrase=source.name,
+                    target="category",
+                    category=None,
+                    characteristic=None,
+                    category_id=category_id,
+                )
+            )
 
         resolved = ResolvedRequirements(
             payload=state.payload,
@@ -501,7 +523,9 @@ class UserRequirementsInterpretation:
         for flag in resolved.ambiguity_flags:
             if flag.target != "category":
                 continue
-            response = state.user_responses.get(flag.phrase)
+            if flag.category_id is None:
+                continue
+            response = state.user_responses.get(flag.category_id)
             if response is not None:
                 pairs.append((flag, response))
 
@@ -582,6 +606,12 @@ class UserRequirementsInterpretation:
             provider=answered_by,
             stage="execute_flag_resolution",
         )
+        self._assert_resolution_covers_pairs(
+            result,
+            pairs,
+            provider=answered_by,
+            stage="execute_flag_resolution",
+        )
 
         logger.info(
             json.dumps(
@@ -605,16 +635,15 @@ class UserRequirementsInterpretation:
         resolved = state.resolved
         assert resolved is not None
 
-        characteristics_by_name = {
-            category.name: list(category.characteristics)
-            for category in state.extracted.explicit_categories
-        }
+        by_id = _explicit_categories_by_id(state.extracted)
         for entry in result.resolved_categories:
+            source = by_id[entry.category_id]
             resolved.resolved_explicit_categories.append(
                 ResolvedCategory(
+                    category_id=entry.category_id,
                     taxonomy_node=entry.taxonomy_node,
-                    raw_name=entry.raw_name,
-                    characteristics=characteristics_by_name.get(entry.raw_name, []),
+                    raw_name=source.name,
+                    characteristics=list(source.characteristics),
                     provenance=entry.provenance,
                 )
             )
@@ -751,10 +780,120 @@ class UserRequirementsInterpretation:
                 stage=stage,
             )
 
+    def _assert_mapping_covers_extracted(
+        self,
+        mapping: TaxonomyMappingResult,
+        extracted: ExtractedRequirements,
+        *,
+        provider: str,
+        stage: str,
+    ) -> None:
+        """Every extracted category_id must appear once in mapped or unmapped, never both."""
+        known_ids = {category.category_id for category in extracted.explicit_categories}
+        mapped_ids = [entry.category_id for entry in mapping.resolved_categories]
+        unmapped_ids = list(mapping.unmapped_category_ids)
+        returned_ids = mapped_ids + unmapped_ids
+        duplicates = [category_id for category_id in returned_ids if returned_ids.count(category_id) > 1]
+        unique_duplicates = sorted(set(duplicates))
+        unknown = sorted({category_id for category_id in returned_ids if category_id not in known_ids})
+        missing = sorted(known_ids - set(returned_ids))
+        if unique_duplicates or unknown or missing:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "category_resolution.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": stage,
+                        "provider": provider,
+                        "reason": "category_id_coverage",
+                        "duplicates": unique_duplicates,
+                        "unknown": unknown,
+                        "missing": missing,
+                    }
+                )
+            )
+            raise CategoryMappingValidationError(
+                f"The body returned by {provider} did not partition extracted category ids "
+                f"(duplicates={unique_duplicates}, unknown={unknown}, missing={missing})",
+                stage=stage,
+            )
+
+    def _assert_resolution_covers_pairs(
+        self,
+        result: FlagResolutionResult,
+        pairs: list[tuple[AmbiguityFlag, UserResponse]],
+        *,
+        provider: str,
+        stage: str,
+    ) -> None:
+        """Every submitted category flag must come back as exactly one resolved entry."""
+        submitted_ids = [flag.category_id for flag, _ in pairs]
+        returned_ids = [entry.category_id for entry in result.resolved_categories]
+        duplicates = [category_id for category_id in returned_ids if returned_ids.count(category_id) > 1]
+        unique_duplicates = sorted(set(duplicates))
+        unknown = sorted(set(returned_ids) - set(submitted_ids))
+        missing = sorted(set(submitted_ids) - set(returned_ids))
+        if unique_duplicates or unknown or missing:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "category_resolution.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": stage,
+                        "provider": provider,
+                        "reason": "category_id_coverage",
+                        "duplicates": unique_duplicates,
+                        "unknown": unknown,
+                        "missing": missing,
+                    }
+                )
+            )
+            raise CategoryMappingValidationError(
+                f"The body returned by {provider} did not cover the submitted category ids "
+                f"(duplicates={unique_duplicates}, unknown={unknown}, missing={missing})",
+                stage=stage,
+            )
+
 
 def create_requirement_interpretation(settings: Settings) -> UserRequirementsInterpretation:
     """Composition root: bind the provider chain that LLM_PROVIDER_ORDER names."""
     return UserRequirementsInterpretation(create_llm_providers(settings))
+
+
+def _stamp_category_identities(extracted: ExtractedRequirements) -> ExtractedRequirements:
+    """Label each explicit category by list position and attach that id to category flags."""
+    labeled_categories = [
+        category.model_copy(update={"category_id": index})
+        for index, category in enumerate(extracted.explicit_categories)
+    ]
+    by_name: dict[str, list[ExtractedCategory]] = {}
+    for category in labeled_categories:
+        by_name.setdefault(category.name, []).append(category)
+
+    stamped_flags: list[AmbiguityFlag] = []
+    for flag in extracted.ambiguity_flags:
+        if flag.target != "category":
+            stamped_flags.append(flag.model_copy(update={"category_id": None}))
+            continue
+        matches = by_name.get(flag.phrase, [])
+        if len(matches) != 1:
+            raise ExtractionValidationError(
+                "Every category flag must resolve to exactly one extracted category; "
+                f"{len(matches)} explicit_categories entries matched phrase {flag.phrase!r}"
+            )
+        stamped_flags.append(flag.model_copy(update={"category_id": matches[0].category_id}))
+
+    return extracted.model_copy(
+        update={"explicit_categories": labeled_categories, "ambiguity_flags": stamped_flags}
+    )
+
+
+def _explicit_categories_by_id(extracted: ExtractedRequirements) -> dict[int, ExtractedCategory]:
+    return {
+        category.category_id: category
+        for category in extracted.explicit_categories
+        if category.category_id is not None
+    }
 
 
 def _normalize_requirement_text(raw_input: str) -> str:

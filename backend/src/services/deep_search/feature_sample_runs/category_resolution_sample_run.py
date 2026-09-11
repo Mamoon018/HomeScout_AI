@@ -50,19 +50,27 @@ _RULE = "=" * 78
 _SAMPLE_EXTRACTED = ExtractedRequirements(
     explicit_categories=[
         ExtractedCategory(
+            category_id=0,
             name="well-equipped gym",
             characteristics=["open before 7am", "within walking distance"],
         ),
         ExtractedCategory(
+            category_id=1,
             name="large grocery store",
             characteristics=["not a corner shop", "reachable without a car"],
         ),
-        ExtractedCategory(name="daycare", characteristics=["within a short walk"]),
         ExtractedCategory(
+            category_id=2,
+            name="daycare",
+            characteristics=["within a short walk"],
+        ),
+        ExtractedCategory(
+            category_id=3,
             name="a place to get my shopping done",
             characteristics=["without a long trip"],
         ),
         ExtractedCategory(
+            category_id=4,
             name="a place to play",
             characteristics=["without a long trip"],
         ),
@@ -73,12 +81,14 @@ _SAMPLE_EXTRACTED = ExtractedRequirements(
             target="category",
             category=None,
             characteristic=None,
+            category_id=3,
         ),
         AmbiguityFlag(
             phrase="a place to play",
             target="category",
             category=None,
             characteristic=None,
+            category_id=4,
         ),
     ],
     persona_facts=[
@@ -98,21 +108,23 @@ _SAMPLE_PAYLOAD = PayloadRecord(
     raw_text="(seeded Mechanism-1 payload for the Component 2A sample run)",
 )
 
-# Clarification answers Component 2B would have written, keyed by the flag phrase.
+# Clarification answers Component 2B would have written, keyed by category_id.
 # Shopping is specific (Op2 should resolve confidently). Play is still vague (nearest-node).
 _SAMPLE_USER_RESPONSES = {
-    "a place to get my shopping done": UserResponse(
+    3: UserResponse(
         question=(
             "When you say a place to get your shopping done, do you mean a full supermarket, "
             "a convenience store, or a shopping mall?"
         ),
+        options=["full supermarket", "convenience store", "shopping mall"],
         response="A full supermarket where I can do a big weekly shop.",
     ),
-    "a place to play": UserResponse(
+    4: UserResponse(
         question=(
             "When you say a place to play, do you mean a park, a playground, a sports "
             "complex, or something else?"
         ),
+        options=["park", "playground", "sports complex", "something else"],
         response="Not sure, just somewhere outdoors I can play sports sometimes.",
     ),
 }
@@ -163,8 +175,8 @@ def run_sample_resolution(with_responses: bool) -> RequirementInterpretationStat
                 "payload": {"normalized_text": state.payload.normalized_text},
                 "extracted": state.extracted.model_dump(),
                 "user_responses": {
-                    phrase: response.model_dump()
-                    for phrase, response in state.user_responses.items()
+                    str(category_id): response.model_dump()
+                    for category_id, response in state.user_responses.items()
                 },
             },
             indent=2,
@@ -206,9 +218,9 @@ def run_sample_resolution(with_responses: bool) -> RequirementInterpretationStat
 
     if with_responses and category_flags:
         pairs = [
-            (flag, state.user_responses[flag.phrase])
+            (flag, state.user_responses[flag.category_id])
             for flag in category_flags
-            if flag.phrase in state.user_responses
+            if flag.category_id in state.user_responses
         ]
 
         resolution_instruction = interpretation.build_flag_resolution_instruction(

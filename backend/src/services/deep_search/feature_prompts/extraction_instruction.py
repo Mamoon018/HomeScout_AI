@@ -32,9 +32,10 @@ BUCKETS
     `characteristic`: for a "characteristic" flag, set `category` to the named category the
     quality belongs to and `characteristic` to the quality itself; for a "category" or
     "persona" flag, set both to null. Both keys are always present, using null when they do
-    not apply. Flagging a phrase does not remove it from its bucket: an ambiguous category is
+    not apply.     Flagging a phrase does not remove it from its bucket: an ambiguous category is
     still recorded in explicit_categories, and an ambiguous quality is still recorded under
-    its category.
+    its category. For a category flag, `phrase` is the exact `explicit_categories[].name` of
+    that backing entry — the same wording in both places.
 
 (d) persona_facts — facts about who the customer is, their situation, and their lifestyle:
     household, work pattern, transport, routine, budget, timing, and anything else that is
