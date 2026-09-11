@@ -16,6 +16,8 @@ from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import (
     CategoryMappingProviderError,
     CategoryMappingValidationError,
+    ClarificationProviderError,
+    ClarificationValidationError,
     ExtractionProviderError,
     ExtractionValidationError,
     InputTooShortError,
@@ -27,6 +29,10 @@ from src.services.deep_search.feature_prompts.category_resolution_instruction im
     build_mapping_few_shot_examples,
     build_resolution_few_shot_examples,
     build_taxonomy_mapping_instruction as build_taxonomy_mapping_text,
+)
+from src.services.deep_search.feature_prompts.clarification_instruction import (
+    build_clarification_few_shot_examples,
+    build_clarification_questions_instruction as build_clarification_questions_text,
 )
 from src.services.deep_search.feature_prompts.extraction_instruction import (
     BOUNDARY_RULES,
@@ -41,10 +47,13 @@ from src.services.deep_search.feature_schemas.amenity_taxonomy import (
     TAXONOMY_NODE_SET,
 )
 from src.services.deep_search.feature_schemas.schemas import (
+    CLARIFICATION_QUESTIONS_SCHEMA_NAME,
     EXTRACTION_SCHEMA_NAME,
     FLAG_RESOLUTION_SCHEMA_NAME,
     TAXONOMY_MAPPING_SCHEMA_NAME,
     AmbiguityFlag,
+    CategoryResolutionRoute,
+    ClarificationResult,
     ExtractedCategory,
     ExtractedRequirements,
     FlagResolutionResult,
@@ -54,6 +63,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     ResolvedRequirements,
     TaxonomyMappingResult,
     UserResponse,
+    clarification_questions_json_schema,
     extraction_json_schema,
     flag_resolution_json_schema,
     taxonomy_mapping_json_schema,
@@ -107,9 +117,9 @@ class UserRequirementsInterpretation:
         self._providers = tuple(providers)
 
     def interpret(self, raw_input: str) -> RequirementInterpretationState:
-        """Responsibility entry point; sequences the mechanisms."""
+        """Responsibility entry point; sequences the mechanisms and returns the state."""
         state = self.parse_unstructured_input(raw_input)
-        return self.resolve_explicit_categories(state)
+        return self.run_explicit_category_resolution(state)
 
     def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
@@ -340,14 +350,240 @@ class UserRequirementsInterpretation:
         return state
 
     # ---------------------------------------------------------------------------------
-    # Mechanism 2, Component 2A — Category Scope & Ambiguity Resolution
+    # Mechanism 2 — Category resolution loop (2A, router, 2B)
     # ---------------------------------------------------------------------------------
+
+    def run_explicit_category_resolution(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Mechanism 2 workflow: 2A pass 1, router, maybe 2B and 2A pass 2, then return."""
+        self.resolve_explicit_categories(state)
+        route = self.inspect_category_resolution(state)
+        if route == "mechanism_3":
+            return state
+
+        self.clarify_unmapped_categories(state)
+        self.resolve_category_flags(state)
+        self.inspect_category_resolution(state)
+        return state
+
+    def inspect_category_resolution(
+        self,
+        state: RequirementInterpretationState,
+    ) -> CategoryResolutionRoute:
+        """Increment the pass counter, then emit 2B or Mechanism 3."""
+        state.category_resolution_passes += 1
+
+        if state.category_resolution_passes >= 2:
+            route: CategoryResolutionRoute = "mechanism_3"
+        elif state.resolved is None:
+            route = "mechanism_3"
+        elif not any(flag.target == "category" for flag in state.resolved.ambiguity_flags):
+            route = "mechanism_3"
+        else:
+            route = "component_2b"
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "category_resolution.inspect",
+                    "timestamp": _timestamp(),
+                    "category_resolution_passes": state.category_resolution_passes,
+                    "category_flag_count": (
+                        _category_flag_count(state.resolved.ambiguity_flags)
+                        if state.resolved is not None
+                        else 0
+                    ),
+                    "route": route,
+                }
+            )
+        )
+        return route
+
+    def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
+        """Generate questions, collect answers, persist them on the state."""
+        instruction = self.build_clarification_questions_instruction(
+            clarification_questions_json_schema()
+        )
+        result = self.execute_clarification_questions(state, instruction)
+        self.collect_clarification_responses(state, result)
+
+    def build_clarification_questions_instruction(self, json_schema: dict) -> str:
+        """2B Stage 1: assemble rules, closed schema, and two worked pairs. No taxonomy."""
+        instruction = build_clarification_questions_text(json_schema)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "clarification.instruction.built",
+                    "timestamp": _timestamp(),
+                    "instruction_length": len(instruction),
+                    "few_shot_count": len(build_clarification_few_shot_examples()),
+                }
+            )
+        )
+        logger.debug(
+            json.dumps({"event": "clarification.instruction.text", "instruction": instruction})
+        )
+        return instruction
+
+    def execute_clarification_questions(
+        self,
+        state: RequirementInterpretationState,
+        instruction: str,
+    ) -> ClarificationResult:
+        """2B Stage 2: one constrained call, schema then coverage, one coverage retry."""
+        resolved = state.resolved
+        assert resolved is not None  # the router only forwards here after 2A pass 1.
+
+        json_schema = clarification_questions_json_schema()
+        user_content = _render_clarification_user_content(state)
+        submitted_ids = _submitted_category_flag_ids(resolved)
+
+        body, answered_by = self._call_providers(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=CLARIFICATION_QUESTIONS_SCHEMA_NAME,
+            stage="execute_clarification_questions",
+            provider_error_cls=ClarificationProviderError,
+        )
+        result = self._validate_clarification_schema(body, provider=answered_by)
+        miss = _clarification_coverage_miss(result, submitted_ids)
+        if miss is None:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "clarification.validated",
+                        "timestamp": _timestamp(),
+                        "provider": answered_by,
+                        "verdict": "accepted",
+                        "question_count": len(result.questions),
+                    }
+                )
+            )
+            return result
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "clarification.coverage_retry",
+                    "timestamp": _timestamp(),
+                    "provider": answered_by,
+                    "reason": "category_id_coverage",
+                    **miss,
+                }
+            )
+        )
+        body, answered_by = self._call_providers(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=CLARIFICATION_QUESTIONS_SCHEMA_NAME,
+            stage="execute_clarification_questions",
+            provider_error_cls=ClarificationProviderError,
+        )
+        result = self._validate_clarification_schema(body, provider=answered_by)
+        miss = _clarification_coverage_miss(result, submitted_ids)
+        if miss is not None:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "clarification.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_clarification_questions",
+                        "provider": answered_by,
+                        "reason": "category_id_coverage",
+                        **miss,
+                    }
+                )
+            )
+            raise ClarificationValidationError(
+                f"The body returned by {answered_by} did not cover the submitted category ids "
+                f"(duplicates={miss['duplicates']}, unknown={miss['unknown']}, "
+                f"missing={miss['missing']})",
+                stage="execute_clarification_questions",
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "clarification.validated",
+                    "timestamp": _timestamp(),
+                    "provider": answered_by,
+                    "verdict": "accepted",
+                    "question_count": len(result.questions),
+                    "retried_coverage": True,
+                }
+            )
+        )
+        return result
+
+    def collect_clarification_responses(
+        self,
+        state: RequirementInterpretationState,
+        result: ClarificationResult,
+    ) -> None:
+        """2B Stage 3: numbered CLI; persist one UserResponse per category flag."""
+        resolved = state.resolved
+        assert resolved is not None
+
+        questions_by_id = {question.category_id: question for question in result.questions}
+        submitted_flags = [
+            flag for flag in resolved.ambiguity_flags if flag.target == "category"
+        ]
+
+        for flag in submitted_flags:
+            assert flag.category_id is not None
+            question = questions_by_id[flag.category_id]
+            selected = _prompt_clarification_option(flag.phrase, question.question, question.options)
+            if selected == "other":
+                response_text = _prompt_other_description()
+            else:
+                response_text = selected
+            state.user_responses[flag.category_id] = UserResponse(
+                question=question.question,
+                options=list(question.options),
+                response=response_text,
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "clarification.collected",
+                    "timestamp": _timestamp(),
+                    "response_count": len(state.user_responses),
+                    "category_ids": sorted(state.user_responses),
+                }
+            )
+        )
+
+    def _validate_clarification_schema(self, body: dict, *, provider: str) -> ClarificationResult:
+        """Independent second check: reject a body that is not a closed ClarificationResult."""
+        try:
+            return ClarificationResult.model_validate(body)
+        except ValidationError as exc:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "clarification.validated",
+                        "timestamp": _timestamp(),
+                        "provider": provider,
+                        "verdict": "rejected",
+                        "error_count": exc.error_count(),
+                    }
+                )
+            )
+            raise ClarificationValidationError(
+                f"The body returned by {provider} does not match the clarification contract",
+                stage="execute_clarification_questions",
+            ) from exc
 
     def resolve_explicit_categories(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
-        """Mechanism 2 workflow: Operation 1 always, Operation 2 when the gate opens."""
+        """Component 2A: Operation 1 always, Operation 2 when the gate opens."""
         instruction = self.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
         mapping = self.execute_taxonomy_mapping(state, instruction)
         self.assemble_resolved_requirements(state, mapping)
@@ -681,6 +917,7 @@ class UserRequirementsInterpretation:
         json_schema: dict,
         schema_name: str,
         stage: str,
+        provider_error_cls: type[Exception] = CategoryMappingProviderError,
     ) -> tuple[dict, str]:
         """Try providers in the bound order; return the first body or a typed provider error."""
         body: dict | None = None
@@ -737,7 +974,7 @@ class UserRequirementsInterpretation:
                     }
                 )
             )
-            raise CategoryMappingProviderError(
+            raise provider_error_cls(
                 f"No LLM provider returned a {stage} body", stage=stage
             )
 
@@ -940,6 +1177,83 @@ def _render_pairs(pairs: list[tuple[AmbiguityFlag, UserResponse]]) -> str:
         indent=2,
         ensure_ascii=False,
     )
+
+
+def _render_clarification_user_content(state: RequirementInterpretationState) -> str:
+    """Submitted flags plus grounding, the user content of the 2B generation call."""
+    resolved = state.resolved
+    assert resolved is not None
+    payload = {
+        "submitted_flags": [
+            {"category_id": flag.category_id, "category": flag.phrase}
+            for flag in resolved.ambiguity_flags
+            if flag.target == "category"
+        ],
+        "resolved_explicit_categories": [
+            asdict(category) for category in resolved.resolved_explicit_categories
+        ],
+        "payload": asdict(resolved.payload),
+        "persona_facts": list(resolved.persona_facts),
+        "ambiguity_flags": [flag.model_dump() for flag in resolved.ambiguity_flags],
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _submitted_category_flag_ids(resolved: ResolvedRequirements) -> list[int]:
+    return [
+        flag.category_id
+        for flag in resolved.ambiguity_flags
+        if flag.target == "category" and flag.category_id is not None
+    ]
+
+
+def _clarification_coverage_miss(
+    result: ClarificationResult,
+    submitted_ids: list[int],
+) -> dict[str, list[int]] | None:
+    """None when returned ids equal submitted ids with no duplicates; else the miss."""
+    returned_ids = [question.category_id for question in result.questions]
+    duplicates = [category_id for category_id in returned_ids if returned_ids.count(category_id) > 1]
+    unique_duplicates = sorted(set(duplicates))
+    unknown = sorted(set(returned_ids) - set(submitted_ids))
+    missing = sorted(set(submitted_ids) - set(returned_ids))
+    if unique_duplicates or unknown or missing:
+        return {"duplicates": unique_duplicates, "unknown": unknown, "missing": missing}
+    return None
+
+
+_CLARIFICATION_PREFACE = (
+    "This category could not be mapped to a known amenity type. Please pick what you "
+    "meant, not a new need."
+)
+
+
+def _prompt_clarification_option(category: str, question: str, options: list[str]) -> str:
+    """Print one question and block until the customer types a valid option index."""
+    while True:
+        print(_CLARIFICATION_PREFACE)
+        print(f"Category: {category}")
+        print(f"Question: {question}")
+        for index, option in enumerate(options, start=1):
+            print(f"  {index}. {option}")
+        raw = input("Enter a number (1-5): ").strip()
+        if not raw:
+            continue
+        try:
+            chosen = int(raw)
+        except ValueError:
+            continue
+        if chosen < 1 or chosen > len(options):
+            continue
+        return options[chosen - 1]
+
+
+def _prompt_other_description() -> str:
+    """Block until the customer types a non-empty description for the 'other' option."""
+    while True:
+        description = input("Please describe what you meant: ").strip()
+        if description:
+            return description
 
 
 def _category_flag_count(flags: list[AmbiguityFlag]) -> int:

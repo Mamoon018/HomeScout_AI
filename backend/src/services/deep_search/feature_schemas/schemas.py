@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.services.deep_search.feature_schemas.amenity_taxonomy import (
     AMENITY_TAXONOMY_NODES,
@@ -13,6 +13,12 @@ EXTRACTION_SCHEMA_NAME = "extracted_requirements"
 # Component 2A's two constrained operations echo these schema names back with their bodies.
 TAXONOMY_MAPPING_SCHEMA_NAME = "taxonomy_mapping_result"
 FLAG_RESOLUTION_SCHEMA_NAME = "flag_resolution_result"
+
+# Component 2B's constrained question-generation call echoes this schema name back.
+CLARIFICATION_QUESTIONS_SCHEMA_NAME = "clarification_questions"
+
+# Router destination after each inspect of a fresh 2A output.
+CategoryResolutionRoute = Literal["component_2b", "mechanism_3"]
 
 # Provenance values a resolved category can carry: a confident mapping, or a nearest-node
 # fallback applied only in Operation 2 once a user response exists.
@@ -246,6 +252,53 @@ class UserResponse(BaseModel):
     response: str = Field(description="The customer's answer to that question.")
 
 
+class ClarificationQuestion(BaseModel):
+    """One generated clarification question for a single category flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category_id: int = Field(
+        description=(
+            "The category_id of the category flag this question is for, echoed from the "
+            "input. Do not invent an id."
+        )
+    )
+    category: str = Field(
+        description="The flagged category phrase, echoed from the input for display and grounding."
+    )
+    question: str = Field(
+        description=(
+            "The clarification question that asks which amenity type the stated category "
+            "maps to, not a preference or a new need."
+        )
+    )
+    options: list[str] = Field(
+        min_length=5,
+        max_length=5,
+        description=(
+            "Exactly five candidate interpretations to show the customer. One option must "
+            "be the literal 'other' so the customer can describe a different meaning."
+        ),
+    )
+
+    @field_validator("options")
+    @classmethod
+    def options_must_include_other(cls, value: list[str]) -> list[str]:
+        if value.count("other") != 1:
+            raise ValueError('options must contain the literal "other" exactly once')
+        return value
+
+
+class ClarificationResult(BaseModel):
+    """Component 2B generation output: one question per submitted category flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[ClarificationQuestion] = Field(
+        description="One clarification question for every submitted category flag."
+    )
+
+
 def taxonomy_mapping_json_schema() -> dict:
     """Strict Operation 1 schema derived from the wire model, with the taxonomy enum."""
     schema = TaxonomyMappingResult.model_json_schema()
@@ -259,6 +312,13 @@ def flag_resolution_json_schema() -> dict:
     schema = FlagResolutionResult.model_json_schema()
     _apply_strict_object_rules(schema)
     _inject_taxonomy_node_enum(schema)
+    return schema
+
+
+def clarification_questions_json_schema() -> dict:
+    """Strict 2B schema derived from the wire model. No taxonomy enum — 2B does not select a node."""
+    schema = ClarificationResult.model_json_schema()
+    _apply_strict_object_rules(schema)
     return schema
 
 
@@ -306,9 +366,10 @@ class ResolvedRequirements:
 
 @dataclass
 class RequirementInterpretationState:
-    """Handoff object for Component 2A, which appends its results to this same object."""
+    """Mutable handoff object Mechanism 2 reads and writes across 2A, the router, and 2B."""
 
     payload: PayloadRecord
     extracted: ExtractedRequirements
     user_responses: dict[int, UserResponse] = field(default_factory=dict)
     resolved: ResolvedRequirements | None = None
+    category_resolution_passes: int = 0

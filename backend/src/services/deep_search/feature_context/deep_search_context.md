@@ -95,7 +95,7 @@ Now, based on the complete information which includes baseline metrics, user spe
 
 Responsibilities of the feature:
 
-1. User's Requirement interpretation (Responsibility of the feature)
+1. User's Requirement interpretation (Responsibility-1 of the feature)
 
 **Responsibility:** Determine what the user actually wants to evaluate.
 

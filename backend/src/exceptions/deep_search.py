@@ -56,3 +56,27 @@ class CategoryMappingValidationError(CategoryResolutionError):
     """Raised when a returned body failed the mapping/resolution wire contract."""
 
     stage: ClassVar[str] = "execute_taxonomy_mapping"
+
+
+class ClarificationError(Exception):
+    """Base failure surface of Mechanism 2 Component 2B (category clarification)."""
+
+    # Named so a caller can tell provider-vs-validation without reading a traceback.
+    stage: ClassVar[str] = "execute_clarification_questions"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class ClarificationProviderError(ClarificationError):
+    """Raised when no provider in the bound order returned a clarification body."""
+
+    stage: ClassVar[str] = "execute_clarification_questions"
+
+
+class ClarificationValidationError(ClarificationError):
+    """Raised when a returned body failed the clarification wire contract or coverage."""
+
+    stage: ClassVar[str] = "execute_clarification_questions"
