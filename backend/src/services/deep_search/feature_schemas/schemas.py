@@ -17,6 +17,9 @@ FLAG_RESOLUTION_SCHEMA_NAME = "flag_resolution_result"
 # Component 2B's constrained question-generation call echoes this schema name back.
 CLARIFICATION_QUESTIONS_SCHEMA_NAME = "clarification_questions"
 
+# Mechanism 4's constrained inference call echoes this schema name back with the body.
+INFERRED_CATEGORIES_SCHEMA_NAME = "inferred_categories_schema"
+
 # Router destination after each inspect of a fresh 2A output.
 CategoryResolutionRoute = Literal["component_2b", "mechanism_3"]
 
@@ -299,6 +302,42 @@ class ClarificationResult(BaseModel):
     )
 
 
+class InferredCategoryEntry(BaseModel):
+    """One wire proposal from the Mechanism 4 inference call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    taxonomy_node: str = Field(
+        description=(
+            "The single taxonomy node being inferred. Must be one of the nodes in the "
+            "provided taxonomy exactly; do not invent, rename, or return a node outside "
+            "the list."
+        )
+    )
+    reasoning: str = Field(
+        min_length=1,
+        description=(
+            "Which persona facts back this inference, in enough detail that a reader can "
+            "see the evidence. Not a plausibility score and not a purpose-reason for the "
+            "amenity."
+        ),
+    )
+
+
+class InferredCategoriesResult(BaseModel):
+    """Mechanism 4 wire body: zero to two inferred category proposals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inferred_categories: list[InferredCategoryEntry] = Field(
+        max_length=2,
+        description=(
+            "Additional taxonomy nodes inferred from persona evidence. Empty list when "
+            "none are justified. At most two entries."
+        ),
+    )
+
+
 def taxonomy_mapping_json_schema() -> dict:
     """Strict Operation 1 schema derived from the wire model, with the taxonomy enum."""
     schema = TaxonomyMappingResult.model_json_schema()
@@ -319,6 +358,14 @@ def clarification_questions_json_schema() -> dict:
     """Strict 2B schema derived from the wire model. No taxonomy enum — 2B does not select a node."""
     schema = ClarificationResult.model_json_schema()
     _apply_strict_object_rules(schema)
+    return schema
+
+
+def inferred_categories_json_schema() -> dict:
+    """Strict inference schema derived from the wire model, with the taxonomy enum and cap two."""
+    schema = InferredCategoriesResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    _inject_taxonomy_node_enum(schema)
     return schema
 
 
@@ -355,6 +402,15 @@ class ResolvedCategory:
 
 
 @dataclass
+class InferredCategory:
+    """One inferred taxonomy node stored after Mechanism 4 strip and identity stamp."""
+
+    taxonomy_node: str
+    category_id: int
+    reasoning: str
+
+
+@dataclass
 class ResolvedRequirements:
     """Component 2A's output object; Operation 2 appends resolved categories in place."""
 
@@ -366,10 +422,11 @@ class ResolvedRequirements:
 
 @dataclass
 class RequirementInterpretationState:
-    """Mutable handoff object Mechanism 2 reads and writes across 2A, the router, and 2B."""
+    """Mutable handoff object later mechanisms read and write across the responsibility."""
 
     payload: PayloadRecord
     extracted: ExtractedRequirements
     user_responses: dict[int, UserResponse] = field(default_factory=dict)
     resolved: ResolvedRequirements | None = None
     category_resolution_passes: int = 0
+    inferred_categories: list[InferredCategory] = field(default_factory=list)

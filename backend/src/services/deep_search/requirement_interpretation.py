@@ -20,6 +20,8 @@ from src.exceptions.deep_search import (
     ClarificationValidationError,
     ExtractionProviderError,
     ExtractionValidationError,
+    InferenceProviderError,
+    InferenceValidationError,
     InputTooShortError,
     UnsupportedLanguageError,
 )
@@ -42,6 +44,10 @@ from src.services.deep_search.feature_prompts.extraction_instruction import (
     TASK_STATEMENT,
     build_few_shot_examples,
 )
+from src.services.deep_search.feature_prompts.inference_instruction import (
+    build_inference_few_shot_examples,
+    build_inference_instruction as build_inference_text,
+)
 from src.services.deep_search.feature_schemas.amenity_taxonomy import (
     AMENITY_TAXONOMY_NODES,
     TAXONOMY_NODE_SET,
@@ -50,6 +56,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     CLARIFICATION_QUESTIONS_SCHEMA_NAME,
     EXTRACTION_SCHEMA_NAME,
     FLAG_RESOLUTION_SCHEMA_NAME,
+    INFERRED_CATEGORIES_SCHEMA_NAME,
     TAXONOMY_MAPPING_SCHEMA_NAME,
     AmbiguityFlag,
     CategoryResolutionRoute,
@@ -57,6 +64,9 @@ from src.services.deep_search.feature_schemas.schemas import (
     ExtractedCategory,
     ExtractedRequirements,
     FlagResolutionResult,
+    InferredCategoriesResult,
+    InferredCategory,
+    InferredCategoryEntry,
     PayloadRecord,
     RequirementInterpretationState,
     ResolvedCategory,
@@ -66,6 +76,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     clarification_questions_json_schema,
     extraction_json_schema,
     flag_resolution_json_schema,
+    inferred_categories_json_schema,
     taxonomy_mapping_json_schema,
 )
 
@@ -119,7 +130,8 @@ class UserRequirementsInterpretation:
     def interpret(self, raw_input: str) -> RequirementInterpretationState:
         """Responsibility entry point; sequences the mechanisms and returns the state."""
         state = self.parse_unstructured_input(raw_input)
-        return self.run_explicit_category_resolution(state)
+        state = self.run_explicit_category_resolution(state)
+        return self.run_persona_driven_category_inference(state)
 
     def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
@@ -909,6 +921,187 @@ class UserRequirementsInterpretation:
             )
         )
 
+    # ---------------------------------------------------------------------------------
+    # Mechanism 4 — Persona-driven category inference
+    # ---------------------------------------------------------------------------------
+
+    def run_persona_driven_category_inference(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Mechanism 4 workflow: instruction, one constrained call, then strip and write."""
+        assert state.resolved is not None  # Mechanism 2 always sets this before M4 runs.
+
+        instruction = self.build_inference_instruction(inferred_categories_json_schema())
+        body = self.execute_category_inference(state, instruction)
+        self.write_inferred_categories(state, body)
+        return state
+
+    def build_inference_instruction(self, json_schema: dict) -> str:
+        """Stage 2: assemble evidence, distinctness, taxonomy, closed schema, six pairs."""
+        instruction = build_inference_text(json_schema)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "inference.instruction.built",
+                    "timestamp": _timestamp(),
+                    "instruction_length": len(instruction),
+                    "taxonomy_node_count": len(AMENITY_TAXONOMY_NODES),
+                    "few_shot_count": len(build_inference_few_shot_examples()),
+                }
+            )
+        )
+        logger.debug(
+            json.dumps({"event": "inference.instruction.text", "instruction": instruction})
+        )
+        return instruction
+
+    def execute_category_inference(
+        self,
+        state: RequirementInterpretationState,
+        instruction: str,
+    ) -> InferredCategoriesResult:
+        """Stage 3: one constrained call, schema then taxonomy-set check. No strip."""
+        json_schema = inferred_categories_json_schema()
+        user_content = _render_inference_user_content(state)
+        body, answered_by = self._call_providers(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=INFERRED_CATEGORIES_SCHEMA_NAME,
+            stage="execute_category_inference",
+            provider_error_cls=InferenceProviderError,
+        )
+
+        try:
+            result = InferredCategoriesResult.model_validate(body)
+        except ValidationError as exc:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "inference.validated",
+                        "timestamp": _timestamp(),
+                        "provider": answered_by,
+                        "verdict": "rejected",
+                        "error_count": exc.error_count(),
+                    }
+                )
+            )
+            raise InferenceValidationError(
+                f"The body returned by {answered_by} does not match the inference contract",
+                stage="execute_category_inference",
+            ) from exc
+
+        unknown = [
+            entry.taxonomy_node
+            for entry in result.inferred_categories
+            if entry.taxonomy_node not in TAXONOMY_NODE_SET
+        ]
+        if unknown:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "inference.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_category_inference",
+                        "provider": answered_by,
+                        "reason": "unknown_taxonomy_node",
+                        "nodes": unknown,
+                    }
+                )
+            )
+            raise InferenceValidationError(
+                f"The body returned by {answered_by} carried nodes outside the taxonomy: "
+                f"{unknown}",
+                stage="execute_category_inference",
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "inference.validated",
+                    "timestamp": _timestamp(),
+                    "provider": answered_by,
+                    "verdict": "accepted",
+                    "inferred_count": len(result.inferred_categories),
+                }
+            )
+        )
+        return result
+
+    def write_inferred_categories(
+        self,
+        state: RequirementInterpretationState,
+        body: InferredCategoriesResult,
+    ) -> None:
+        """Stage 4: drop exact-node collisions, stamp ids, write the inferred list."""
+        resolved = state.resolved
+        assert resolved is not None
+
+        explicit_nodes = {
+            category.taxonomy_node for category in resolved.resolved_explicit_categories
+        }
+        kept_entries: list[InferredCategoryEntry] = []
+        seen_inferred: set[str] = set()
+
+        for entry in body.inferred_categories:
+            if entry.taxonomy_node in explicit_nodes:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "inference.stripped",
+                            "timestamp": _timestamp(),
+                            "taxonomy_node": entry.taxonomy_node,
+                            "reason": "exact_explicit_duplicate",
+                        }
+                    )
+                )
+                continue
+            if entry.taxonomy_node in seen_inferred:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "inference.stripped",
+                            "timestamp": _timestamp(),
+                            "taxonomy_node": entry.taxonomy_node,
+                            "reason": "duplicate_inferred_node",
+                        }
+                    )
+                )
+                continue
+            seen_inferred.add(entry.taxonomy_node)
+            kept_entries.append(entry)
+
+        extracted_ids = [
+            category.category_id
+            for category in state.extracted.explicit_categories
+            if category.category_id is not None
+        ]
+        next_id = max(extracted_ids) + 1 if extracted_ids else 0
+        stored: list[InferredCategory] = []
+        for entry in kept_entries:
+            stored.append(
+                InferredCategory(
+                    taxonomy_node=entry.taxonomy_node,
+                    category_id=next_id,
+                    reasoning=entry.reasoning,
+                )
+            )
+            next_id += 1
+
+        state.inferred_categories = stored
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "inferred_categories.written",
+                    "timestamp": _timestamp(),
+                    "inferred_count": len(stored),
+                    "category_ids": [entry.category_id for entry in stored],
+                }
+            )
+        )
+
     def _call_providers(
         self,
         *,
@@ -1177,6 +1370,24 @@ def _render_pairs(pairs: list[tuple[AmbiguityFlag, UserResponse]]) -> str:
         indent=2,
         ensure_ascii=False,
     )
+
+
+def _render_inference_user_content(state: RequirementInterpretationState) -> str:
+    """Persona facts, explicit nodes plus characteristics, and payload as JSON."""
+    resolved = state.resolved
+    assert resolved is not None
+    payload = {
+        "persona_facts": list(resolved.persona_facts),
+        "resolved_explicit_categories": [
+            {
+                "taxonomy_node": category.taxonomy_node,
+                "characteristics": list(category.characteristics),
+            }
+            for category in resolved.resolved_explicit_categories
+        ],
+        "payload": asdict(state.payload),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def _render_clarification_user_content(state: RequirementInterpretationState) -> str:

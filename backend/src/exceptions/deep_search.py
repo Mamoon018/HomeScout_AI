@@ -80,3 +80,27 @@ class ClarificationValidationError(ClarificationError):
     """Raised when a returned body failed the clarification wire contract or coverage."""
 
     stage: ClassVar[str] = "execute_clarification_questions"
+
+
+class InferenceError(Exception):
+    """Base failure surface of Mechanism 4 (persona-driven category inference)."""
+
+    # Named so a caller can tell provider-vs-validation without reading a traceback.
+    stage: ClassVar[str] = "execute_category_inference"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class InferenceProviderError(InferenceError):
+    """Raised when no provider in the bound order returned an inference body."""
+
+    stage: ClassVar[str] = "execute_category_inference"
+
+
+class InferenceValidationError(InferenceError):
+    """Raised when a returned body failed the inference wire contract or taxonomy set."""
+
+    stage: ClassVar[str] = "execute_category_inference"

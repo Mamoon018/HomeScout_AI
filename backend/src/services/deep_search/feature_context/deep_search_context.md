@@ -527,19 +527,261 @@ NOTE: User response will be grounded in "category reasoning responses" and it wi
 Mechanism 4 — Persona-Driven Category Inference
 Component: Lifestyle-Based Category & Characteristic Inference
 
-Goal of Component: From persona/situation/lifestyle facts, infer additional categories (MUST BE FROM DEFINED TAXONOMY) and characteristics the customer didn't state but would plausibly care about, without duplicating anything already in the explicit set, tagged as lower-priority.
+## Goal of Component
 
-Problem It Aims to Solve: Without this, anything outside the customer's explicit list is invisible to the specification, even when it's a predictable extension of what he already said mattered.
+Four operations, always, in this order, after Mechanism 2 has written `state.resolved`. This component does not run a skip branch: an empty result is a valid output of Operation 2, not a reason to bypass the call.
 
-Approach:
-Direct persona-to-category LLM inference: one call that takes persona facts plus the finalized explicit category list (for dedup) and proposes additional categories with characteristics and reasoning (that will explain what backs this inference).
+1. **Assemble inference input (always runs):** Read `persona_facts`, `payload`, and every resolved explicit category (`taxonomy_node` + `characteristics`) from the `RequirementInterpretationState`, and load the full maintained amenity-category taxonomy. These are the only inputs to the call.
+
+2. **Persona-to-category inference (always runs):** One constrained LLM call proposes additional taxonomy categories the customer did not state. Each proposal must be a node in the maintained taxonomy, must be distinct from the explicit set under the distinctness rule below, and must be backed by persona evidence cited in `reasoning`. Generic associations are not sufficient. The call may return **zero, one, or two** categories. Zero is valid when evidence is missing or every candidate fails distinctness.
+
+3. **Validate the body (always runs):** Accept the body only if it matches the inference schema (maximum two entries; each `taxonomy_node` constrained to the taxonomy enum) and every returned node is a real taxonomy node. The count is not clamped in code: a body with more than two entries is a validation failure, not a truncation.
+
+4. **Strip exact-node duplicates, stamp identity, write the inferred list (always runs):** Drop every inferred entry whose `taxonomy_node` equals a resolved explicit `taxonomy_node`. Keep every remaining inferred entry. Assign `category_id` in code (the model does not emit it). Write the surviving list to a **new** `inferred_categories` field on `RequirementInterpretationState` — including an empty list when nothing survives. Do not raise for a collision. Do not modify `resolved_explicit_categories`, `persona_facts`, `payload`, `extracted`, or `user_responses`.
+
+Priority is not tagged on either list. Explicit and inferred stay distinct because they live in different fields.
+
+## Problem It Aims to Solve
+
+Without this, anything outside the customer's explicit list is invisible to the specification, even when it is a predictable extension of what he already said mattered. Inference that re-labels an explicit category, or that invents a category the persona does not support, would compete with explicit priority and send the wrong scope downstream.
+
+## Approach: Direct persona-to-category LLM inference
+
+One call. The model receives:
+
+- `persona_facts` (from the resolved object / extraction; same strings)
+- the finalized explicit category list after Mechanism 2: each entry’s `taxonomy_node` and `characteristics`
+- the `payload` (normalized customer text)
+- the full maintained amenity-category taxonomy with node identifiers
+
+The model returns `inferred_categories`: zero to two objects, each with `taxonomy_node` and `reasoning` only. `category_id` is stamped after a valid body is accepted and exact-node duplicates of the explicit set have been stripped.
+
+The prompt states that persona facts and explicit characteristics exist so the model can judge evidence and distinctness — not so it can add a category the persona does not support, restate an explicit node, or invent a taxonomy node.
+
+## Critical Decision Choices
+
+### What this component reads
+
+The full `RequirementInterpretationState` after Mechanism 2. It uses:
+
+| Source | Fields used |
+|---|---|
+| `state.resolved.persona_facts` | Evidence for whether any inference is justified |
+| `state.resolved.resolved_explicit_categories` | Dedup / distinctness: `taxonomy_node` and `characteristics` on each explicit entry |
+| `state.payload` | Customer wording as surrounding context |
+| Maintained taxonomy | Allowed nodes for every inferred `taxonomy_node` |
+
+It does not read `user_responses`, characteristic/persona flags, or Mechanism 1 raw category names for dedup. Dedup runs against **resolved** explicit taxonomy nodes and their characteristics, not raw customer wording.
+
+### Output object: `inferred_categories` on `RequirementInterpretationState`
+
+This component does **not** produce a new top-level workflow object and does **not** append to `resolved_explicit_categories`. It writes one new field on the existing state.
+
+`inferred_categories`: `list[InferredCategory]` — empty list when nothing is inferred or when every proposed node was stripped as an exact-node duplicate of the explicit set.
+
+Each `InferredCategory`:
+
+| Field | Type | Content |
+|---|---|---|
+| `taxonomy_node` | `str` | Exactly one node from the maintained amenity-category taxonomy. Not invented, renamed, or outside the list. |
+| `category_id` | `int` | Stable identity stamped in code after the call, unique across explicit and inferred categories on this state. Not produced by the model. |
+| `reasoning` | `str` | Which persona facts back this inference, in enough detail that a reader can see the evidence. Not a plausibility score. Not a purpose-reason for the amenity (Mechanism 3 is out of this responsibility). |
+
+No other fields. Inferred entries do **not** carry `characteristics`, `raw_name`, `provenance`, or a priority tag.
+
+### Cap: maximum two, minimum none
+
+Maximum inferred categories per request: **2**, enforced **only by the schema** (`maxItems: 2`). There is no minimum. An empty list is in contract. Code does not truncate a too-long list and does not pad a too-short one.
+
+### Distinctness (duplicate test)
+
+An inferred category is **not distinct** (a duplicate) if the information it would add is already substantially recoverable from an explicit category or from the characteristics used to describe that explicit category. Distinct means a genuinely new discriminating dimension — not a new label for existing information.
+
+The same tests apply among inferred items: two inferred categories must be distinct from each other as well as from the explicit set.
+
+**Step 1 — Same taxonomy node?**
+
+Identity, including aliases, synonyms, and trivial rewordings of the same node (singular/plural, casing, phrasing).
+
+- If yes: duplicate. Stop. Do not run Step 2.
+
+**Step 2 — Different node, but same information need?**
+
+If it clears Step 1, apply all three tests. Any single “yes” is a duplicate:
+
+1. **Reconstruction:** Could someone who only has the explicit category and its listed characteristics fully reconstruct what the inferred category is telling them? If it adds nothing beyond what is already derivable, it is redundant.
+2. **Discrimination:** Does the inferred category ever split two items that the explicit category (plus its characteristics) treats identically? If it never changes how two cases are distinguished, it is not earning its place.
+3. **Directionality:** Is the inferred category only a narrower subset, rephrasing, or logical consequence of an existing characteristic (rather than an independent axis)? If so, it is a repackaging.
+
+- If any test is yes: duplicate.
+- If all three are no: distinct — allow it.
+
+**Exact-node collision with the explicit set (post-call strip, not a request failure):**
+
+If an inferred `taxonomy_node` equals a resolved explicit `taxonomy_node`, drop that inferred entry and keep every other inferred entry that does not collide. Then write the surviving list to the state.
+
+- One colliding node and one valid node → keep the valid node; stamp `category_id` on it; continue.
+- Every inferred node collides → write `inferred_categories: []`; continue.
+- Do **not** raise. Do **not** fail Mechanism 4. Do **not** fail the interpretation request.
+
+This strip is identity-only (exact `taxonomy_node` match). Alias/synonym identity and all of Step 2 remain instruction constraints on the model; they are not a programmatic clamp and they do not fail the request.
+
+If two inferred entries share the same `taxonomy_node`, keep the first and drop the later ones, then continue.
+
+### How `category_id` is assigned
+
+After the body is accepted and exact-node duplicates have been stripped, each surviving inferred entry is labeled in remaining-list order with the next integer after the maximum `category_id` already present on `state.extracted.explicit_categories`. If there are no explicit categories, numbering starts at `0`. The model never emits `category_id`.
+
+### What the model returns vs what code writes
+
+**Model body (schema):**
+
+| Field | Constraint |
+|---|---|
+| `inferred_categories` | Array, `maxItems: 2`, empty allowed |
+| `inferred_categories[].taxonomy_node` | Enum of the maintained taxonomy nodes |
+| `inferred_categories[].reasoning` | Non-empty string citing persona-fact evidence |
+
+**Code then:** checks every `taxonomy_node` is in the taxonomy set (unknown node still rejects the body); strips inferred entries whose `taxonomy_node` equals an explicit `taxonomy_node` (and later duplicates of the same inferred node); stamps `category_id` on what remains; assigns `state.inferred_categories`.
+
+### Empty or thin persona facts
+
+`persona_facts` may be empty. The call still runs. The instruction requires an empty `inferred_categories` list when there is not enough persona evidence for a non-generic inference, or when every candidate fails distinctness. That empty list is written to the state. There is no forced category.
+
+### Negations
+
+A category the persona facts negate must not be inferred.
+
+### What this component does not do
+
+- It does not infer or attach characteristics on inferred categories.
+- It does not tag priority on inferred or explicit categories.
+- It does not score plausibility. `reasoning` is the evidence record.
+- It does not modify the explicit resolved set or re-run Mechanism 2.
+- It does not resolve leftover characteristic or persona flags.
+- It does not capture why an **explicit** category matters (Mechanism 3 is excluded).
+- It does not search, retrieve, assign depth, or define metrics.
+
+
+## Process Flow — Component: Lifestyle-Based Category & Characteristic Inference
+
+Locked constraints carried into this breakdown. These are fixed at the component level and are not reopened by any sub-component below.
+
+- Input is the `RequirementInterpretationState` after Mechanism 2 (`state.resolved` is set). The call reads `persona_facts`, each resolved explicit category's `taxonomy_node` and `characteristics`, `payload`, and the full maintained taxonomy.
+- One constrained LLM call. Empty `inferred_categories` is a valid body. Maximum two inferred entries, enforced only by the schema (`maxItems: 2`). Code does not truncate a too-long list and does not pad a too-short one.
+- Model body fields are `taxonomy_node` and `reasoning` only. `category_id` is stamped in code after strip. No `characteristics`, `raw_name`, `provenance`, or priority tag on inferred entries.
+- Exact `taxonomy_node` match against the explicit set is stripped. Surviving entries are kept. Collision does not raise and does not fail the request. Unknown taxonomy node still rejects the whole body.
+- Distinctness Step 1 aliases and all of Step 2 live in the instruction. They are not a programmatic clamp.
+- `inferred_categories` is a new list on `RequirementInterpretationState`. It is not mixed into `resolved_explicit_categories`.
+- This component does not capture reasons for explicit categories, does not resolve leftover flags, and does not assign depth or metrics.
+
+Sub-components
+
+1. Inferred Category Contract and State Field
+2. Inference Instruction and Distinctness Rules
+3. Constrained Inference Call and Body Validation
+4. Exact-Node Strip, Identity Stamp, and State Write
+5. Dummy-Provider Path Checks
+
+Order: 1 → 2 → 3 → 4 → 5.
+
+Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3. Sub-component 5 runs the assembled path end to end. Taxonomy access already exists from Mechanism 2 (`AMENITY_TAXONOMY_NODES`, `TAXONOMY_NODE_SET`). It is reused, not rebuilt.
+
+---
+
+### Sub-component 1: Inferred Category Contract and State Field
+
+Goal of Component:
+Define the machine-checkable types this component writes: the wire body the model returns, the `InferredCategory` entry stored on the state, and the `inferred_categories` field on `RequirementInterpretationState`.
+
+Problem It Aims to Solve:
+Mechanism 2's state has no place to hold inferred categories, and `ResolvedCategory` carries `raw_name`, `characteristics`, and `provenance`, which this component is forbidden to write. Without a separate contract, the call has nothing to constrain and later mechanisms have nothing typed to read.
+
+Finalized Approach:
+1. Split wire and store. A closed Pydantic wire model for the LLM body (`taxonomy_node`, `reasoning`, array `maxItems: 2`). A separate store type for `InferredCategory` (`taxonomy_node`, `category_id`, `reasoning`). `category_id` is absent from the provider schema, same pattern as extraction's programmatic `category_id`.
 
 Critical Decision Choices:
-Generic: a cap or threshold on how many inferred categories are allowed, and how "plausibility" gets scored.
-	Decision: Maximum 2
-Context-specific: the dedup check must run against the resolved scope from Component 2.1, not raw customer wording — otherwise inference could re-add a category the customer already covered under different phrasing, which would violate explicit priority.
-	Decision: Yes
+* Empty `inferred_categories` default on the state is `[]`, not omitted and not `None`.
+* Failure surface is new typed errors: `InferenceProviderError` and `InferenceValidationError`.
+* Schema name the provider echoes with the constrained body: `inferred_categories_schema`.
+* Stored entry fields remain `taxonomy_node`, `category_id`, `reasoning` only. No characteristics. No priority tag.
 
+---
+
+### Sub-component 2: Inference Instruction and Distinctness Rules
+
+Goal of Component:
+Build the instruction text that makes one call return zero to two taxonomy nodes, each with `reasoning` that cites persona facts, and that applies the locked distinctness tests, evidence bar, and negation rule.
+
+Problem It Aims to Solve:
+The schema caps count and enumerates nodes. It does not define when a node is allowed. Without written rules, the same persona facts can yield a restated explicit category, a generic association with no evidence, or a negated category, and nothing in the schema will reject those.
+
+Finalized Approach:
+1. Rules plus few-shot worked pairs. Written evidence rule, distinctness Step 1 and Step 2 (reconstruction, discrimination, directionality), negation rule, and negative rules (do not invent nodes, do not force a category when evidence is thin, return `[]` in that case), plus fixed worked pairs.
+
+Critical Decision Choices:
+* Few-shot cases: empty persona → `[]`; one valid distinct node; exact-node collision omitted; negation omitted; two distinct nodes; Step 2 overlap (`gym` / `fitness_center`).
+* Examples use the maintained taxonomy node strings.
+* The full taxonomy is rendered in the instruction, not in user content.
+* `reasoning` cites which persona facts back the inference. It is not a purpose-reason for the amenity (Mechanism 3 is excluded).
+
+---
+
+### Sub-component 3: Constrained Inference Call and Body Validation
+
+Goal of Component:
+Execute the single inference call against the assembled user content and return either a schema-valid body or a typed failure.
+
+Problem It Aims to Solve:
+The response can exceed two entries, name a node outside the taxonomy, omit `reasoning`, or wrap extra keys. Downstream strip-and-write cannot consume that body, and an invalid body with no failure path stops the responsibility with no signal the caller can act on. Exact-node overlap with the explicit set is not this sub-component's failure. That is handled after a valid body exists.
+
+Finalized Approach:
+1. Provider-constrained structured output, then an independent second check. Pass the schema (including the taxonomy enum on `taxonomy_node` and `maxItems: 2`) at generation time. Validate the returned object with the same model. Then check every `taxonomy_node` is in `TAXONOMY_NODE_SET`. Unknown node rejects the whole body. More than two entries is a schema failure, not a truncation.
+
+Critical Decision Choices:
+* Reuse the existing ordered provider chain (`self._providers`, OpenAI then Groq).
+* User content is a JSON dump of the locked inputs: persona facts, explicit `taxonomy_node` plus `characteristics`, and payload. The full taxonomy is already in the instruction.
+* Invalid body (schema miss or unknown node) rejects the whole response. Count is not clamped in code.
+* The call always runs, including when `persona_facts` is empty. `[]` is a valid body.
+* One call for all candidates. Exact-node collision with the explicit set is not a validation failure here.
+
+---
+
+### Sub-component 4: Exact-Node Strip, Identity Stamp, and State Write
+
+Goal of Component:
+From a valid inference body, drop exact-node duplicates, stamp `category_id` on what remains, write `state.inferred_categories`, and sequence `interpret()` so this component runs after Mechanism 2.
+
+Problem It Aims to Solve:
+A schema-valid body can still repeat an explicit `taxonomy_node` or repeat the same inferred node twice. Failing the request on that collision would discard a valid sibling entry. Leaving the collision in place would put an inferred category on the same node as an explicit one and break explicit priority. Without a write onto the existing state, later mechanisms have no inferred list. Without an `interpret()` call after Mechanism 2, this component never runs.
+
+Finalized Approach:
+1. In-place filter and mutate. Walk the validated list. Drop an entry whose `taxonomy_node` is already in the explicit set. Drop a later inferred entry that repeats an earlier inferred `taxonomy_node`. Stamp `category_id` on survivors. Assign `state.inferred_categories`. `interpret()` calls this after `run_explicit_category_resolution`.
+
+Critical Decision Choices:
+* `category_id` is `max(extracted.explicit_categories.category_id) + 1`, or `0` if there are no explicit categories. It is not taken from `resolved_explicit_categories` only.
+* Stripped collisions are logged with the node and reason `exact_explicit_duplicate` or `duplicate_inferred_node`. Logging does not change the stored result beyond the strip.
+* Collision with an explicit node never raises. Survivors (zero, one, or two) are written. Empty list after a full strip is success.
+* Do not mix inferred entries into `resolved_explicit_categories`. Do not stamp ids until after the strip.
+
+---
+
+### Sub-component 5: Dummy-Provider Path Checks
+
+Goal of Component:
+Run a fixed set of inference bodies through the assembled path with a dummy provider (no live API call) and produce a pass or fail per check.
+
+Problem It Aims to Solve:
+Distinctness in the instruction is not checkable from the schema. Exact-node strip, empty-list success, id stamping, and "collision does not fail the request" are only visible if a known body is pushed through Operations 3 and 4. A live model call would change the body between runs and would not prove those rules.
+
+Finalized Approach:
+1. Dummy provider. A test double returns a fixture JSON body. The real validate, strip, stamp, and write path runs against it. Assertions check the stored `inferred_categories` and that no exception is raised on exact-node collision.
+
+Critical Decision Choices:
+* Fixture set: empty persona → `[]`; one valid node; two valid nodes; one collision plus one sibling (keep sibling, do not raise); both collide → `[]` (do not raise); two inferred entries with the same node (keep first); unknown taxonomy node (reject body); more than two entries (reject body, do not truncate).
+* Instruction-only rules (Step 2 overlap, negation, thin-evidence `[]`) are asserted via dummy bodies that already obey them.
+* No live provider call in these checks.
+* Maximum two is a schema failure, not truncation. Exact-node strip is not a request failure.
 
 Mechanism 5 — Depth Assignment
 Component: Per-Category Depth Calibration
@@ -1011,7 +1253,7 @@ If the model returns an unknown `category_id`, duplicates an id across the two a
 
 
 
-# Sub-component 5: Operation 2 — User-Response Gate and Category-Flag Resolution
+### Sub-component 5: Operation 2 — User-Response Gate and Category-Flag Resolution
 
 
  Goal of Component
@@ -1100,6 +1342,188 @@ After Operation 2 completes, the `ResolvedRequirements` object contains:
 | `payload` | Unchanged from mechanism-1. |
 
 This is the object the router inspects on the second pass. Because zero category flags remain, the router always clears to Mechanism 3.
+
+
+## Process flow -- Router & Component 2B (Router & User Feedback & Category resolution)
+
+
+### Sub-component 1: Pass-counted category-flag branch
+Goal of Component
+After 2A has written state.resolved, increment category_resolution_passes and emit one branch: Component 2B or Mechanism 3.
+
+Problem It Aims to Solve
+2A pass 1 can leave target: "category" flags that have no taxonomy node. Without an inspect that reads those flags and applies the two-pass cap, the workflow has no defined next step: category flags never reach clarification, characteristic or persona flags are sent to 2B, or 2B runs again after the second 2A pass.
+Finalized approach:
+Response: You can choose the approach which is most appropriate given the context of our problem. And you can also address the decision choices that are still open. However, you need to provide the reaosning for the approach you will finalize. 
+
+Parent constraints (do not reopen):
+has_category_flag = any(f.target == "category" for f in state.resolved.ambiguity_flags).
+Characteristic and persona flags never route to 2B.
+Hard cap: do not route to 2B when category_resolution_passes >= 2.
+Field name is state.category_resolution_passes.
+The whole state is forwarded.
+
+
+### Sub-component 2: Clarification wire contract
+Goal of Component
+Declare the closed shape of the question-generation call: ClarificationQuestion, ClarificationResult, and CLARIFICATION_SCHEMA_NAME, so a provider body can be constrained and validated.
+
+Problem It Aims to Solve
+The batched call has nothing to constrain against and nothing to validate against. Questions cannot be joined to flags by category_id if the model is free to return an unbounded object.
+Finalized approach:
+Pydantic models, schema derived. Define ClarificationQuestion and ClarificationResult as Pydantic models with extra="forbid". Derive the provider JSON schema from those models and close it the same way Mechanism 1 and 2A close theirs. CLARIFICATION_SCHEMA_NAME is the name the provider echoes.
+Parent constraints (do not reopen):
+
+ClarificationResult:
+
+Field	Type	Content
+questions
+list[ClarificationQuestion]
+One entry per submitted category flag
+ClarificationQuestion:
+
+Field	Type	Content
+category_id
+int
+Identity of the category flag, echoed from input
+category
+str
+Flagged category phrase, for display and grounding
+question
+str
+The clarification question
+options
+list[str]
+Candidate interpretations to show the customer
+
+Critical Decision Choices:
+Minimum and maximum length of options : Must be always 5 options in total, one of them would always be "other"
+Whether questions order must match the submitted flag order, or matching is by category_id only: matching is by category_id only
+Whether questions may be empty (2B is not invoked when there are zero category flags; the contract still has to say what an empty list means if it appears): I don't think this matter because router will never invoke the 2B when list will be empty
+
+
+### Sub-component 3: Clarification instruction assembly
+Constants module. Task statement, rules, negative rules, and few-shot pairs live as module-level strings. A build_* function concatenates them with the schema and the serialized flags, the same pattern as category_resolution_instruction.py for 2A.
+
+Goal of Component
+Produce one instruction string the generation call sends with the schema: all target: "category" flags plus grounding from state.resolved (resolved_explicit_categories, payload, persona_facts, ambiguity_flags).
+
+Problem It Aims to Solve
+Without that instruction, the model is not told that a question exists only to clarify which amenity-taxonomy node the stated category maps to. Questions can introduce unstated needs, bundle two flags, or ask about characteristic or persona flags.
+
+Critical Decision Choices:
+Whether the maintained taxonomy node list is inlined in this prompt (2B asks what the category maps to; it does not select a node): No, we do not need that in 2B prompt.
+How many few-shot pairs to include: 2 
+How the category phrase is shown next to category_id in the input block: ID and phrase together
+
+Parent constraints (do not reopen):
+
+Ground questions in the customer's wording and existing state.resolved context.
+Do not introduce assumptions about unstated needs.
+Purpose is taxonomy-scope clarification, not preference, discovery, or a new-requirement prompt.
+One question per category flag. No bundling.
+Do not generate questions for characteristic or persona flags.
+
+
+
+### Sub-component 4: Constrained batched question generation
+
+Goal of Component
+One provider call returns a validated ClarificationResult that covers every submitted category_id, or a typed failure. The call does not write user_responses or resolved.
+
+Problem It Aims to Solve
+Without this call, 2B has no questions to present. Without a coverage check, a valid-looking body can omit a flag, duplicate an id, or invent an id, and the CLI cannot key answers for 2A Operation 2.
+
+Finalized approach:
+Validate body, then check ids. Reuse _call_providers with CLARIFICATION_SCHEMA_NAME. Parse the body into ClarificationResult. Reject the whole body if schema validation fails. Then require that the set of returned category_id values equals the set of submitted category-flag ids.
+Additional requirement: If the body validates but coverage fails, send the same schema and instruction once more. A second coverage failure is a typed validation exit. Total provider failure is still a typed provider exit.
+
+Critical Decision Choices:
+Whether provider failure uses a new ClarificationProviderError or reuses CategoryMappingProviderError: ClarificationProviderError 
+The stage name on those errors: Op2 for Questions generation stage
+Whether unknown, duplicate, or missing category_id is a validation error or a provider error: It is a validation error
+Rename CLARIFICATION_SCHEMA_NAME to CLARIFICATION_QUESTIONS_SCHEMA_NAME
+
+Parent constraints (do not reopen):
+Reuse self._providers and _call_providers.
+Use CLARIFICATION_SCHEMA_NAME.
+Total provider failure is a typed error.
+One batched call for all category flags, not one call per flag.
+Do not write resolved.*.
+
+
+### Sub-component 5: CLI present, collect, and persist
+Goal of Component
+For every generated ClarificationQuestion, collect a non-empty customer answer and write UserResponse {question, options, response} to state.user_responses[category_id].
+
+Problem It Aims to Solve
+A question that is printed and not stored leaves user_responses empty for that category_id. 2A Operation 2 then has no paired answer. The Router's second-pass guarantee (every category flag has a response, no skip) does not hold.
+
+Finalzed approach:
+One stdin prompt per question. Print that question and its options. Read one line. If the line is empty or whitespace, print again. When a non-empty line is read, write user_responses[category_id] and move to the next question.
+Additional requirements: Print each question with numbered options. The customer types an index. An out-of-range or empty entry is re-prompted. The stored response is the selected option string (or the index, depending on the open decision below).
+
+Critical Decision Choices:
+Prompt wording around each question: Phrase with wording that help us understand this instruction
+Whether the stored response must equal one of options, or any non-empty string is stored: stored response must equal one of options until others option is selected for which user can type anything
+CLI encoding and how non-ASCII answers are read: Not relevant as of now.
+
+Parent constraints (do not reopen):
+Synchronous and blocking. The workflow does not proceed until each question is answered.
+Blank or empty answers are re-prompted and never stored.
+Key is category_id, not phrase matching.
+The only write is state.user_responses.
+resolved.resolved_explicit_categories, resolved.ambiguity_flags, resolved.persona_facts, and resolved.payload stay unchanged.
+category_resolution_passes is not incremented here (the Router increments on its next inspect).
+
+
+### Sub-component 6: Mechanism-2 loop sequencing
+Goal of Component
+For one request: run 2A pass 1, run the pass-counted branch, then either enter 2B and 2A pass 2 and branch again, or go to Mechanism 3. Component 2B runs at most once.
+
+Problem It Aims to Solve
+interpret currently runs parse then 2A only. The branch and 2B have no invoker. Pass 2 would not reuse state.resolved, and 2B could be called with no cap.
+
+
+Critical Decision Choices:
+Pass 2: user_responses filled by 2B → skip Op1, run Op2 on the object already on the state.
+Whether Mechanism 3 is invoked here or the state is returned to the feature class for the next mechanism: state is returned to the feature class for the next mechanism
+
+Parent constraints (do not reopen):
+
+Pass 2 reuses the existing state.resolved. It does not rebuild it from scratch.
+Operation 1 is skipped on pass 2. Operation 2 runs over surviving category flags paired with user_responses[category_id].
+2B runs at most once per request.
+After pass 2, the branch clears to Mechanism 3 (zero category flags, or the hard cap).
+
+### Sub-component 7: Assembled-path fixture set
+
+Goal of Component
+A runnable check that, on a known input, the branch, generation, collect, persist, and second inspect produce the locked before/after state (responses keyed by category_id, resolved.* unchanged by 2B, second inspect does not re-enter 2B).
+
+Problem It Aims to Solve
+Units 1–6 can pass in isolation while the loop still routes characteristic flags to 2B, drops a category_id key, or calls 2B after pass 2.
+
+
+Pytest with mocks. Tests mock the provider body and stdin. Assertions check branch destination, user_responses keys, and that resolved is unchanged after 2B.
+
+Critical Decision Choices:
+Whether the fixture calls real providers or only recorded/mocked bodies: No real calls 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
