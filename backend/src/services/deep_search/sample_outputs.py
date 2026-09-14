@@ -78,3 +78,27 @@
     ]
   }
 }
+
+
+
+
+
+
+# Sample Output - Responsibility - 1 (Mechanism - 4)
+# ==============================================================================
+# Inferred Categories
+# ==============================================================================
+
+[
+  {
+    "taxonomy_node": "dog_park",
+    "category_id": 2,
+    "reasoning": "The persona fact that they adopted a rescue dog last month and walk it twice a day supports a distinct need for dog-friendly outdoor space, such as a dog park, beyond the explicit swimming pool and bookstore."
+  },
+  {
+    "taxonomy_node": "urgent_care_center",
+    "category_id": 3,
+    "reasoning": "The persona fact that the partner is in the third trimester, together with the stated need for somewhere she can be seen quickly if something feels off, supports urgent care as a distinct information need."
+  }
+]
+
