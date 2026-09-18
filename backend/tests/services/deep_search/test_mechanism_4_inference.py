@@ -83,7 +83,7 @@ class FakeStructuredProvider:
             for schema_name, queue in (bodies_by_schema or {}).items()
         }
 
-    def generate_structured(
+    async def generate_structured(
         self,
         *,
         instruction: str,
@@ -101,6 +101,9 @@ class FakeStructuredProvider:
         if not self._queue:
             raise LLMProviderError("no recorded body left")
         return self._queue.pop(0)
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _payload() -> PayloadRecord:
@@ -195,23 +198,23 @@ def _body(*entries: dict) -> dict:
     return {"inferred_categories": [copy.deepcopy(entry) for entry in entries]}
 
 
-def test_empty_persona_writes_empty_list() -> None:
+async def test_empty_persona_writes_empty_list() -> None:
     provider = FakeStructuredProvider(bodies=[_body()])
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2(persona_facts=[])
 
-    result = interpretation.run_persona_driven_category_inference(state)
+    result = await interpretation.run_persona_driven_category_inference(state)
 
     assert result.inferred_categories == []
     assert provider.calls == [INFERRED_CATEGORIES_SCHEMA_NAME]
 
 
-def test_one_valid_distinct_node_stamps_id_after_extracted_max() -> None:
+async def test_one_valid_distinct_node_stamps_id_after_extracted_max() -> None:
     provider = FakeStructuredProvider(bodies=[_body(_DAYCARE_ENTRY)])
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2()
 
-    interpretation.run_persona_driven_category_inference(state)
+    await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
     stored = state.inferred_categories[0]
@@ -220,12 +223,12 @@ def test_one_valid_distinct_node_stamps_id_after_extracted_max() -> None:
     assert stored.reasoning == _DAYCARE_ENTRY["reasoning"]
 
 
-def test_two_valid_distinct_nodes_get_consecutive_ids() -> None:
+async def test_two_valid_distinct_nodes_get_consecutive_ids() -> None:
     provider = FakeStructuredProvider(bodies=[_body(_DAYCARE_ENTRY, _PHARMACY_ENTRY)])
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2()
 
-    interpretation.run_persona_driven_category_inference(state)
+    await interpretation.run_persona_driven_category_inference(state)
 
     assert [entry.taxonomy_node for entry in state.inferred_categories] == [
         "daycare",
@@ -234,7 +237,7 @@ def test_two_valid_distinct_nodes_get_consecutive_ids() -> None:
     assert [entry.category_id for entry in state.inferred_categories] == [2, 3]
 
 
-def test_one_collision_plus_sibling_keeps_sibling_and_logs(
+async def test_one_collision_plus_sibling_keeps_sibling_and_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider = FakeStructuredProvider(bodies=[_body(_GYM_COLLISION_ENTRY, _DAYCARE_ENTRY)])
@@ -246,7 +249,7 @@ def test_one_collision_plus_sibling_keeps_sibling_and_logs(
     ]
 
     with caplog.at_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME):
-        interpretation.run_persona_driven_category_inference(state)
+        await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
     assert state.inferred_categories[0].taxonomy_node == "daycare"
@@ -258,19 +261,19 @@ def test_one_collision_plus_sibling_keeps_sibling_and_logs(
     ] == resolved_snapshot
 
 
-def test_both_collide_writes_empty_list_without_raising() -> None:
+async def test_both_collide_writes_empty_list_without_raising() -> None:
     provider = FakeStructuredProvider(
         bodies=[_body(_GYM_COLLISION_ENTRY, _SUPERMARKET_COLLISION_ENTRY)]
     )
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2()
 
-    interpretation.run_persona_driven_category_inference(state)
+    await interpretation.run_persona_driven_category_inference(state)
 
     assert state.inferred_categories == []
 
 
-def test_duplicate_inferred_node_keeps_first(
+async def test_duplicate_inferred_node_keeps_first(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     duplicate = {
@@ -282,7 +285,7 @@ def test_duplicate_inferred_node_keeps_first(
     state = _state_after_mechanism_2()
 
     with caplog.at_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME):
-        interpretation.run_persona_driven_category_inference(state)
+        await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
     assert state.inferred_categories[0].taxonomy_node == "daycare"
@@ -290,7 +293,7 @@ def test_duplicate_inferred_node_keeps_first(
     assert "duplicate_inferred_node" in caplog.text
 
 
-def test_unknown_taxonomy_node_rejects_body_and_leaves_list_empty() -> None:
+async def test_unknown_taxonomy_node_rejects_body_and_leaves_list_empty() -> None:
     provider = FakeStructuredProvider(
         bodies=[
             _body(
@@ -305,13 +308,13 @@ def test_unknown_taxonomy_node_rejects_body_and_leaves_list_empty() -> None:
     state = _state_after_mechanism_2()
 
     with pytest.raises(InferenceValidationError) as exc_info:
-        interpretation.run_persona_driven_category_inference(state)
+        await interpretation.run_persona_driven_category_inference(state)
 
     assert exc_info.value.stage == "execute_category_inference"
     assert state.inferred_categories == []
 
 
-def test_more_than_two_entries_rejects_without_truncating() -> None:
+async def test_more_than_two_entries_rejects_without_truncating() -> None:
     provider = FakeStructuredProvider(
         bodies=[_body(_DAYCARE_ENTRY, _PHARMACY_ENTRY, _PARK_ENTRY)]
     )
@@ -319,14 +322,14 @@ def test_more_than_two_entries_rejects_without_truncating() -> None:
     state = _state_after_mechanism_2()
 
     with pytest.raises(InferenceValidationError) as exc_info:
-        interpretation.run_persona_driven_category_inference(state)
+        await interpretation.run_persona_driven_category_inference(state)
 
     assert exc_info.value.stage == "execute_category_inference"
     assert state.inferred_categories == []
     assert provider.calls == [INFERRED_CATEGORIES_SCHEMA_NAME]
 
 
-def test_no_explicit_categories_numbering_starts_at_zero() -> None:
+async def test_no_explicit_categories_numbering_starts_at_zero() -> None:
     provider = FakeStructuredProvider(bodies=[_body(_DAYCARE_ENTRY)])
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2(
@@ -335,14 +338,14 @@ def test_no_explicit_categories_numbering_starts_at_zero() -> None:
         persona_facts=["has a four-year-old who needs care during the workday"],
     )
 
-    interpretation.run_persona_driven_category_inference(state)
+    await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
     assert state.inferred_categories[0].category_id == 0
     assert state.inferred_categories[0].taxonomy_node == "daycare"
 
 
-def test_instruction_only_step2_negation_and_thin_evidence_are_not_clamped() -> None:
+async def test_instruction_only_step2_negation_and_thin_evidence_are_not_clamped() -> None:
     """Dummy bodies already obey instruction-only rules; stored list matches; code does not clamp."""
     cases = (
         [],
@@ -354,19 +357,19 @@ def test_instruction_only_step2_negation_and_thin_evidence_are_not_clamped() -> 
         interpretation = _interpretation(provider)
         state = _state_after_mechanism_2(persona_facts=persona_facts)
 
-        interpretation.run_persona_driven_category_inference(state)
+        await interpretation.run_persona_driven_category_inference(state)
 
         assert state.inferred_categories == []
         assert provider.calls == [INFERRED_CATEGORIES_SCHEMA_NAME]
 
 
-def test_step2_overlap_different_node_is_kept_because_code_does_not_clamp() -> None:
+async def test_step2_overlap_different_node_is_kept_because_code_does_not_clamp() -> None:
     """fitness_center vs gym is instruction-only; exact-node strip must not drop it."""
     provider = FakeStructuredProvider(bodies=[_body(_FITNESS_CENTER_ENTRY)])
     interpretation = _interpretation(provider)
     state = _state_after_mechanism_2()
 
-    interpretation.run_persona_driven_category_inference(state)
+    await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
     assert state.inferred_categories[0].taxonomy_node == "fitness_center"

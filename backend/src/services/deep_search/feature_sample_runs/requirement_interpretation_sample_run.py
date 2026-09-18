@@ -11,6 +11,7 @@ From `backend/`:
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -73,7 +74,7 @@ class _RecordCollector(logging.Handler):
         return [record for record in self.records if record.get("event") in names]
 
 
-def run_sample_extraction(raw_input: str) -> RequirementInterpretationState:
+async def run_sample_extraction(raw_input: str) -> RequirementInterpretationState:
     """Run stages 1, 2, 3, 4, and 5 in order, printing what each one returned."""
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -86,68 +87,70 @@ def run_sample_extraction(raw_input: str) -> RequirementInterpretationState:
     service_logger.addHandler(collector)
 
     interpretation = create_requirement_interpretation(settings)
+    try:
+        _section("INPUT")
+        print(raw_input)
+        print(f"\ncharacters: {len(raw_input)}   words: {len(raw_input.split())}")
 
-    _section("INPUT")
-    print(raw_input)
-    print(f"\ncharacters: {len(raw_input)}   words: {len(raw_input.split())}")
-
-    payload = interpretation.intake_and_assemble_payload(raw_input)
-    _section("STAGE 1 - PAYLOAD")
-    print(json.dumps(asdict(payload), indent=2, ensure_ascii=False))
-    print("\nnormalized text in full:")
-    print(payload.normalized_text)
-    print(
-        f"\nraw length: {len(payload.raw_text)}   "
-        f"normalized length: {len(payload.normalized_text)}"
-    )
-
-    json_schema = extraction_json_schema()
-    _section("STAGE 2 - SCHEMA")
-    print(json.dumps(json_schema, indent=2))
-    print(f"\nroot additionalProperties: {json_schema.get('additionalProperties')}")
-    print(f"root required: {json_schema.get('required')}")
-    for name, definition in json_schema.get("$defs", {}).items():
+        payload = interpretation.intake_and_assemble_payload(raw_input)
+        _section("STAGE 1 - PAYLOAD")
+        print(json.dumps(asdict(payload), indent=2, ensure_ascii=False))
+        print("\nnormalized text in full:")
+        print(payload.normalized_text)
         print(
-            f"{name} additionalProperties: {definition.get('additionalProperties')}   "
-            f"required: {definition.get('required')}"
+            f"\nraw length: {len(payload.raw_text)}   "
+            f"normalized length: {len(payload.normalized_text)}"
         )
 
-    instruction = interpretation.build_extraction_instruction(json_schema)
-    _section("STAGE 3 - INSTRUCTION")
-    print(instruction)
-    print(
-        f"\ncharacters: {len(instruction)}   "
-        f"few-shot pairs: {len(build_few_shot_examples())}"
-    )
+        json_schema = extraction_json_schema()
+        _section("STAGE 2 - SCHEMA")
+        print(json.dumps(json_schema, indent=2))
+        print(f"\nroot additionalProperties: {json_schema.get('additionalProperties')}")
+        print(f"root required: {json_schema.get('required')}")
+        for name, definition in json_schema.get("$defs", {}).items():
+            print(
+                f"{name} additionalProperties: {definition.get('additionalProperties')}   "
+                f"required: {definition.get('required')}"
+            )
 
-    extracted = interpretation.execute_and_validate(payload, instruction)
-    _section("STAGE 4 - PROVIDER ATTEMPTS")
-    for attempt in collector.events(PROVIDER_ATTEMPT_EVENT):
-        line = f"{attempt['provider']} ({attempt['model']}): {attempt['outcome']}"
-        detail = attempt.get("detail")
-        print(f"{line} - {detail}" if detail else line)
-    for answer in collector.events(RAW_BODY_EVENT):
-        print(f"\nraw decoded body from {answer['provider']}:")
-        print(json.dumps(answer["body"], indent=2, ensure_ascii=False))
-
-    _section("STAGE 4 - VALIDATED")
-    print(extracted.model_dump_json(indent=2))
-
-    state = interpretation.assemble_handoff(payload, extracted)
-    _section("STAGE 5 - HANDOFF")
-    print(
-        json.dumps(
-            {"payload": asdict(state.payload), "extracted": state.extracted.model_dump()},
-            indent=2,
-            ensure_ascii=False,
+        instruction = interpretation.build_extraction_instruction(json_schema)
+        _section("STAGE 3 - INSTRUCTION")
+        print(instruction)
+        print(
+            f"\ncharacters: {len(instruction)}   "
+            f"few-shot pairs: {len(build_few_shot_examples())}"
         )
-    )
-    print(
-        f"\nexplicit_categories: {len(state.extracted.explicit_categories)}   "
-        f"ambiguity_flags: {len(state.extracted.ambiguity_flags)}   "
-        f"persona_facts: {len(state.extracted.persona_facts)}"
-    )
-    return state
+
+        extracted = await interpretation.execute_and_validate(payload, instruction)
+        _section("STAGE 4 - PROVIDER ATTEMPTS")
+        for attempt in collector.events(PROVIDER_ATTEMPT_EVENT):
+            line = f"{attempt['provider']} ({attempt['model']}): {attempt['outcome']}"
+            detail = attempt.get("detail")
+            print(f"{line} - {detail}" if detail else line)
+        for answer in collector.events(RAW_BODY_EVENT):
+            print(f"\nraw decoded body from {answer['provider']}:")
+            print(json.dumps(answer["body"], indent=2, ensure_ascii=False))
+
+        _section("STAGE 4 - VALIDATED")
+        print(extracted.model_dump_json(indent=2))
+
+        state = interpretation.assemble_handoff(payload, extracted)
+        _section("STAGE 5 - HANDOFF")
+        print(
+            json.dumps(
+                {"payload": asdict(state.payload), "extracted": state.extracted.model_dump()},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        print(
+            f"\nexplicit_categories: {len(state.extracted.explicit_categories)}   "
+            f"ambiguity_flags: {len(state.extracted.ambiguity_flags)}   "
+            f"persona_facts: {len(state.extracted.persona_facts)}"
+        )
+        return state
+    finally:
+        await interpretation.aclose()
 
 
 def main() -> int:
@@ -168,7 +171,7 @@ def main() -> int:
     )
 
     try:
-        run_sample_extraction(raw_input)
+        asyncio.run(run_sample_extraction(raw_input))
     except RequirementExtractionError as exc:
         _section("FAILED")
         print(f"exception: {type(exc).__name__}")

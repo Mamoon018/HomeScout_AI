@@ -18,6 +18,7 @@ From `backend/`:
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -163,7 +164,7 @@ class _RecordCollector(logging.Handler):
         return [record for record in self.records if record.get("event") in names]
 
 
-def run_sample_resolution(with_responses: bool) -> RequirementInterpretationState:
+async def run_sample_resolution(with_responses: bool) -> RequirementInterpretationState:
     """Run Mechanism 2 stages in order, printing what each one produced."""
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -174,141 +175,144 @@ def run_sample_resolution(with_responses: bool) -> RequirementInterpretationStat
     service_logger.addHandler(collector)
 
     interpretation = create_requirement_interpretation(settings)
-    state = _build_sample_state()
+    try:
+        state = _build_sample_state()
 
-    _section("INPUT STATE")
-    print(
-        json.dumps(
-            {
-                "payload": {"normalized_text": state.payload.normalized_text},
-                "extracted": state.extracted.model_dump(),
-                "user_responses": {},
-                "category_resolution_passes": state.category_resolution_passes,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
-    print(
-        f"\nexplicit_categories: {len(state.extracted.explicit_categories)}   "
-        f"ambiguity_flags: {len(state.extracted.ambiguity_flags)}   "
-        f"persona_facts: {len(state.extracted.persona_facts)}"
-    )
-
-    instruction = interpretation.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
-    _section("2A PASS 1 - OP1 INSTRUCTION")
-    print(instruction)
-    print(
-        f"\ntaxonomy nodes: {len(AMENITY_TAXONOMY_NODES)}   "
-        f"few-shot pairs: {len(build_mapping_few_shot_examples())}"
-    )
-
-    mapping = interpretation.execute_taxonomy_mapping(state, instruction)
-    _section("2A PASS 1 - OP1 PROVIDER ATTEMPTS")
-    _print_attempts(collector, "execute_taxonomy_mapping")
-
-    _section("2A PASS 1 - OP1 RESULT")
-    print(mapping.model_dump_json(indent=2))
-
-    interpretation.assemble_resolved_requirements(state, mapping)
-    _section("2A PASS 1 - RESOLVED")
-    _print_resolved(state)
-
-    route = interpretation.inspect_category_resolution(state)
-    _section("ROUTER INSPECT 1")
-    _print_inspect(state, route)
-
-    if route == "mechanism_3":
-        _section("HANDOFF")
-        print("No category flags remain after pass 1. Mechanism 2 returns the state.")
-        print("Mechanism 3 is not invoked.")
-        return state
-
-    resolved_before_2b = _resolved_requirements_dict(state.resolved)
-
-    if with_responses:
-        state.user_responses = dict(_SAMPLE_USER_RESPONSES)
-        _section("2B SKIPPED - SEEDED USER RESPONSES")
+        _section("INPUT STATE")
         print(
-            "Live question generation and CLI collect were skipped because "
-            "--with-responses was set."
+            json.dumps(
+                {
+                    "payload": {"normalized_text": state.payload.normalized_text},
+                    "extracted": state.extracted.model_dump(),
+                    "user_responses": {},
+                    "category_resolution_passes": state.category_resolution_passes,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
         )
-        _print_user_responses(state)
-    else:
-        clarification_schema = clarification_questions_json_schema()
-        clarification_instruction = interpretation.build_clarification_questions_instruction(
-            clarification_schema
-        )
-        _section("2B - INSTRUCTION")
-        print(clarification_instruction)
-        print(f"\nfew-shot pairs: {len(build_clarification_few_shot_examples())}")
-
-        clarification_result = interpretation.execute_clarification_questions(
-            state, clarification_instruction
-        )
-        _section("2B - PROVIDER ATTEMPTS")
-        _print_attempts(collector, "execute_clarification_questions")
-
-        _section("2B - GENERATED QUESTIONS")
-        print(clarification_result.model_dump_json(indent=2))
-
-        _section("2B - CLI COLLECT")
-        print("Answer each question in this terminal. Type an option index from 1 to 5.")
-        print('If you choose "other", you will then be asked to describe what you meant.')
-        interpretation.collect_clarification_responses(state, clarification_result)
-
-        _section("2B - USER RESPONSES")
-        _print_user_responses(state)
-
-        _section("2B - RESOLVED UNCHANGED")
-        print(json.dumps(resolved_before_2b, indent=2, ensure_ascii=False))
         print(
-            "\nresolved.* after 2B matches the pre-2B snapshot: "
-            f"{_resolved_requirements_dict(state.resolved) == resolved_before_2b}"
+            f"\nexplicit_categories: {len(state.extracted.explicit_categories)}   "
+            f"ambiguity_flags: {len(state.extracted.ambiguity_flags)}   "
+            f"persona_facts: {len(state.extracted.persona_facts)}"
         )
-        print(f"category_resolution_passes still: {state.category_resolution_passes}")
 
-    category_flags = [
-        flag for flag in state.resolved.ambiguity_flags if flag.target == "category"
-    ]
-    pairs = [
-        (flag, state.user_responses[flag.category_id])
-        for flag in category_flags
-        if flag.category_id in state.user_responses
-    ]
-
-    _section("2A PASS 2 - GATE")
-    print(f"user_responses populated: {bool(state.user_responses)}")
-    print(f"category flags remaining: {len(category_flags)}")
-    print(f"operation 2 will run: {bool(pairs)}")
-
-    if pairs:
-        resolution_instruction = interpretation.build_flag_resolution_instruction(
-            flag_resolution_json_schema()
-        )
-        _section("2A PASS 2 - OP2 INSTRUCTION")
-        print(resolution_instruction)
+        instruction = interpretation.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
+        _section("2A PASS 1 - OP1 INSTRUCTION")
+        print(instruction)
         print(
             f"\ntaxonomy nodes: {len(AMENITY_TAXONOMY_NODES)}   "
-            f"few-shot pairs: {len(build_resolution_few_shot_examples())}"
+            f"few-shot pairs: {len(build_mapping_few_shot_examples())}"
         )
 
-        result = interpretation.execute_flag_resolution(pairs, resolution_instruction)
-        _section("2A PASS 2 - OP2 PROVIDER ATTEMPTS")
-        _print_attempts(collector, "execute_flag_resolution")
+        mapping = await interpretation.execute_taxonomy_mapping(state, instruction)
+        _section("2A PASS 1 - OP1 PROVIDER ATTEMPTS")
+        _print_attempts(collector, "execute_taxonomy_mapping")
 
-        _section("2A PASS 2 - OP2 RESULT")
-        print(result.model_dump_json(indent=2))
+        _section("2A PASS 1 - OP1 RESULT")
+        print(mapping.model_dump_json(indent=2))
 
-        interpretation.merge_resolved_flags(state, result)
-        _section("2A PASS 2 - RESOLVED")
+        interpretation.assemble_resolved_requirements(state, mapping)
+        _section("2A PASS 1 - RESOLVED")
         _print_resolved(state)
 
-    route = interpretation.inspect_category_resolution(state)
-    _section("ROUTER INSPECT 2")
-    _print_inspect(state, route)
-    print("Mechanism 3 is not invoked. interpret would return this state.")
-    return state
+        route = interpretation.inspect_category_resolution(state)
+        _section("ROUTER INSPECT 1")
+        _print_inspect(state, route)
+
+        if route == "mechanism_3":
+            _section("HANDOFF")
+            print("No category flags remain after pass 1. Mechanism 2 returns the state.")
+            print("Mechanism 3 is not invoked.")
+            return state
+
+        resolved_before_2b = _resolved_requirements_dict(state.resolved)
+
+        if with_responses:
+            state.user_responses = dict(_SAMPLE_USER_RESPONSES)
+            _section("2B SKIPPED - SEEDED USER RESPONSES")
+            print(
+                "Live question generation and CLI collect were skipped because "
+                "--with-responses was set."
+            )
+            _print_user_responses(state)
+        else:
+            clarification_schema = clarification_questions_json_schema()
+            clarification_instruction = interpretation.build_clarification_questions_instruction(
+                clarification_schema
+            )
+            _section("2B - INSTRUCTION")
+            print(clarification_instruction)
+            print(f"\nfew-shot pairs: {len(build_clarification_few_shot_examples())}")
+
+            clarification_result = await interpretation.execute_clarification_questions(
+                state, clarification_instruction
+            )
+            _section("2B - PROVIDER ATTEMPTS")
+            _print_attempts(collector, "execute_clarification_questions")
+
+            _section("2B - GENERATED QUESTIONS")
+            print(clarification_result.model_dump_json(indent=2))
+
+            _section("2B - CLI COLLECT")
+            print("Answer each question in this terminal. Type an option index from 1 to 5.")
+            print('If you choose "other", you will then be asked to describe what you meant.')
+            interpretation.collect_clarification_responses(state, clarification_result)
+
+            _section("2B - USER RESPONSES")
+            _print_user_responses(state)
+
+            _section("2B - RESOLVED UNCHANGED")
+            print(json.dumps(resolved_before_2b, indent=2, ensure_ascii=False))
+            print(
+                "\nresolved.* after 2B matches the pre-2B snapshot: "
+                f"{_resolved_requirements_dict(state.resolved) == resolved_before_2b}"
+            )
+            print(f"category_resolution_passes still: {state.category_resolution_passes}")
+
+        category_flags = [
+            flag for flag in state.resolved.ambiguity_flags if flag.target == "category"
+        ]
+        pairs = [
+            (flag, state.user_responses[flag.category_id])
+            for flag in category_flags
+            if flag.category_id in state.user_responses
+        ]
+
+        _section("2A PASS 2 - GATE")
+        print(f"user_responses populated: {bool(state.user_responses)}")
+        print(f"category flags remaining: {len(category_flags)}")
+        print(f"operation 2 will run: {bool(pairs)}")
+
+        if pairs:
+            resolution_instruction = interpretation.build_flag_resolution_instruction(
+                flag_resolution_json_schema()
+            )
+            _section("2A PASS 2 - OP2 INSTRUCTION")
+            print(resolution_instruction)
+            print(
+                f"\ntaxonomy nodes: {len(AMENITY_TAXONOMY_NODES)}   "
+                f"few-shot pairs: {len(build_resolution_few_shot_examples())}"
+            )
+
+            result = await interpretation.execute_flag_resolution(pairs, resolution_instruction)
+            _section("2A PASS 2 - OP2 PROVIDER ATTEMPTS")
+            _print_attempts(collector, "execute_flag_resolution")
+
+            _section("2A PASS 2 - OP2 RESULT")
+            print(result.model_dump_json(indent=2))
+
+            interpretation.merge_resolved_flags(state, result)
+            _section("2A PASS 2 - RESOLVED")
+            _print_resolved(state)
+
+        route = interpretation.inspect_category_resolution(state)
+        _section("ROUTER INSPECT 2")
+        _print_inspect(state, route)
+        print("Mechanism 3 is not invoked. interpret would return this state.")
+        return state
+    finally:
+        await interpretation.aclose()
 
 
 def _print_attempts(collector: _RecordCollector, stage: str) -> None:
@@ -377,7 +381,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        run_sample_resolution(args.with_responses)
+        asyncio.run(run_sample_resolution(args.with_responses))
     except (CategoryResolutionError, ClarificationError) as exc:
         _section("FAILED")
         print(f"exception: {type(exc).__name__}")

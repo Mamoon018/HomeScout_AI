@@ -89,7 +89,7 @@ class FakeStructuredProvider:
             for schema_name, queue in (bodies_by_schema or {}).items()
         }
 
-    def generate_structured(
+    async def generate_structured(
         self,
         *,
         instruction: str,
@@ -106,6 +106,9 @@ class FakeStructuredProvider:
         if not self._queue:
             raise LLMProviderError("no recorded body left")
         return self._queue.pop(0)
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _payload() -> PayloadRecord:
@@ -260,7 +263,7 @@ def test_inspect_pass_1_characteristic_and_persona_only_routes_to_mechanism_3() 
     assert state.category_resolution_passes == 1
 
 
-def test_after_2b_user_responses_keyed_by_submitted_category_ids(
+async def test_after_2b_user_responses_keyed_by_submitted_category_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = FakeStructuredProvider(bodies=[_CLARIFICATION_BODY])
@@ -268,7 +271,7 @@ def test_after_2b_user_responses_keyed_by_submitted_category_ids(
     state = _state_after_pass_1()
     _queue_input(monkeypatch, ["1", "2"])
 
-    interpretation.clarify_unmapped_categories(state)
+    await interpretation.clarify_unmapped_categories(state)
 
     assert set(state.user_responses) == {3, 4}
     assert all(isinstance(value, UserResponse) for value in state.user_responses.values())
@@ -276,20 +279,20 @@ def test_after_2b_user_responses_keyed_by_submitted_category_ids(
     assert state.user_responses[4].response == _PLAY_OPTIONS[1]
 
 
-def test_after_2b_resolved_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_after_2b_resolved_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = FakeStructuredProvider(bodies=[_CLARIFICATION_BODY])
     interpretation = _interpretation(provider)
     state = _state_after_pass_1()
     snapshot = _resolved_requirements_dict(state.resolved)
     _queue_input(monkeypatch, ["1", "2"])
 
-    interpretation.clarify_unmapped_categories(state)
+    await interpretation.clarify_unmapped_categories(state)
 
     assert _resolved_requirements_dict(state.resolved) == snapshot
     assert state.category_resolution_passes == 0
 
 
-def test_pass_2_second_inspect_is_mechanism_3_and_generate_is_not_called_again(
+async def test_pass_2_second_inspect_is_mechanism_3_and_generate_is_not_called_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = FakeStructuredProvider(
@@ -303,8 +306,8 @@ def test_pass_2_second_inspect_is_mechanism_3_and_generate_is_not_called_again(
     _queue_input(monkeypatch, ["1", "2"])
 
     assert interpretation.inspect_category_resolution(state) == "component_2b"
-    interpretation.clarify_unmapped_categories(state)
-    interpretation.resolve_category_flags(state)
+    await interpretation.clarify_unmapped_categories(state)
+    await interpretation.resolve_category_flags(state)
     route = interpretation.inspect_category_resolution(state)
 
     assert route == "mechanism_3"
@@ -324,7 +327,7 @@ def test_hard_cap_routes_to_mechanism_3_even_with_a_category_flag() -> None:
     assert any(flag.target == "category" for flag in state.resolved.ambiguity_flags)
 
 
-def test_coverage_retry_second_miss_raises_validation_error() -> None:
+async def test_coverage_retry_second_miss_raises_validation_error() -> None:
     provider = FakeStructuredProvider(
         bodies=[_INCOMPLETE_CLARIFICATION_BODY, _INCOMPLETE_CLARIFICATION_BODY]
     )
@@ -335,7 +338,7 @@ def test_coverage_retry_second_miss_raises_validation_error() -> None:
     )
 
     with pytest.raises(ClarificationValidationError) as exc_info:
-        interpretation.execute_clarification_questions(state, instruction)
+        await interpretation.execute_clarification_questions(state, instruction)
 
     assert exc_info.value.stage == "execute_clarification_questions"
     assert provider.calls == [
@@ -344,7 +347,7 @@ def test_coverage_retry_second_miss_raises_validation_error() -> None:
     ]
 
 
-def test_other_path_stores_free_text_not_the_other_literal(
+async def test_other_path_stores_free_text_not_the_other_literal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     single_flag_body = {"questions": [_SHOPPING_QUESTION]}
@@ -356,7 +359,7 @@ def test_other_path_stores_free_text_not_the_other_literal(
     ]
     _queue_input(monkeypatch, ["5", "a weekly farmers market near the station"])
 
-    interpretation.clarify_unmapped_categories(state)
+    await interpretation.clarify_unmapped_categories(state)
 
     stored = state.user_responses[3]
     assert stored.response == "a weekly farmers market near the station"

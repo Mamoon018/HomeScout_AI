@@ -127,17 +127,17 @@ class UserRequirementsInterpretation:
     def __init__(self, providers: Sequence[StructuredLLMProvider]) -> None:
         self._providers = tuple(providers)
 
-    def interpret(self, raw_input: str) -> RequirementInterpretationState:
+    async def interpret(self, raw_input: str) -> RequirementInterpretationState:
         """Responsibility entry point; sequences the mechanisms and returns the state."""
-        state = self.parse_unstructured_input(raw_input)
-        state = self.run_explicit_category_resolution(state)
-        return self.run_persona_driven_category_inference(state)
+        state = await self.parse_unstructured_input(raw_input)
+        state = await self.run_explicit_category_resolution(state)
+        return await self.run_persona_driven_category_inference(state)
 
-    def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
+    async def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
         payload = self.intake_and_assemble_payload(raw_input)
         instruction = self.build_extraction_instruction(extraction_json_schema())
-        extracted = self.execute_and_validate(payload, instruction)
+        extracted = await self.execute_and_validate(payload, instruction)
         return self.assemble_handoff(payload, extracted)
 
     def intake_and_assemble_payload(self, raw_input: str) -> PayloadRecord:
@@ -220,7 +220,7 @@ class UserRequirementsInterpretation:
         logger.debug(json.dumps({"event": "instruction.built.text", "instruction": instruction}))
         return instruction
 
-    def execute_and_validate(
+    async def execute_and_validate(
         self,
         payload: PayloadRecord,
         instruction: str,
@@ -232,7 +232,7 @@ class UserRequirementsInterpretation:
 
         for provider in self._providers:
             try:
-                body = provider.generate_structured(
+                body = await provider.generate_structured(
                     instruction=instruction,
                     user_content=payload.normalized_text,
                     json_schema=json_schema,
@@ -365,18 +365,18 @@ class UserRequirementsInterpretation:
     # Mechanism 2 — Category resolution loop (2A, router, 2B)
     # ---------------------------------------------------------------------------------
 
-    def run_explicit_category_resolution(
+    async def run_explicit_category_resolution(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
         """Mechanism 2 workflow: 2A pass 1, router, maybe 2B and 2A pass 2, then return."""
-        self.resolve_explicit_categories(state)
+        await self.resolve_explicit_categories(state)
         route = self.inspect_category_resolution(state)
         if route == "mechanism_3":
             return state
 
-        self.clarify_unmapped_categories(state)
-        self.resolve_category_flags(state)
+        await self.clarify_unmapped_categories(state)
+        await self.resolve_category_flags(state)
         self.inspect_category_resolution(state)
         return state
 
@@ -413,12 +413,12 @@ class UserRequirementsInterpretation:
         )
         return route
 
-    def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
+    async def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
         """Generate questions, collect answers, persist them on the state."""
         instruction = self.build_clarification_questions_instruction(
             clarification_questions_json_schema()
         )
-        result = self.execute_clarification_questions(state, instruction)
+        result = await self.execute_clarification_questions(state, instruction)
         self.collect_clarification_responses(state, result)
 
     def build_clarification_questions_instruction(self, json_schema: dict) -> str:
@@ -439,7 +439,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_clarification_questions(
+    async def execute_clarification_questions(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -452,7 +452,7 @@ class UserRequirementsInterpretation:
         user_content = _render_clarification_user_content(state)
         submitted_ids = _submitted_category_flag_ids(resolved)
 
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -487,7 +487,7 @@ class UserRequirementsInterpretation:
                 }
             )
         )
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -591,15 +591,15 @@ class UserRequirementsInterpretation:
                 stage="execute_clarification_questions",
             ) from exc
 
-    def resolve_explicit_categories(
+    async def resolve_explicit_categories(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
         """Component 2A: Operation 1 always, Operation 2 when the gate opens."""
         instruction = self.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
-        mapping = self.execute_taxonomy_mapping(state, instruction)
+        mapping = await self.execute_taxonomy_mapping(state, instruction)
         self.assemble_resolved_requirements(state, mapping)
-        self.resolve_category_flags(state)
+        await self.resolve_category_flags(state)
         return state
 
     def build_taxonomy_mapping_instruction(self, json_schema: dict) -> str:
@@ -621,7 +621,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_taxonomy_mapping(
+    async def execute_taxonomy_mapping(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -629,7 +629,7 @@ class UserRequirementsInterpretation:
         """Op1 Stage 2: one constrained call over all raw categories, then validate."""
         json_schema = taxonomy_mapping_json_schema()
         user_content = _render_extracted(state.extracted)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -749,7 +749,7 @@ class UserRequirementsInterpretation:
         )
         return resolved
 
-    def resolve_category_flags(self, state: RequirementInterpretationState) -> None:
+    async def resolve_category_flags(self, state: RequirementInterpretationState) -> None:
         """Op2 gate plus orchestration: skip when no user responses, else resolve flags."""
         if not state.user_responses:
             logger.info(
@@ -792,7 +792,7 @@ class UserRequirementsInterpretation:
             return
 
         instruction = self.build_flag_resolution_instruction(flag_resolution_json_schema())
-        result = self.execute_flag_resolution(pairs, instruction)
+        result = await self.execute_flag_resolution(pairs, instruction)
         self.merge_resolved_flags(state, result)
 
     def build_flag_resolution_instruction(self, json_schema: dict) -> str:
@@ -814,7 +814,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_flag_resolution(
+    async def execute_flag_resolution(
         self,
         pairs: list[tuple[AmbiguityFlag, UserResponse]],
         instruction: str,
@@ -822,7 +822,7 @@ class UserRequirementsInterpretation:
         """Op2 Stage 5: one constrained call over all {flag, response} pairs, then validate."""
         json_schema = flag_resolution_json_schema()
         user_content = _render_pairs(pairs)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -925,7 +925,7 @@ class UserRequirementsInterpretation:
     # Mechanism 4 — Persona-driven category inference
     # ---------------------------------------------------------------------------------
 
-    def run_persona_driven_category_inference(
+    async def run_persona_driven_category_inference(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
@@ -933,7 +933,7 @@ class UserRequirementsInterpretation:
         assert state.resolved is not None  # Mechanism 2 always sets this before M4 runs.
 
         instruction = self.build_inference_instruction(inferred_categories_json_schema())
-        body = self.execute_category_inference(state, instruction)
+        body = await self.execute_category_inference(state, instruction)
         self.write_inferred_categories(state, body)
         return state
 
@@ -956,7 +956,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_category_inference(
+    async def execute_category_inference(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -964,7 +964,7 @@ class UserRequirementsInterpretation:
         """Stage 3: one constrained call, schema then taxonomy-set check. No strip."""
         json_schema = inferred_categories_json_schema()
         user_content = _render_inference_user_content(state)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -1102,7 +1102,12 @@ class UserRequirementsInterpretation:
             )
         )
 
-    def _call_providers(
+    async def aclose(self) -> None:
+        """Close each provider's HTTP session after a run."""
+        for provider in self._providers:
+            await provider.aclose()
+
+    async def _call_providers(
         self,
         *,
         instruction: str,
@@ -1118,7 +1123,7 @@ class UserRequirementsInterpretation:
 
         for provider in self._providers:
             try:
-                body = provider.generate_structured(
+                body = await provider.generate_structured(
                     instruction=instruction,
                     user_content=user_content,
                     json_schema=json_schema,
