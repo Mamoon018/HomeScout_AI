@@ -20,6 +20,12 @@ CLARIFICATION_QUESTIONS_SCHEMA_NAME = "clarification_questions"
 # Mechanism 4's constrained inference call echoes this schema name back with the body.
 INFERRED_CATEGORIES_SCHEMA_NAME = "inferred_categories_schema"
 
+# Mechanism 5's constrained depth-assignment call echoes this schema name back with the body.
+DEPTH_ASSIGNMENT_SCHEMA_NAME = "depth_assignment_schema"
+
+# Three-level information band stamped onto each remaining category by Mechanism 5.
+DepthLevel = Literal["basic_profile", "operating_details", "specific_attributes"]
+
 # Router destination after each inspect of a fresh 2A output.
 CategoryResolutionRoute = Literal["component_2b", "mechanism_3"]
 
@@ -338,6 +344,39 @@ class InferredCategoriesResult(BaseModel):
     )
 
 
+class DepthAssignmentEntry(BaseModel):
+    """One wire assignment from the Mechanism 5 depth call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category_id: int = Field(
+        description=(
+            "The category_id of the submitted category being assigned a depth, echoed "
+            "from the input. Do not invent an id."
+        )
+    )
+    depth: DepthLevel = Field(
+        description=(
+            "The information band for this category: 'basic_profile', "
+            "'operating_details', or 'specific_attributes'. Start at the origin floor "
+            "and escalate only on a trigger."
+        )
+    )
+
+
+class DepthAssignmentResult(BaseModel):
+    """Mechanism 5 wire body: one depth assignment per submitted category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    assignments: list[DepthAssignmentEntry] = Field(
+        description=(
+            "One depth assignment for every submitted category. Length must equal the "
+            "number of submitted categories. Do not invent, drop, or duplicate ids."
+        )
+    )
+
+
 def taxonomy_mapping_json_schema() -> dict:
     """Strict Operation 1 schema derived from the wire model, with the taxonomy enum."""
     schema = TaxonomyMappingResult.model_json_schema()
@@ -366,6 +405,13 @@ def inferred_categories_json_schema() -> dict:
     schema = InferredCategoriesResult.model_json_schema()
     _apply_strict_object_rules(schema)
     _inject_taxonomy_node_enum(schema)
+    return schema
+
+
+def depth_assignment_json_schema() -> dict:
+    """Strict depth-assignment schema derived from the wire model. No taxonomy enum."""
+    schema = DepthAssignmentResult.model_json_schema()
+    _apply_strict_object_rules(schema)
     return schema
 
 
@@ -399,6 +445,7 @@ class ResolvedCategory:
     raw_name: str
     characteristics: list[str]
     provenance: Provenance
+    depth: DepthLevel | None = None
 
 
 @dataclass
@@ -408,6 +455,7 @@ class InferredCategory:
     taxonomy_node: str
     category_id: int
     reasoning: str
+    depth: DepthLevel | None = None
 
 
 @dataclass

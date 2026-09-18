@@ -1879,7 +1879,7 @@ Critical Decision Choices:
 
 
 
-### 2. Amenity discovery 
+### 2. Amenity discovery  (responsibility Not implemented)
 
 **Responsibility:** Find the actual amenities that exist within the defined neighborhood.
 
@@ -1898,7 +1898,7 @@ It should **not decide whether those amenities satisfy the user's preferences**.
 
 ---
 
-### 3. Amenity data acquisition
+### 3. Amenity data acquisition (responsibility Not implemented)
 
 **Responsibility:** Collect the factual information needed about each candidate.
 
@@ -1919,7 +1919,7 @@ Its output should be **facts and metrics**, not conclusions.
 
 ---
 
-### 4. Accessibility evaluation
+### 4. Accessibility evaluation (responsibility Not implemented)
 
 I would consider this a **separate responsibility**, because it answers a different question from amenity discovery.
 
@@ -1940,7 +1940,7 @@ It takes an identified amenity and produces accessibility data. It does not deci
 
 ---
 
-### 5. Candidate selection
+### 5. Candidate selection (responsibility Not implemented)
 
 **Responsibility:** Determine which amenities within each category are worth presenting.
 
@@ -1956,7 +1956,7 @@ Your workflow explicitly has this narrowing step after the deeper search.
 
 ---
 
-### 6. Assessment / judgment
+### 6. Assessment / judgment (responsibility Not implemented)
 
 This is another very clear boundary.
 
@@ -1971,7 +1971,7 @@ The assessment should remain separate from the facts, while retaining the facts 
 
 ---
 
-### 7. Presentation
+### 7. Presentation (responsibility Not implemented)
 
 **Responsibility:** Convert the resulting information into the structure the user should see.
 
