@@ -1,66 +1,52 @@
-# Agent Guidelines for Finding the Process Workflow of a Component
+# Agent Guidelines for finding Process flow of a Component
 
-**Name:** `write guide`
+**Name:** `write component process flow`
 
 **Description:**
-It generates the details about the technical components included in the process flow of any solution to be developed for the limited scope of the problem.
 
-**Trigger Point:**
-Use when the user asks for the technical process flow that is commonly used to develop the solution for any limited scope of problem.
+generates details about technical sub-components included in process flow required to implement a **SPECIFIC, ALREADY-SELECTED approach** for a **SPECIFIC component** of a mechanism — where that component was itself previously identified as part of process flow of a feature. Generation happens **WITHIN use-case-specific core aspects defined in Problem Statement & Problem Context**, AND within finalized scope of component (goal, problem it solves, critical decisions already locked at component level).
 
-**Agent:** `Plan`
+**Trigger:**
 
----
+when user asks for technical process flow needed to actually build a component, given component already defined (name, goal, problem) and one of three previously proposed approaches finalized/selected.
 
-## 1. Description of Agent
+**Plan agent:**
 
-An agent that analyzes a given problem of limited scope, researches common solution approaches defined for it on the web (e.g., API documentation), and identifies the sequential process flow—the distinct technical components that must be built and integrated to deliver that solution.
+Input problem statement/context + finalized component-level info + selected approach. Analyze what specific approach requires to be fully built; research web for common/reference implementations of that approach (API docs, standard patterns, SDKs/libraries); identify sequential technical sub-components to deliver component using selected approach only.
 
----
+**Goal:**
 
-## 2. Goal of Agent Response
+ordered breakdown of sub-components required to implement selected approach; each coherent/buildable unit, not granular sub-step; together complete implementation from current state to fully working component via chosen approach.
 
-Produce an ordered breakdown of components that are required to implement the solution, such that each component represents a coherent, buildable unit of work (not a granular sub-step), and together the components form the complete implementation path from current state to working solution.
+**Output per sub-component:**
 
----
+* **Component Name**
+* **Goal of Component**
+* **Problem it Aims to Solve**
+* **Three Common Approaches** (viable ways to implement sub-component in specific context, consistent with parent selected approach)
+* **Critical Decision Choices**
+* Bring generic mandatory decisions + context-specific decisions made relevant by problem/context/locked component decisions
+* Locked component decisions are fixed constraints; do not reopen, downstream choices stay consistent.
 
-## 3. Structure of Output
+**Workflow:** Research → Plan → Write → Review.
 
-For each component, provide:
+**Rules:**
 
-* **Component Name:** Short label for the technical unit (e.g., "Define Auth Client & Connect Sign-Up Page")
-* **Goal of Component:** What this component achieves in the overall solution
-* **Problem it Aims to Solve:** The specific gap/need this component addresses
-* **Three Common Approaches:** Three viable ways to implement this component in our specific context (stack/tools already in use)
-* **Critical Decision Choices:** The key decisions that must be made when implementing this component (e.g., session storage method, client type, error-handling strategy)
+* self-contained technical milestone independently verifiable/testable
+* merge steps that are only meaningful together
+* component should produce new capability
+* don’t split by files/lines/sub-actions, only genuinely different problems
+* each sub-component prerequisite/enabler for next; no orphan/parallel unless justified
+* full set must implement selected approach in entirety, nothing from unselected approaches
+* don’t contradict/re-decide component-level locked decisions
+* if prerequisite sub-component missing, include in correct order
+* “sub-components” are concrete technical work units needed to build one selected approach, analogous to feature mechanisms→components.
 
----
+**Explainability Rules**
 
-## 4. Workflow
-
-### Research:
-Understand the scoped problem and research more refined or similar versions of it defined on the web, ensuring that they also aim to focus on the same core aspects. Then look out for the API docs or official blogs or other relevant material on the internet in order conduct your research for getting information required to generate the response.
-
-### Plan
-Sequence the components in dependency order and identify what depends on what.
-
-### Write
-Draft each component according to the **Structure of Output** format.
-
-### Review
-Check each component against the rules in **Section 5** before finalizing.
-
----
-
-## 5. Rules to Ensure Components Are Comprehensive
-
-* A component must represent a **self-contained technical milestone** that could be independently verified/tested—not an isolated action.
-* If two "steps" are only meaningful together (one is non-functional without the other), **merge them into one component**.
-* A component should answer: **"What capability now exists that didn't before?"** If a step doesn't produce a new capability, it belongs inside another component.
-* Do not split a component solely because it involves multiple files, multiple lines of code, or multiple sub-actions—only split if the sub-actions solve genuinely different problems.
-* Each component must be a **prerequisite or enabler for the next**; no orphan or parallel-only components unless explicitly justified.
-* Mechanical, observable language. Describe what happens, not how it feels.
-* No selling, justifying, or comparing. No "the best way," no historical context, no framework comparisons.
+6. **No em dashes.** Use periods, commas, or parentheses instead.
+7. **Mechanical, observable language.** Describe what happens, not how it feels.
+8. **No selling, justifying, or comparing.** No "the best way," no historical context, no framework comparisons.
 
 | Don't                                                | Do                                                       |
 | ---------------------------------------------------- | -------------------------------------------------------- |
