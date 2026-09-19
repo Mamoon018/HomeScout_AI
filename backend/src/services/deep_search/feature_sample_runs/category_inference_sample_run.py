@@ -11,6 +11,7 @@ From `backend/`:
     python -m src.services.deep_search.feature_sample_runs.category_inference_sample_run
 """
 
+import asyncio
 import json
 import logging
 import sys
@@ -138,7 +139,7 @@ class _RecordCollector(logging.Handler):
         return [record for record in self.records if record.get("event") in names]
 
 
-def run_sample_inference() -> RequirementInterpretationState:
+async def run_sample_inference() -> RequirementInterpretationState:
     """Run Mechanism 4 stages in order, printing what each one produced."""
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -149,82 +150,85 @@ def run_sample_inference() -> RequirementInterpretationState:
     service_logger.addHandler(collector)
 
     interpretation = create_requirement_interpretation(settings)
-    state = _build_sample_state()
-    resolved = state.resolved
-    assert resolved is not None
-    resolved_snapshot = _resolved_requirements_dict(resolved)
+    try:
+        state = _build_sample_state()
+        resolved = state.resolved
+        assert resolved is not None
+        resolved_snapshot = _resolved_requirements_dict(resolved)
 
-    _section("INPUT STATE")
-    print(
-        json.dumps(
-            {
-                "payload": asdict(state.payload),
-                "extracted": state.extracted.model_dump(),
-                "resolved": resolved_snapshot,
-                "inferred_categories": [asdict(entry) for entry in state.inferred_categories],
-            },
-            indent=2,
-            ensure_ascii=False,
+        _section("INPUT STATE")
+        print(
+            json.dumps(
+                {
+                    "payload": asdict(state.payload),
+                    "extracted": state.extracted.model_dump(),
+                    "resolved": resolved_snapshot,
+                    "inferred_categories": [asdict(entry) for entry in state.inferred_categories],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
         )
-    )
-    print(
-        f"\nexplicit taxonomy nodes: "
-        f"{[category.taxonomy_node for category in resolved.resolved_explicit_categories]}"
-    )
-    print(f"persona_facts: {len(resolved.persona_facts)}")
-    print(f"inferred_categories (before): {len(state.inferred_categories)}")
-    print("Mechanism 1 and Mechanism 2 were not called. This state is seeded after Mechanism 2.")
-
-    json_schema = inferred_categories_json_schema()
-    _section("STAGE 2 - SCHEMA")
-    print(json.dumps(json_schema, indent=2))
-    print(f"\nroot additionalProperties: {json_schema.get('additionalProperties')}")
-    print(f"root required: {json_schema.get('required')}")
-    inferred_prop = json_schema.get("properties", {}).get("inferred_categories", {})
-    print(f"inferred_categories maxItems: {inferred_prop.get('maxItems')}")
-    print(f"category_id in schema: {'category_id' in json.dumps(json_schema)}")
-
-    instruction = interpretation.build_inference_instruction(json_schema)
-    _section("STAGE 2 - INSTRUCTION")
-    print(instruction)
-    print(
-        f"\ncharacters: {len(instruction)}   "
-        f"taxonomy nodes: {len(AMENITY_TAXONOMY_NODES)}   "
-        f"few-shot pairs: {len(build_inference_few_shot_examples())}"
-    )
-
-    _section("STAGE 3 - USER CONTENT")
-    print(_render_inference_user_content(state))
-
-    body = interpretation.execute_category_inference(state, instruction)
-    _section("STAGE 3 - PROVIDER ATTEMPTS")
-    _print_attempts(collector)
-
-    _section("STAGE 3 - VALIDATED")
-    print(body.model_dump_json(indent=2))
-    print(f"\ninferred_categories on wire: {len(body.inferred_categories)}")
-
-    interpretation.write_inferred_categories(state, body)
-    _section("STAGE 4 - INFERRED CATEGORIES")
-    print(
-        json.dumps(
-            [asdict(entry) for entry in state.inferred_categories],
-            indent=2,
-            ensure_ascii=False,
+        print(
+            f"\nexplicit taxonomy nodes: "
+            f"{[category.taxonomy_node for category in resolved.resolved_explicit_categories]}"
         )
-    )
-    print(f"\nstored inferred_categories: {len(state.inferred_categories)}")
-    print(
-        f"category_ids: {[entry.category_id for entry in state.inferred_categories]}"
-    )
+        print(f"persona_facts: {len(resolved.persona_facts)}")
+        print(f"inferred_categories (before): {len(state.inferred_categories)}")
+        print("Mechanism 1 and Mechanism 2 were not called. This state is seeded after Mechanism 2.")
 
-    _section("STAGE 4 - RESOLVED UNCHANGED")
-    print(json.dumps(_resolved_requirements_dict(resolved), indent=2, ensure_ascii=False))
-    print(
-        "\nresolved.* after write matches the pre-inference snapshot: "
-        f"{_resolved_requirements_dict(resolved) == resolved_snapshot}"
-    )
-    return state
+        json_schema = inferred_categories_json_schema()
+        _section("STAGE 2 - SCHEMA")
+        print(json.dumps(json_schema, indent=2))
+        print(f"\nroot additionalProperties: {json_schema.get('additionalProperties')}")
+        print(f"root required: {json_schema.get('required')}")
+        inferred_prop = json_schema.get("properties", {}).get("inferred_categories", {})
+        print(f"inferred_categories maxItems: {inferred_prop.get('maxItems')}")
+        print(f"category_id in schema: {'category_id' in json.dumps(json_schema)}")
+
+        instruction = interpretation.build_inference_instruction(json_schema)
+        _section("STAGE 2 - INSTRUCTION")
+        print(instruction)
+        print(
+            f"\ncharacters: {len(instruction)}   "
+            f"taxonomy nodes: {len(AMENITY_TAXONOMY_NODES)}   "
+            f"few-shot pairs: {len(build_inference_few_shot_examples())}"
+        )
+
+        _section("STAGE 3 - USER CONTENT")
+        print(_render_inference_user_content(state))
+
+        body = await interpretation.execute_category_inference(state, instruction)
+        _section("STAGE 3 - PROVIDER ATTEMPTS")
+        _print_attempts(collector)
+
+        _section("STAGE 3 - VALIDATED")
+        print(body.model_dump_json(indent=2))
+        print(f"\ninferred_categories on wire: {len(body.inferred_categories)}")
+
+        interpretation.write_inferred_categories(state, body)
+        _section("STAGE 4 - INFERRED CATEGORIES")
+        print(
+            json.dumps(
+                [asdict(entry) for entry in state.inferred_categories],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        print(f"\nstored inferred_categories: {len(state.inferred_categories)}")
+        print(
+            f"category_ids: {[entry.category_id for entry in state.inferred_categories]}"
+        )
+
+        _section("STAGE 4 - RESOLVED UNCHANGED")
+        print(json.dumps(_resolved_requirements_dict(resolved), indent=2, ensure_ascii=False))
+        print(
+            "\nresolved.* after write matches the pre-inference snapshot: "
+            f"{_resolved_requirements_dict(resolved) == resolved_snapshot}"
+        )
+        return state
+    finally:
+        await interpretation.aclose()
 
 
 def _print_attempts(collector: _RecordCollector) -> None:
@@ -243,7 +247,7 @@ def _print_attempts(collector: _RecordCollector) -> None:
 
 def main() -> int:
     try:
-        run_sample_inference()
+        asyncio.run(run_sample_inference())
     except InferenceError as exc:
         _section("FAILED")
         print(f"exception: {type(exc).__name__}")

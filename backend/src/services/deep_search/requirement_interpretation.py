@@ -18,6 +18,8 @@ from src.exceptions.deep_search import (
     CategoryMappingValidationError,
     ClarificationProviderError,
     ClarificationValidationError,
+    DepthAssignmentProviderError,
+    DepthAssignmentValidationError,
     ExtractionProviderError,
     ExtractionValidationError,
     InferenceProviderError,
@@ -44,6 +46,10 @@ from src.services.deep_search.feature_prompts.extraction_instruction import (
     TASK_STATEMENT,
     build_few_shot_examples,
 )
+from src.services.deep_search.feature_prompts.depth_assignment_instruction import (
+    build_depth_assignment_few_shot_examples,
+    build_depth_assignment_instruction as build_depth_assignment_text,
+)
 from src.services.deep_search.feature_prompts.inference_instruction import (
     build_inference_few_shot_examples,
     build_inference_instruction as build_inference_text,
@@ -54,6 +60,7 @@ from src.services.deep_search.feature_schemas.amenity_taxonomy import (
 )
 from src.services.deep_search.feature_schemas.schemas import (
     CLARIFICATION_QUESTIONS_SCHEMA_NAME,
+    DEPTH_ASSIGNMENT_SCHEMA_NAME,
     EXTRACTION_SCHEMA_NAME,
     FLAG_RESOLUTION_SCHEMA_NAME,
     INFERRED_CATEGORIES_SCHEMA_NAME,
@@ -61,6 +68,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     AmbiguityFlag,
     CategoryResolutionRoute,
     ClarificationResult,
+    DepthAssignmentResult,
     ExtractedCategory,
     ExtractedRequirements,
     FlagResolutionResult,
@@ -74,6 +82,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     TaxonomyMappingResult,
     UserResponse,
     clarification_questions_json_schema,
+    depth_assignment_json_schema,
     extraction_json_schema,
     flag_resolution_json_schema,
     inferred_categories_json_schema,
@@ -127,17 +136,18 @@ class UserRequirementsInterpretation:
     def __init__(self, providers: Sequence[StructuredLLMProvider]) -> None:
         self._providers = tuple(providers)
 
-    def interpret(self, raw_input: str) -> RequirementInterpretationState:
+    async def interpret(self, raw_input: str) -> RequirementInterpretationState:
         """Responsibility entry point; sequences the mechanisms and returns the state."""
-        state = self.parse_unstructured_input(raw_input)
-        state = self.run_explicit_category_resolution(state)
-        return self.run_persona_driven_category_inference(state)
+        state = await self.parse_unstructured_input(raw_input)
+        state = await self.run_explicit_category_resolution(state)
+        state = await self.run_persona_driven_category_inference(state)
+        return await self.run_per_category_depth_calibration(state)
 
-    def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
+    async def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
         payload = self.intake_and_assemble_payload(raw_input)
         instruction = self.build_extraction_instruction(extraction_json_schema())
-        extracted = self.execute_and_validate(payload, instruction)
+        extracted = await self.execute_and_validate(payload, instruction)
         return self.assemble_handoff(payload, extracted)
 
     def intake_and_assemble_payload(self, raw_input: str) -> PayloadRecord:
@@ -220,7 +230,7 @@ class UserRequirementsInterpretation:
         logger.debug(json.dumps({"event": "instruction.built.text", "instruction": instruction}))
         return instruction
 
-    def execute_and_validate(
+    async def execute_and_validate(
         self,
         payload: PayloadRecord,
         instruction: str,
@@ -232,7 +242,7 @@ class UserRequirementsInterpretation:
 
         for provider in self._providers:
             try:
-                body = provider.generate_structured(
+                body = await provider.generate_structured(
                     instruction=instruction,
                     user_content=payload.normalized_text,
                     json_schema=json_schema,
@@ -365,18 +375,18 @@ class UserRequirementsInterpretation:
     # Mechanism 2 — Category resolution loop (2A, router, 2B)
     # ---------------------------------------------------------------------------------
 
-    def run_explicit_category_resolution(
+    async def run_explicit_category_resolution(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
         """Mechanism 2 workflow: 2A pass 1, router, maybe 2B and 2A pass 2, then return."""
-        self.resolve_explicit_categories(state)
+        await self.resolve_explicit_categories(state)
         route = self.inspect_category_resolution(state)
         if route == "mechanism_3":
             return state
 
-        self.clarify_unmapped_categories(state)
-        self.resolve_category_flags(state)
+        await self.clarify_unmapped_categories(state)
+        await self.resolve_category_flags(state)
         self.inspect_category_resolution(state)
         return state
 
@@ -413,12 +423,12 @@ class UserRequirementsInterpretation:
         )
         return route
 
-    def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
+    async def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
         """Generate questions, collect answers, persist them on the state."""
         instruction = self.build_clarification_questions_instruction(
             clarification_questions_json_schema()
         )
-        result = self.execute_clarification_questions(state, instruction)
+        result = await self.execute_clarification_questions(state, instruction)
         self.collect_clarification_responses(state, result)
 
     def build_clarification_questions_instruction(self, json_schema: dict) -> str:
@@ -439,7 +449,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_clarification_questions(
+    async def execute_clarification_questions(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -452,7 +462,7 @@ class UserRequirementsInterpretation:
         user_content = _render_clarification_user_content(state)
         submitted_ids = _submitted_category_flag_ids(resolved)
 
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -487,7 +497,7 @@ class UserRequirementsInterpretation:
                 }
             )
         )
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -591,15 +601,15 @@ class UserRequirementsInterpretation:
                 stage="execute_clarification_questions",
             ) from exc
 
-    def resolve_explicit_categories(
+    async def resolve_explicit_categories(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
         """Component 2A: Operation 1 always, Operation 2 when the gate opens."""
         instruction = self.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
-        mapping = self.execute_taxonomy_mapping(state, instruction)
+        mapping = await self.execute_taxonomy_mapping(state, instruction)
         self.assemble_resolved_requirements(state, mapping)
-        self.resolve_category_flags(state)
+        await self.resolve_category_flags(state)
         return state
 
     def build_taxonomy_mapping_instruction(self, json_schema: dict) -> str:
@@ -621,7 +631,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_taxonomy_mapping(
+    async def execute_taxonomy_mapping(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -629,7 +639,7 @@ class UserRequirementsInterpretation:
         """Op1 Stage 2: one constrained call over all raw categories, then validate."""
         json_schema = taxonomy_mapping_json_schema()
         user_content = _render_extracted(state.extracted)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -749,7 +759,7 @@ class UserRequirementsInterpretation:
         )
         return resolved
 
-    def resolve_category_flags(self, state: RequirementInterpretationState) -> None:
+    async def resolve_category_flags(self, state: RequirementInterpretationState) -> None:
         """Op2 gate plus orchestration: skip when no user responses, else resolve flags."""
         if not state.user_responses:
             logger.info(
@@ -792,7 +802,7 @@ class UserRequirementsInterpretation:
             return
 
         instruction = self.build_flag_resolution_instruction(flag_resolution_json_schema())
-        result = self.execute_flag_resolution(pairs, instruction)
+        result = await self.execute_flag_resolution(pairs, instruction)
         self.merge_resolved_flags(state, result)
 
     def build_flag_resolution_instruction(self, json_schema: dict) -> str:
@@ -814,7 +824,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_flag_resolution(
+    async def execute_flag_resolution(
         self,
         pairs: list[tuple[AmbiguityFlag, UserResponse]],
         instruction: str,
@@ -822,7 +832,7 @@ class UserRequirementsInterpretation:
         """Op2 Stage 5: one constrained call over all {flag, response} pairs, then validate."""
         json_schema = flag_resolution_json_schema()
         user_content = _render_pairs(pairs)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -925,7 +935,7 @@ class UserRequirementsInterpretation:
     # Mechanism 4 — Persona-driven category inference
     # ---------------------------------------------------------------------------------
 
-    def run_persona_driven_category_inference(
+    async def run_persona_driven_category_inference(
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
@@ -933,7 +943,7 @@ class UserRequirementsInterpretation:
         assert state.resolved is not None  # Mechanism 2 always sets this before M4 runs.
 
         instruction = self.build_inference_instruction(inferred_categories_json_schema())
-        body = self.execute_category_inference(state, instruction)
+        body = await self.execute_category_inference(state, instruction)
         self.write_inferred_categories(state, body)
         return state
 
@@ -956,7 +966,7 @@ class UserRequirementsInterpretation:
         )
         return instruction
 
-    def execute_category_inference(
+    async def execute_category_inference(
         self,
         state: RequirementInterpretationState,
         instruction: str,
@@ -964,7 +974,7 @@ class UserRequirementsInterpretation:
         """Stage 3: one constrained call, schema then taxonomy-set check. No strip."""
         json_schema = inferred_categories_json_schema()
         user_content = _render_inference_user_content(state)
-        body, answered_by = self._call_providers(
+        body, answered_by = await self._call_providers(
             instruction=instruction,
             user_content=user_content,
             json_schema=json_schema,
@@ -1102,7 +1112,211 @@ class UserRequirementsInterpretation:
             )
         )
 
-    def _call_providers(
+    # ---------------------------------------------------------------------------------
+    # Mechanism 5 — Per-category depth calibration
+    # ---------------------------------------------------------------------------------
+
+    async def run_per_category_depth_calibration(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Mechanism 5 workflow: skip both-empty, else instruction, one call, then stamp."""
+        assert state.resolved is not None  # Mechanism 2 always sets this before M5 runs.
+
+        if (
+            not state.resolved.resolved_explicit_categories
+            and not state.inferred_categories
+        ):
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "depth_assignment.skipped",
+                        "timestamp": _timestamp(),
+                        "reason": "no_categories",
+                    }
+                )
+            )
+            return state
+
+        instruction = self.build_depth_assignment_instruction(
+            depth_assignment_json_schema()
+        )
+        body = await self.execute_depth_assignment(state, instruction)
+        self.stamp_category_depths(state, body)
+        return state
+
+    def build_depth_assignment_instruction(self, json_schema: dict) -> str:
+        """Assemble scale, floors, triggers, metric contract, closed schema, six pairs."""
+        instruction = build_depth_assignment_text(json_schema)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "depth_assignment.instruction.built",
+                    "timestamp": _timestamp(),
+                    "instruction_length": len(instruction),
+                    "few_shot_count": len(build_depth_assignment_few_shot_examples()),
+                }
+            )
+        )
+        logger.debug(
+            json.dumps(
+                {"event": "depth_assignment.instruction.text", "instruction": instruction}
+            )
+        )
+        return instruction
+
+    async def execute_depth_assignment(
+        self,
+        state: RequirementInterpretationState,
+        instruction: str,
+    ) -> DepthAssignmentResult:
+        """One constrained call, then schema, id coverage, and explicit-floor checks."""
+        json_schema = depth_assignment_json_schema()
+        user_content = _render_depth_assignment_user_content(state)
+        body, answered_by = await self._call_providers(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=DEPTH_ASSIGNMENT_SCHEMA_NAME,
+            stage="execute_depth_assignment",
+            provider_error_cls=DepthAssignmentProviderError,
+        )
+
+        try:
+            result = DepthAssignmentResult.model_validate(body)
+        except ValidationError as exc:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "depth_assignment.validated",
+                        "timestamp": _timestamp(),
+                        "provider": answered_by,
+                        "verdict": "rejected",
+                        "reason": "schema",
+                        "error_count": exc.error_count(),
+                    }
+                )
+            )
+            raise DepthAssignmentValidationError(
+                f"The body returned by {answered_by} does not match the depth-assignment "
+                "contract",
+                stage="execute_depth_assignment",
+            ) from exc
+
+        submitted_ids = _submitted_depth_category_ids(state)
+        returned_ids = [entry.category_id for entry in result.assignments]
+        coverage_miss = _depth_id_coverage_miss(returned_ids, submitted_ids)
+        if coverage_miss is not None:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "depth_assignment.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_depth_assignment",
+                        "provider": answered_by,
+                        "reason": "category_id_coverage",
+                        **coverage_miss,
+                    }
+                )
+            )
+            raise DepthAssignmentValidationError(
+                f"The body returned by {answered_by} did not cover the submitted "
+                f"category ids: {coverage_miss}",
+                stage="execute_depth_assignment",
+            )
+
+        resolved = state.resolved
+        assert resolved is not None
+        explicit_ids = {
+            category.category_id for category in resolved.resolved_explicit_categories
+        }
+        explicit_below_floor = [
+            entry.category_id
+            for entry in result.assignments
+            if entry.category_id in explicit_ids and entry.depth == "basic_profile"
+        ]
+        if explicit_below_floor:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "depth_assignment.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_depth_assignment",
+                        "provider": answered_by,
+                        "reason": "explicit_below_floor",
+                        "category_ids": explicit_below_floor,
+                    }
+                )
+            )
+            raise DepthAssignmentValidationError(
+                f"The body returned by {answered_by} assigned basic_profile to explicit "
+                f"category ids: {explicit_below_floor}",
+                stage="execute_depth_assignment",
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "depth_assignment.validated",
+                    "timestamp": _timestamp(),
+                    "provider": answered_by,
+                    "verdict": "accepted",
+                    "assignment_count": len(result.assignments),
+                }
+            )
+        )
+        return result
+
+    def stamp_category_depths(
+        self,
+        state: RequirementInterpretationState,
+        body: DepthAssignmentResult,
+    ) -> None:
+        """Write accepted depths onto matching explicit and inferred entries by id."""
+        resolved = state.resolved
+        assert resolved is not None
+
+        explicit_by_id = {
+            category.category_id: category
+            for category in resolved.resolved_explicit_categories
+        }
+        inferred_by_id = {
+            category.category_id: category for category in state.inferred_categories
+        }
+
+        explicit_stamped = 0
+        inferred_stamped = 0
+        for assignment in body.assignments:
+            explicit_entry = explicit_by_id.get(assignment.category_id)
+            if explicit_entry is not None:
+                explicit_entry.depth = assignment.depth
+                explicit_stamped += 1
+                continue
+            inferred_entry = inferred_by_id[assignment.category_id]
+            inferred_entry.depth = assignment.depth
+            inferred_stamped += 1
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "depth_assignment.stamped",
+                    "timestamp": _timestamp(),
+                    "explicit_stamped": explicit_stamped,
+                    "inferred_stamped": inferred_stamped,
+                    "assignments": [
+                        {"category_id": entry.category_id, "depth": entry.depth}
+                        for entry in body.assignments
+                    ],
+                }
+            )
+        )
+
+    async def aclose(self) -> None:
+        """Close each provider's HTTP session after a run."""
+        for provider in self._providers:
+            await provider.aclose()
+
+    async def _call_providers(
         self,
         *,
         instruction: str,
@@ -1118,7 +1332,7 @@ class UserRequirementsInterpretation:
 
         for provider in self._providers:
             try:
-                body = provider.generate_structured(
+                body = await provider.generate_structured(
                     instruction=instruction,
                     user_content=user_content,
                     json_schema=json_schema,
@@ -1388,6 +1602,62 @@ def _render_inference_user_content(state: RequirementInterpretationState) -> str
         "payload": asdict(state.payload),
     }
     return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _render_depth_assignment_user_content(state: RequirementInterpretationState) -> str:
+    """Payload, persona facts, and origin-labeled category rows as JSON."""
+    resolved = state.resolved
+    assert resolved is not None
+    categories: list[dict] = []
+    for category in resolved.resolved_explicit_categories:
+        categories.append(
+            {
+                "category_id": category.category_id,
+                "taxonomy_node": category.taxonomy_node,
+                "origin": "explicit",
+                "characteristics": list(category.characteristics),
+            }
+        )
+    for category in state.inferred_categories:
+        categories.append(
+            {
+                "category_id": category.category_id,
+                "taxonomy_node": category.taxonomy_node,
+                "origin": "inferred",
+                "reasoning": category.reasoning,
+            }
+        )
+    payload = {
+        "payload": {"normalized_text": state.payload.normalized_text},
+        "persona_facts": list(resolved.persona_facts),
+        "categories": categories,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _submitted_depth_category_ids(state: RequirementInterpretationState) -> list[int]:
+    """Explicit ids then inferred ids, in list order."""
+    resolved = state.resolved
+    assert resolved is not None
+    return [
+        category.category_id for category in resolved.resolved_explicit_categories
+    ] + [category.category_id for category in state.inferred_categories]
+
+
+def _depth_id_coverage_miss(
+    returned_ids: list[int],
+    submitted_ids: list[int],
+) -> dict[str, list[int]] | None:
+    """None when returned ids equal submitted ids with no duplicates; else the miss."""
+    duplicates = [
+        category_id for category_id in returned_ids if returned_ids.count(category_id) > 1
+    ]
+    unique_duplicates = sorted(set(duplicates))
+    unknown = sorted(set(returned_ids) - set(submitted_ids))
+    missing = sorted(set(submitted_ids) - set(returned_ids))
+    if unique_duplicates or unknown or missing:
+        return {"duplicates": unique_duplicates, "unknown": unknown, "missing": missing}
+    return None
 
 
 def _render_clarification_user_content(state: RequirementInterpretationState) -> str:

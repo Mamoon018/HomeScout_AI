@@ -104,3 +104,27 @@ class InferenceValidationError(InferenceError):
     """Raised when a returned body failed the inference wire contract or taxonomy set."""
 
     stage: ClassVar[str] = "execute_category_inference"
+
+
+class DepthAssignmentError(Exception):
+    """Base failure surface of Mechanism 5 (per-category depth calibration)."""
+
+    # Named so a caller can tell provider-vs-validation without reading a traceback.
+    stage: ClassVar[str] = "execute_depth_assignment"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class DepthAssignmentProviderError(DepthAssignmentError):
+    """Raised when no provider in the bound order returned a depth-assignment body."""
+
+    stage: ClassVar[str] = "execute_depth_assignment"
+
+
+class DepthAssignmentValidationError(DepthAssignmentError):
+    """Raised when a returned body failed schema, id coverage, or the explicit floor."""
+
+    stage: ClassVar[str] = "execute_depth_assignment"

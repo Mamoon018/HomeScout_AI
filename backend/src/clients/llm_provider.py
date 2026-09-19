@@ -28,7 +28,7 @@ class StructuredLLMProvider(Protocol):
     @property
     def model(self) -> str: ...
 
-    def generate_structured(
+    async def generate_structured(
         self,
         *,
         instruction: str,
@@ -37,11 +37,13 @@ class StructuredLLMProvider(Protocol):
         schema_name: str,
     ) -> dict: ...
 
+    async def aclose(self) -> None: ...
+
 
 class OpenAIStructuredProvider:
     """OpenAI chat completions constrained by a strict JSON schema."""
 
-    def __init__(self, client: openai.OpenAI, *, model: str) -> None:
+    def __init__(self, client: openai.AsyncOpenAI, *, model: str) -> None:
         self._client = client
         self._model = model
 
@@ -53,7 +55,7 @@ class OpenAIStructuredProvider:
     def model(self) -> str:
         return self._model
 
-    def generate_structured(
+    async def generate_structured(
         self,
         *,
         instruction: str,
@@ -62,7 +64,7 @@ class OpenAIStructuredProvider:
         schema_name: str,
     ) -> dict:
         try:
-            response = self._client.chat.completions.create(
+            response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=_build_messages(instruction, user_content),
                 response_format=_build_response_format(json_schema, schema_name),
@@ -84,11 +86,14 @@ class OpenAIStructuredProvider:
             finish_reason=finish_reason,
         )
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
 
 class GroqStructuredProvider:
     """Groq chat completions constrained by a strict JSON schema."""
 
-    def __init__(self, client: groq.Groq, *, model: str) -> None:
+    def __init__(self, client: groq.AsyncGroq, *, model: str) -> None:
         self._client = client
         self._model = model
 
@@ -100,7 +105,7 @@ class GroqStructuredProvider:
     def model(self) -> str:
         return self._model
 
-    def generate_structured(
+    async def generate_structured(
         self,
         *,
         instruction: str,
@@ -109,7 +114,7 @@ class GroqStructuredProvider:
         schema_name: str,
     ) -> dict:
         try:
-            response = self._client.chat.completions.create(
+            response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=_build_messages(instruction, user_content),
                 response_format=_build_response_format(json_schema, schema_name),
@@ -130,6 +135,9 @@ class GroqStructuredProvider:
             content=content,
             finish_reason=finish_reason,
         )
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
 
 def _build_messages(instruction: str, user_content: str) -> list[dict[str, str]]:
@@ -207,7 +215,7 @@ def _decode_body(
 def create_openai_provider(settings: Settings) -> OpenAIStructuredProvider:
     """Authenticated OpenAI adapter bound to the configured extraction model."""
     try:
-        client = openai.OpenAI(api_key=settings.openai_api_key)
+        client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
     except openai.OpenAIError as exc:
         raise LLMProviderError("OpenAI client could not be built; check OPENAI_API_KEY") from exc
     return OpenAIStructuredProvider(client, model=settings.openai_extraction_model)
@@ -216,7 +224,7 @@ def create_openai_provider(settings: Settings) -> OpenAIStructuredProvider:
 def create_groq_provider(settings: Settings) -> GroqStructuredProvider:
     """Authenticated Groq adapter bound to the configured extraction model."""
     try:
-        client = groq.Groq(api_key=settings.groq_api_key)
+        client = groq.AsyncGroq(api_key=settings.groq_api_key)
     except groq.GroqError as exc:
         raise LLMProviderError("Groq client could not be built; check GROQ_API_KEY") from exc
     return GroqStructuredProvider(client, model=settings.groq_extraction_model)

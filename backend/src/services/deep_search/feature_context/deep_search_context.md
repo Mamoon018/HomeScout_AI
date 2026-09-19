@@ -195,14 +195,14 @@ Unstructured Input Parsing (prerequisite)
 Dependency flow: 1 → 2.1 → 2.2 → 3.1 → {4.1 ∥ 5.1} → 5.2 → 6.1
 (5.1 only needs the finalized category set from 3.1, so it can run alongside 4.1; 5.2 needs both the depth from 4.1 and the reason from 2.2, so it waits on both.)
 
-Mechanism 1 — Unstructured Input Parsing
-Component: Requirement & Persona Extraction
+# Mechanism 1 — Unstructured Input Parsing
+## Component: Requirement & Persona Extraction
 
 Goal of Component: Convert the customer's raw natural-language input into a structured intermediate representation that keeps three things separate: (a) explicit category (b) category characteristics, (c) phrases flagged as ambiguous, (d) general persona/situation/lifestyle facts.
 
 Problem It Aims to Solve: Every later component needs to know whether it's looking at "something the customer asked for" or "background about who he is" — if these get conflated at extraction time, reasoning capture and inference downstream have no reliable signal to work from.
 
-Approach:
+### Approach:
 Single-pass structured extraction: one LLM call with a fixed output schema that extracts categories, characteristics, ambiguity flags, and persona/lifestyle/situation facts together. At this stage, we are not mapping the categories to our amenity-categories list. We just want to extract the amenities which user has mentioned in their response. The extraction model does not emit identifiers.
 
 Extraction-owned category identity (`category_id`):
@@ -211,11 +211,11 @@ When Mechanism 1 assembles `ExtractedRequirements`, each `explicit_categories` e
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
-Mechanism - 2 
+# Mechanism - 2  
 
-# Component 2A: Category Scope & Ambiguity Resolution
+## Component 2A: Category Scope & Ambiguity Resolution
 
-## Goal of Component
+### Goal of Component
 
 Two operations, run in sequence:
 
@@ -249,7 +249,7 @@ pass, before any clarification round has occurred), operation 2 is skipped
 entirely. The ambiguity flags from operation 1 are the final ambiguity flags.
 
 
-## Problem It Aims to Solve
+### Problem It Aims to Solve
 
 A raw category label from mechanism-1 can silently include or exclude adjacent
 real-world entities: "grocery" and "convenience store" overlap but are not the
@@ -265,7 +265,7 @@ not ask for. Characteristic flags are carried through unchanged for other
 components to handle.
 
 
-## Approach: Context-Aware Taxonomy Mapping
+### Approach: Context-Aware Taxonomy Mapping
 
 For each explicit category, provide the LLM with:
 - the mechanism-1 output that this component received (categories already labeled
@@ -286,7 +286,7 @@ most-fitting taxonomy node rather than leaving it unresolved. Characteristic
 flags are outside this component's resolution scope.
 
 
-## Critical Decision Choices
+### Critical Decision Choices
 
 
 ### What counts as a valid resolution
@@ -365,15 +365,15 @@ Here are the revised **Router** and **Component 2B** specs, aligned to the final
 
 ---
 
-# Router: Category Resolution Check
+## Router: Category Resolution Check
 
-## What it is
+### What it is
 A conditional check that is one step inside **Mechanism 2** (alongside 2A and 2B), sequenced by a Mechanism-2 orchestrator. It is not a component: no LLM call, no transformation, no output object. After each 2A pass it reads the workflow state, owns the pass counter, and makes one binary branch decision.
 
-## Input
+### Input
 The full `RequirementInterpretationState`. It reads `state.resolved.ambiguity_flags` to decide and forwards the **whole state** onward, so 2B can write to it and 2A's second pass can read it.
 
-## Decision
+### Decision
 Let `has_category_flag = any(f.target == "category" for f in state.resolved.ambiguity_flags)`.
 
 | Condition | Branch |
@@ -383,7 +383,7 @@ Let `has_category_flag = any(f.target == "category" for f in state.resolved.ambi
 
 `characteristic` and `persona` flags never route to 2B; both fall through to Mechanism 3.
 
-## Loop constraint (enforced structurally)
+### Loop constraint (enforced structurally)
 The router owns `state.category_resolution_passes`, incremented each time it inspects a fresh 2A output.
 
 1. **Pass 1** (`user_responses` empty): category flags may exist → route to 2B.
@@ -393,19 +393,19 @@ Hard cap: the router MUST NOT route to 2B when `category_resolution_passes >= 2`
 
 ---
 
-# Component 2B: Category Clarification Questions
+## Component 2B: Category Clarification Questions
 
-## Goal of Component
+### Goal of Component
 Three ordered operations, each depending on the previous completing:
 
 1. **Generate questions (LLM):** one clarification question (with options) per category flag, in a single batched call.
 2. **Present and collect (CLI):** show each question and its options in the CLI and block until the customer provides a response. A response is mandatory.
 3. **Write to state:** write each `{question, options, response}` into `state.user_responses`, keyed by the category flag's `category_id`.
 
-## Problem It Aims to Solve
+### Problem It Aims to Solve
 When 2A's first pass leaves category flags unresolved, those categories have no taxonomy mapping and cannot enter `resolved_explicit_categories`. 2B is solely responsible for generating grounded clarification questions, collecting the customer's answers, and handing them to 2A via the state under each flag's `category_id`. What 2A does with those answers afterward (confident mapping vs. nearest-node fallback) is 2A's concern, not 2B's.
 
-## Approach: Instruction-Grounded, Batched Question Generation
+### Approach: Instruction-Grounded, Batched Question Generation
 A single LLM call receives all `target: "category"` flags (each carrying its `category_id`) plus grounding context from `state.resolved` (`resolved_explicit_categories`, `payload`, `persona_facts`, `ambiguity_flags`) and returns one question per flag. Constraints:
 
 - Grounded strictly in the customer's own wording and existing context; introduces no assumptions about unstated needs.
@@ -430,7 +430,7 @@ LLM output `ClarificationResult`:
 
 Reuses `self._providers` and the `_call_providers` helper with a new `CLARIFICATION_SCHEMA_NAME`; total provider failure raises a typed `ClarificationProviderError`.
 
-## Critical Decision Choices
+### Critical Decision Choices
 
 ### What 2B reads
 `state.resolved` (`ResolvedRequirements`): `ambiguity_flags` filtered to `target: "category"` (which flags need questions, each carrying its `category_id`), plus `resolved_explicit_categories`, `payload`, and `persona_facts` for grounding. 2B receives the full state (the router passes it through) so it can also write `user_responses`.
@@ -458,7 +458,7 @@ After generation, 2B prints each question and its options to the CLI and reads t
 
 ---
 
-# Part 3 — Before/After state and residual gaps
+#### Part 3 — Before/After state and residual gaps
 
 **Before 2B** (state after 2A pass 1, category flags present):
 - `state.resolved.ambiguity_flags`: at least one with `target: "category"` (each carrying a `category_id`), plus any characteristic/persona flags
@@ -482,49 +482,7 @@ After generation, 2B prints each question and its options to the CLI and reads t
 ---------------------------------------------------------------------------------------
 
 
-
-Mechanism - 3: Category Reasoning, Priority Tagging and Category reasoning exploration
-
-Component 3A: Explicit Reason Capture & Priority Tagging
-Goal of Component: For each scope-resolved explicit category, derive why the customer likely wants it (using persona/situation, not just the literal mention), and tag it as explicit, top-priority.
-Problem It Aims to Solve: A bare keyword match ("he said gym") drops the motivation behind it, so nothing downstream can tell "gym for daily convenience" from "gym for a specific class type" — and without a captured reason, later metric selection has no purpose signal to key off.
-
-Approach: Batch Contextual Reasoning with Evidence-First Reason Capture
-Use a single LLM reasoning pass across all scope-resolved explicit categories, providing the full customer specification, persona/situation context, and all resolved categories. For each category, first derive the customer's reason from nearby/local wording when the reason is directly supported by the text. If no explicit reason is available, infer a reasonable persona/situation-based default for that category. Record the reason together with its source — explicit/local evidence or persona-based inference — so downstream systems can distinguish stated motivations from inferred ones. The LLM should reason across categories together to maintain consistency and avoid contradictory or redundant interpretations.
-
-Critical Decision Choices:
-Generic: how "priority = explicit" is represented in the data model so it can't be silently overwritten by a later step.
-	Decision: explicit_high
-Context-specific: Whether a captured reason can hold more than one motivation for a single category — relevant because depth and metric selection later both key off reason completeness, so an overly terse single-reason model risks under-specifying everything downstream of it.
-	Decision: Yes, one category can hold multiple reasons.
-
-NOTE: In the output component must provide the verdict if it is able to find out the reasoning associated with the categories. In case, it says "Lack of reasoning" for categories which did not have any contextual details then it triggers the Component 3B otherwise it moves on to the mechanism 4 using the ROUTER.
-
-
-Component 3B: Explicit Category Detail Elicitation
-Goal of Component: For each explicit category that has passed scope resolution, initial check by Explicit Reason Capture & Priority Tagging (3A) but carries no/vague attached characteristic or contextual detail, ask a targeted follow-up question to surface what the customer actually cares about within that category — before reason capture or metric definition treats it as finalized.
-
-Problem It Aims to Solve: A category named with zero accompanying detail ("gym," nothing else) gives reason capture nothing to differentiate it from a generic default — this is exactly the "plain keyword match drops the reason" friction the problem context calls out. Left unaddressed, it produces a technically-present but practically-generic reason, which then produces generic purpose-fit metrics, silently degrading the one category the customer explicitly cared about most.
-
-Batched propose-and-confirm clarification:
-Collect all explicit categories that lack sufficient context, then generate a single consolidated clarification round covering them. For each category, use persona and situation context to propose the most likely relevant characteristic, requirement, or reason, and ask the customer to confirm, correct, or skip it rather than answering from scratch. Keep all proposed interpretations grounded in information already provided by the customer.
-Here are scenarios & nature of questions that can be asked:
-
-| Input                      | Action                          |
-| -------------------------- | ------------------------------- |
-| Categories but no context  | Ask category-specific questions |
-| Ambiguity flags            | Ask only about gaps             |
-| Sufficient information     | Proceed without clarification   |
-
-Trigger clarification questions only when:
-1) The customer specifies categories but provides no supporting context, reasoning, or situation that can meaningfully guide further resolution or inference.
-	When triggered, it must not generate more than 5 targeted questions in total, based strictly on information already provided by the customer. Each question should seek to expand or clarify 	existing instructions rather than introduce assumed preferences.
-
-
-NOTE: User response will be grounded in "category reasoning responses" and it will be passed to the Component 3A again so, that it can associate the reasoning to the categories using additional details provided by the user for some categories. Now, in case customer doesn't respond or declines to elaborate on a given category then we have to infer a basic generic reasoning for it which will trigger basic level of depth moving forward.
-
-
-Mechanism 4 — Persona-Driven Category Inference
+# Mechanism 4 — Persona-Driven Category Inference
 Component: Lifestyle-Based Category & Characteristic Inference
 
 ## Goal of Component
@@ -541,11 +499,11 @@ Four operations, always, in this order, after Mechanism 2 has written `state.res
 
 Priority is not tagged on either list. Explicit and inferred stay distinct because they live in different fields.
 
-## Problem It Aims to Solve
+### Problem It Aims to Solve
 
 Without this, anything outside the customer's explicit list is invisible to the specification, even when it is a predictable extension of what he already said mattered. Inference that re-labels an explicit category, or that invents a category the persona does not support, would compete with explicit priority and send the wrong scope downstream.
 
-## Approach: Direct persona-to-category LLM inference
+### Approach: Direct persona-to-category LLM inference
 
 One call. The model receives:
 
@@ -558,7 +516,7 @@ The model returns `inferred_categories`: zero to two objects, each with `taxonom
 
 The prompt states that persona facts and explicit characteristics exist so the model can judge evidence and distinctness — not so it can add a category the persona does not support, restate an explicit node, or invent a taxonomy node.
 
-## Critical Decision Choices
+### Critical Decision Choices
 
 ### What this component reads
 
@@ -687,116 +645,259 @@ Order: 1 → 2 → 3 → 4 → 5.
 
 Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3. Sub-component 5 runs the assembled path end to end. Taxonomy access already exists from Mechanism 2 (`AMENITY_TAXONOMY_NODES`, `TAXONOMY_NODE_SET`). It is reused, not rebuilt.
 
----
 
-### Sub-component 1: Inferred Category Contract and State Field
 
-Goal of Component:
-Define the machine-checkable types this component writes: the wire body the model returns, the `InferredCategory` entry stored on the state, and the `inferred_categories` field on `RequirementInterpretationState`.
+# Mechanism 5 — Depth Assignment
+## Component: Per-Category Depth Calibration
 
-Problem It Aims to Solve:
-Mechanism 2's state has no place to hold inferred categories, and `ResolvedCategory` carries `raw_name`, `characteristics`, and `provenance`, which this component is forbidden to write. Without a separate contract, the call has nothing to constrain and later mechanisms have nothing typed to read.
+### Goal of Component
 
-Finalized Approach:
-1. Split wire and store. A closed Pydantic wire model for the LLM body (`taxonomy_node`, `reasoning`, array `maxItems: 2`). A separate store type for `InferredCategory` (`taxonomy_node`, `category_id`, `reasoning`). `category_id` is absent from the provider schema, same pattern as extraction's programmatic `category_id`.
+Four operations, in this order, after Mechanism 4 has written `state.inferred_categories`. Mechanism 3 is excluded from the feature and is not a prerequisite. This component assigns one depth to every remaining category — explicit and inferred — from one shared three-level scale. Floors and escalation targets differ by origin; the control surface (start at the origin's floor, escalate only on a trigger) is the same for every category.
 
-Critical Decision Choices:
-* Empty `inferred_categories` default on the state is `[]`, not omitted and not `None`.
-* Failure surface is new typed errors: `InferenceProviderError` and `InferenceValidationError`.
-* Schema name the provider echoes with the constrained body: `inferred_categories_schema`.
-* Stored entry fields remain `taxonomy_node`, `category_id`, `reasoning` only. No characteristics. No priority tag.
+**Branch — both lists empty:** If `state.resolved.resolved_explicit_categories` and `state.inferred_categories` are both empty, skip Operations 1–4. Leave both lists unchanged. Do not call the model. Do not fail the request.
 
----
+**Branch — at least one category exists:** Run all four operations.
 
-### Sub-component 2: Inference Instruction and Distinctness Rules
+1. **Assemble depth-assignment input (runs when at least one category exists):** Read, from the `RequirementInterpretationState`, the `payload`, `persona_facts`, every resolved explicit category (`category_id`, `taxonomy_node`, `characteristics`), and every inferred category (`category_id`, `taxonomy_node`, `reasoning`). Label each submitted category as `explicit` or `inferred` so the model can apply the matching floor. Load the pre-defined three-level scale, the origin floors, the escalation rule, the acceptance test, and the metric contract into the instruction. These are the only inputs to the call.
 
-Goal of Component:
-Build the instruction text that makes one call return zero to two taxonomy nodes, each with `reasoning` that cites persona facts, and that applies the locked distinctness tests, evidence bar, and negation rule.
+2. **Constrained depth assignment (runs when at least one category exists):** One batched LLM call assigns a depth to every submitted category in a single pass. The model starts each category at its origin floor and escalates only when a trigger exists (see Floor assignment and How the agent moves between levels). It returns one `depth` per `category_id`. It does not invent categories, drop categories, emit metric lists, or call retrieval tools.
 
-Problem It Aims to Solve:
-The schema caps count and enumerates nodes. It does not define when a node is allowed. Without written rules, the same persona facts can yield a restated explicit category, a generic association with no evidence, or a negated category, and nothing in the schema will reject those.
+3. **Validate the body (runs when the call ran):** Accept the body only if it matches the depth-assignment schema, every `depth` is in `{basic_profile, operating_details, specific_attributes}`, no **explicit** `category_id` is assigned `basic_profile`, and the set of `category_id` values is exactly the set that was submitted — no missing, extra, or duplicate ids. A mismatch rejects the whole body. Code does not fill a missing id with a floor, does not drop extras, and does not clamp an illegal value up or down.
 
-Finalized Approach:
-1. Rules plus few-shot worked pairs. Written evidence rule, distinctness Step 1 and Step 2 (reconstruction, discrimination, directionality), negation rule, and negative rules (do not invent nodes, do not force a category when evidence is thin, return `[]` in that case), plus fixed worked pairs.
+4. **Stamp depth onto each category (runs when the body is accepted):** For each assignment, write `depth` onto the matching `ResolvedCategory` or `InferredCategory` by `category_id`. Do not modify `taxonomy_node`, `characteristics`, `reasoning`, `raw_name`, `provenance`, `persona_facts`, `payload`, `extracted`, or `user_responses`. Do not mix inferred entries into `resolved_explicit_categories`.
 
-Critical Decision Choices:
-* Few-shot cases: empty persona → `[]`; one valid distinct node; exact-node collision omitted; negation omitted; two distinct nodes; Step 2 overlap (`gym` / `fitness_center`).
-* Examples use the maintained taxonomy node strings.
-* The full taxonomy is rendered in the instruction, not in user content.
-* `reasoning` cites which persona facts back the inference. It is not a purpose-reason for the amenity (Mechanism 3 is excluded).
+### Problem It Aims to Solve
 
----
+A fixed shallow or fixed deep pass either omits what the customer needs or drowns them in unwanted detail. Without one consistent rule, two categories the customer emphasized equally can receive arbitrarily different rigor, an inferred category can consume the same fetch budget as an explicit one with no trigger, and later metric/retrieval stages have no shared signal for how much to fetch — or they fetch attributes that cannot actually be resolved.
 
-### Sub-component 3: Constrained Inference Call and Body Validation
+### Approach: Scale-in-prompt, origin-gated floors, one batched LLM assignment
 
-Goal of Component:
-Execute the single inference call against the assembled user content and return either a schema-valid body or a typed failure.
+The depth scale is pre-defined in the instruction so the model knows what each level means (question, contents, tools, whether metrics are contract-gated). Assignment is not a per-`taxonomy_node` lookup table. One constrained call starts each category at its origin floor and moves up only on an explicit trigger.
 
-Problem It Aims to Solve:
-The response can exceed two entries, name a node outside the taxonomy, omit `reasoning`, or wrap extra keys. Downstream strip-and-write cannot consume that body, and an invalid body with no failure path stops the responsibility with no signal the caller can act on. Exact-node overlap with the explicit set is not this sub-component's failure. That is handled after a valid body exists.
+The assigned depth is the information band later stages (Mechanism 6 and retrieval) may fetch for that category. This component does not enumerate, accept, or reject individual metrics. The metric contract below is part of the scale definition and is the gate Mechanism 6 / retrieval must apply to every dynamically chosen metric at `operating_details` and `specific_attributes`.
 
-Finalized Approach:
-1. Provider-constrained structured output, then an independent second check. Pass the schema (including the taxonomy enum on `taxonomy_node` and `maxItems: 2`) at generation time. Validate the returned object with the same model. Then check every `taxonomy_node` is in `TAXONOMY_NODE_SET`. Unknown node rejects the whole body. More than two entries is a schema failure, not a truncation.
+### Critical Decision Choices
 
-Critical Decision Choices:
-* Reuse the existing ordered provider chain (`self._providers`, OpenAI then Groq).
-* User content is a JSON dump of the locked inputs: persona facts, explicit `taxonomy_node` plus `characteristics`, and payload. The full taxonomy is already in the instruction.
-* Invalid body (schema miss or unknown node) rejects the whole response. Count is not clamped in code.
-* The call always runs, including when `persona_facts` is empty. `[]` is a valid body.
-* One call for all candidates. Exact-node collision with the explicit set is not a validation failure here.
+#### Depth scale
 
----
+Three levels exist. All three are defined in the prompt. All three are assignable, subject to the origin floors below.
 
-### Sub-component 4: Exact-Node Strip, Identity Stamp, and State Write
+| Level | Question it answers | Contents | Tools | Contract-gated? |
+|---|---|---|---|---|
+| `basic_profile` | Is it here, and can I reach it — at what cost? | Identity (name, category, address, `place_id`, coords) + accessibility metrics: travel distance and duration per mode (walk / drive / transit / cycle) and reachability within a sensible threshold. | Google Maps: Places (identity) + Distance Matrix (accessibility). Fully Maps-resolvable. | No — these are fixed, known-resolvable dimensions. |
+| `operating_details` | Is it any good, and how does it run? | `basic_profile` + operational dimensions (hours, contact/website, rating, review volume, price level) + an LLM-defined, per-category quality set. The quality set is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric must pass the metric contract. | Maps (hours, rating, ratings count, `price_level`, attributes) + parallel web search (reputation synthesis). | Yes — every LLM-proposed quality metric goes through the contract. The fixed Maps operational dimensions do not. |
+| `specific_attributes` | Does it fit my particular situation? | User-specific metrics beyond the above — attributes the user emphasized, or that persona / inferred reasoning shows they would need. | Parallel web search + firecrawl/diffbot on targeted pages (official site, schedule, menu, pricing). | Yes — every metric goes through the contract. |
 
-Goal of Component:
-From a valid inference body, drop exact-node duplicates, stamp `category_id` on what remains, write `state.inferred_categories`, and sequence `interpret()` so this component runs after Mechanism 2.
+Assigned `depth` type: `Literal["basic_profile", "operating_details", "specific_attributes"]`.
 
-Problem It Aims to Solve:
-A schema-valid body can still repeat an explicit `taxonomy_node` or repeat the same inferred node twice. Failing the request on that collision would discard a valid sibling entry. Leaving the collision in place would put an inferred category on the same node as an explicit one and break explicit priority. Without a write onto the existing state, later mechanisms have no inferred list. Without an `interpret()` call after Mechanism 2, this component never runs.
+Higher levels include the contents of every level below them. Choosing `operating_details` includes `basic_profile`. Choosing `specific_attributes` includes both lower bands.
 
-Finalized Approach:
-1. In-place filter and mutate. Walk the validated list. Drop an entry whose `taxonomy_node` is already in the explicit set. Drop a later inferred entry that repeats an earlier inferred `taxonomy_node`. Stamp `category_id` on survivors. Assign `state.inferred_categories`. `interpret()` calls this after `run_explicit_category_resolution`.
+The tools named in this table are **not** called here. They describe what the assigned band authorizes later stages to use.
 
-Critical Decision Choices:
-* `category_id` is `max(extracted.explicit_categories.category_id) + 1`, or `0` if there are no explicit categories. It is not taken from `resolved_explicit_categories` only.
-* Stripped collisions are logged with the node and reason `exact_explicit_duplicate` or `duplicate_inferred_node`. Logging does not change the stored result beyond the strip.
-* Collision with an explicit node never raises. Survivors (zero, one, or two) are written. Empty list after a full strip is success.
-* Do not mix inferred entries into `resolved_explicit_categories`. Do not stamp ids until after the strip.
+#### Floor assignment
 
----
+| Category origin | Floor | Escalation |
+|---|---|---|
+| Explicit | `operating_details` — always. Explicit categories never receive `basic_profile`. | Escalate to `specific_attributes` when the user named a specific attribute for that category, or a persona / situation criterion in the input implies a judging question that `operating_details` cannot answer. |
+| Inferred | `basic_profile` — always, by default. | Stay at `basic_profile` unless there is a signal in the input pointing to a specific attribute of **that** inferred category. When such a signal exists, inspect the nature of the attribute: assign `operating_details` if it is operational / quality-level; assign `specific_attributes` if it is a narrow, user-specific characteristic. |
 
-### Sub-component 5: Dummy-Provider Path Checks
+Nothing drops below its own floor. No trigger → stay at the floor.
 
-Goal of Component:
-Run a fixed set of inference bodies through the assembled path with a dummy provider (no live API call) and produce a pass or fail per check.
+#### How the agent moves between levels
 
-Problem It Aims to Solve:
-Distinctness in the instruction is not checkable from the schema. Exact-node strip, empty-list success, id stamping, and "collision does not fail the request" are only visible if a known body is pushed through Operations 3 and 4. A live model call would change the body between runs and would not prove those rules.
+1. Start at the origin floor. Explicit → `operating_details`. Inferred → `basic_profile`.
+2. Escalate on an explicit trigger only — a named attribute or a persona / inferred criterion the current level cannot answer (see Acceptance test). For inferred categories, the same trigger also chooses which higher level (`operating_details` vs `specific_attributes`) from the attribute's nature. No trigger → stay at the floor. That is what prevents both over-fetching and under-fetching.
+3. The metric contract caps every later fetch at the two dynamic levels: Mechanism 6 may propose freely, but only contract-passing metrics resolve, so expensive tools (firecrawl/diffbot) fire only on things known to be retrievable. This component does not run that gate.
 
-Finalized Approach:
-1. Dummy provider. A test double returns a fixture JSON body. The real validate, strip, stamp, and write path runs against it. Assertions check the stored `inferred_categories` and that no exception is raised on exact-node collision.
+#### Acceptance test (applied identically to every level)
 
-Critical Decision Choices:
-* Fixture set: empty persona → `[]`; one valid node; two valid nodes; one collision plus one sibling (keep sibling, do not raise); both collide → `[]` (do not raise); two inferred entries with the same node (keep first); unknown taxonomy node (reject body); more than two entries (reject body, do not truncate).
-* Instruction-only rules (Step 2 overlap, negation, thin-evidence `[]`) are asserted via dummy bodies that already obey them.
-* No live provider call in these checks.
-* Maximum two is a schema failure, not truncation. Exact-node strip is not a request failure.
+After this level's metrics would be filled, can the user decide whether to weight this amenity as a decision factor? If the fills would still leave them at "I know it exists but I cannot tell whether it matters," the level under-delivers for that criterion.
 
-Mechanism 5 — Depth Assignment
-Component: Per-Category Depth Calibration
+That is the pass/fail bar for "the current level cannot answer," not a feeling. In this component there is no fetch yet, so the test is prospective: given the trigger, would the current floor's band let the user make that decision? If no, and a trigger exists, escalate. If no trigger exists, stay at the floor even if the band is thin — inferred categories with no attribute-level signal remain `basic_profile`.
 
-Goal of Component: Assign a depth level (how much information to surface) to every category — explicit and inferred — using one consistent decision logic applied uniformly.
-Problem It Aims to Solve: A fixed shallow or fixed deep pass either omits what's needed or drowns the customer in unwanted detail; without one consistent logic, two equally-important categories could end up with arbitrarily different rigor.
+#### Metric contract (gates `operating_details` quality metrics and every `specific_attributes` metric)
 
-Approach:
-Category-norm depth lookup: derive a baseline expected depth per category type (researched — what level of detail a gym typically needs vs. a park), adjusted up/down only when stated detail deviates from that norm.
+Every dynamically chosen metric — an `operating_details` quality metric or a `specific_attributes` metric — must fill all six fields. If it cannot fill even one, the metric is rejected and never fetched. `basic_profile` dimensions are not run through this contract; they are fixed and Maps-resolvable.
 
-Critical Decision Choices:
-Generic: the depth scale itself — how many discrete levels exist and what each concretely permits (e.g., basic profile details vs. operating details vs. specific attributes) — must be fixed before the logic can be applied consistently.
-	Decision: Define a fixed depth scale with clear criteria for what information each level should capture respectively for every category depending upon the nature of the category. This provides a consistent basis for deciding how deeply each category should be analyzed and what is the baseline level for each category.
-Context-specific: how inferred categories are capped relative to explicit ones — since they carry no stated detail by nature, a purely stated-specificity approach would default them all to minimum depth; a deliberate decision is needed on whether an inferred category can ever reach a deep level, given it must never compete with explicit attention.
-	Decision: Always Lowest level of scale.
+This component does not emit metrics. The contract is inlined in the depth instruction so the assignment model knows what the two dynamic levels contain, and it is the gate Mechanism 6 / retrieval must apply.
+
+| Field | Content |
+|---|---|
+| `label` | Human-readable metric name. |
+| `question` | The exact decision question it answers **for this user** — tied, directly or indirectly, to their instruction or a persona fact. Direct = they asked for it. Indirect = a persona / inferred fact implies they would weigh it. Forces relevance. |
+| `value_type` | One of: `number+unit` \| `boolean` \| `enum[fixed set]` \| `date/time`. Free-form prose as a **final** value is disallowed — the value must be comparable / interpretable. |
+| `resolution_source` | Concrete tool + target: which Maps field, or the shape of the web-search query, or which page type firecrawl/diffbot hits. |
+| `verification` | What evidence confirms the value (e.g. "stated on official site", "≥3 independent reviews corroborate", "listed in Maps attributes"). |
+| `null_policy` | What to emit if unresolved — must be `null` / `"unknown"`, never guessed. |
+
+**Rejection rule (why "cozy" fails):** `is it cozy?` → `value_type` has no enumerable range, `resolution_source` names nothing concrete, `verification` cannot be specified → rejected.
+
+**Reformulated to pass:** `label: ambiance`; `question: "user wants a quiet place to work (persona: remote worker) — is it quiet or lively?"` (indirect relevance); `value_type: enum[quiet, mixed, lively]`; `resolution_source: web search + review-term frequency`; `verification: dominant sentiment across ≥5 reviews mentioning noise/atmosphere`; `null_policy: "unknown"` → accepted.
+
+#### How depth is assigned
+
+Dynamically, by the LLM, in one batched call. Not from a pre-built per-category-type table. Every category in the batch sees the same scale, the same floors, the same trigger rule, and the same acceptance test, so two categories with the same origin and equivalent triggers are not given different rigor for no reason traceable to the input.
+
+The instruction must mark each submitted row as `explicit` or `inferred`. The model does not infer origin from the node name.
+
+#### Stated-detail signals (what counts as a trigger)
+
+| Signal | Used for | Content |
+|---|---|---|
+| `payload` | Every category | Normalized customer text. A named attribute, or a situation criterion, that points at this category. |
+| `characteristics` | Explicit categories only | Qualities already stored on the `ResolvedCategory`. Empty list means no named attribute from extraction. |
+| `reasoning` | Inferred categories only | Persona-fact evidence already stored on **that** `InferredCategory`. This is the stand-in for characteristics, which inferred entries do not carry. A trigger for an inferred category must point at that inferred node, not at a different explicit one. |
+| `persona_facts` | Every category | Situation and lifestyle facts. A criterion implied here can trigger escalation when the current floor cannot answer it. |
+
+Leftover `characteristic` and `persona` flags on `state.resolved.ambiguity_flags` are **not** inputs. `user_responses` are **not** inputs.
+
+A **trigger** is a named attribute or a persona / inferred criterion, found in those signals, that the current floor cannot answer under the acceptance test. Volume of wording alone is not a trigger. Centrality of a lifestyle topic is not a trigger unless it implies a judging criterion the floor cannot answer.
+
+#### Inferred categories
+
+Inferred categories do **not** share the explicit floor. Their floor is `basic_profile`. They are not forced to stay there: a signal in `payload`, `persona_facts`, or that entry's `reasoning` that points at a specific attribute of that inferred category promotes them. The LLM then assigns `operating_details` or `specific_attributes` from the attribute's nature (operational / quality vs narrow user-specific). No such signal → `basic_profile`.
+
+#### Write target
+
+This component does **not** produce a new top-level workflow object. It stamps `depth` onto each existing category entry.
+
+`ResolvedCategory` after this component:
+
+| Field | Type | Content |
+|---|---|---|
+| `category_id` | `int` | Unchanged. Identity from Mechanism 2. |
+| `taxonomy_node` | `str` | Unchanged. |
+| `raw_name` | `str` | Unchanged. |
+| `characteristics` | `list[str]` | Unchanged. |
+| `provenance` | `Provenance` | Unchanged. |
+| `depth` | `Literal["basic_profile", "operating_details", "specific_attributes"]` | Written here. Required on every remaining explicit entry after a successful stamp. Same three-member enum as inferred. Never `basic_profile` in practice: validation rejects that assignment before stamp. |
+
+`InferredCategory` after this component:
+
+| Field | Type | Content |
+|---|---|---|
+| `taxonomy_node` | `str` | Unchanged. |
+| `category_id` | `int` | Unchanged. Identity from Mechanism 4. |
+| `reasoning` | `str` | Unchanged. |
+| `depth` | `Literal["basic_profile", "operating_details", "specific_attributes"]` | Written here. Required on every remaining inferred entry after a successful stamp. Floor is `basic_profile`. |
+
+Before this component runs, `depth` is unset (`None`) on both types. After a successful return with at least one category, no remaining entry has `None`.
+
+#### What this component reads
+
+The full `RequirementInterpretationState` after Mechanism 4. It uses:
+
+| Source | Fields used |
+|---|---|
+| `state.payload` | Normalized customer wording (`normalized_text`) as trigger context |
+| `state.resolved.persona_facts` | Situation / lifestyle criteria that can trigger escalation |
+| `state.resolved.resolved_explicit_categories` | `category_id`, `taxonomy_node`, `characteristics`; origin = explicit |
+| `state.inferred_categories` | `category_id`, `taxonomy_node`, `reasoning`; origin = inferred |
+| Depth-scale text | Three-level definition, floors, escalation rule, acceptance test, and metric contract, inlined in the instruction |
+
+It does not read `user_responses`, leftover ambiguity flags, `extracted.explicit_categories` names for assignment, or any Mechanism 3 reason/priority field (Mechanism 3 is excluded).
+
+#### What the model returns vs what code writes
+
+**Model body (schema):**
+
+| Field | Constraint |
+|---|---|
+| `assignments` | Array. Length must equal the number of submitted categories. Empty only when the call was skipped (both lists empty). |
+| `assignments[].category_id` | Integer. Must echo a submitted id. |
+| `assignments[].depth` | Enum: `basic_profile` \| `operating_details` \| `specific_attributes` |
+
+**Code then:** checks the id set is exactly the submitted set; rejects the body if any **explicit** id is assigned `basic_profile`; stamps `depth` onto the matching `ResolvedCategory` or `InferredCategory`; leaves every other field unchanged.
+
+Reuses `self._providers` and `_call_providers` with a new schema name. Total provider failure raises a typed provider error with `stage`. A schema-invalid, id-mismatched, or explicit-below-floor body raises a typed validation error with `stage`. Validation is all-or-nothing.
+
+#### Empty or thin signals
+
+`persona_facts` may be empty. `characteristics` may be empty. `reasoning` is non-empty on every inferred entry that exists, but may be thin. The call still runs whenever at least one category exists. Thin or empty signals are **not** a skip and **not** a failure: explicit stays at `operating_details`; inferred stays at `basic_profile`.
+
+#### What this component does not do
+
+- It does not emit, accept, or reject individual metrics. Mechanism 6 applies the metric contract.
+- It does not search, retrieve, or score an amenity, and it does not call Maps, parallel web search, firecrawl, or diffbot.
+- It does not tag priority or capture why an explicit category matters (Mechanism 3 is excluded).
+- It does not resolve leftover characteristic or persona flags.
+- It does not add, drop, or remap categories.
+- It does not mix inferred entries into `resolved_explicit_categories`.
+- It does not assign `basic_profile` to an explicit category.
+
+#### Part 3 — Before/After state and residual gaps
+
+**Branch A — at least one category (call runs)**
+
+**Before Mechanism 5** (state after Mechanism 4):
+- `state.resolved.resolved_explicit_categories`: each entry has `category_id`, `taxonomy_node`, `raw_name`, `characteristics`, `provenance`; `depth` is `None`
+- `state.inferred_categories`: zero to two entries, each with `taxonomy_node`, `category_id`, `reasoning`; `depth` is `None`
+- `state.payload`, `persona_facts`, `extracted`, `user_responses`, `category_resolution_passes`: unchanged from Mechanism 4
+
+**After Mechanism 5:**
+- Every remaining `ResolvedCategory` has `depth` in `{operating_details, specific_attributes}`
+- Every remaining `InferredCategory` has `depth` in `{basic_profile, operating_details, specific_attributes}`
+- All other fields on those objects, and every other state field, unchanged
+
+**Branch B — zero categories (call skipped)**
+
+**Before:** both category lists empty; `depth` has nothing to stamp.
+
+**After:** both lists still empty. No model call. No failure.
+
+| State field | Before M5 | After M5 (Branch A) | After M5 (Branch B) |
+|---|---|---|---|
+| `resolved.resolved_explicit_categories` | M2/M4 entries, `depth=None` | same entries, `depth` stamped (`operating_details` or `specific_attributes`) | `[]` unchanged |
+| `inferred_categories` | M4 list (0–2), `depth=None` | same entries, `depth` stamped (`basic_profile`, `operating_details`, or `specific_attributes`) | `[]` unchanged |
+| `resolved.persona_facts` / `payload` | carried | unchanged | unchanged |
+| `extracted` / `user_responses` | carried | unchanged | unchanged |
+| `resolved.ambiguity_flags` | leftover characteristic/persona flags, if any | unchanged | unchanged |
+| `category_resolution_passes` | from Mechanism 2 | unchanged | unchanged |
+
+**(a) Assumptions baked from D1–D7, this feedback, and un-overridden safe defaults**
+
+- All three levels are assignable. Origin floors override the earlier "never assign `basic_profile`" / "same floor for inferred" answers.
+- Both store types use the full three-member `depth` enum. Wire schema allows all three. Code rejects explicit `basic_profile` before stamp.
+- One batched call; model echoes `category_id`; origin is labeled in the prompt, not inferred.
+- `interpret()` sequences this component immediately after Mechanism 4. Mechanism 3 is not inserted.
+- Leftover flags are ignored. No rationale field and no metric objects are stored on the category.
+- Zero-category skip does not fail. No trigger → origin floor. Code does not overwrite a valid escalation.
+- Tools and the metric contract describe later-stage work. This component does not fetch.
+
+**(b) Gaps vs current contracts**
+
+- `ResolvedCategory` and `InferredCategory` have no `depth` field yet.
+- `interpret()` currently returns after Mechanism 4; it does not call this component.
+- No depth-assignment schema, instruction module, or typed errors exist yet. Those are implementation work, not missing upstream inputs.
+- Upstream inputs this component needs (`payload`, `persona_facts`, explicit `characteristics`, inferred `reasoning`, `category_id` on both lists) already exist on the post-M4 state. There is no missing upstream field once `depth` is added to the two dataclasses.
+- Mechanism 6's spec does not yet name this six-field metric contract. The contract is locked here as level semantics; Mechanism 6 must apply it when it proposes metrics, or the two specs will disagree.
+
+
+## Process Flow — Component: Per-Category Depth Calibration
+
+Locked constraints carried into this breakdown. These are fixed at the component level and are not reopened by any sub-component below.
+
+- Input is the `RequirementInterpretationState` after Mechanism 4 (`state.resolved` is set, `inferred_categories` is written). Mechanism 3 is excluded and is not a prerequisite.
+- One constrained LLM call when at least one category exists. If both category lists are empty, skip the call, leave both lists unchanged, and do not fail the request.
+- Three-level scale (`basic_profile`, `operating_details`, `specific_attributes`) is pre-defined in the instruction. Assignment is not a per-`taxonomy_node` lookup table.
+- Explicit floor is `operating_details`. Inferred floor is `basic_profile`. Escalate only on a trigger. No trigger means stay at the floor.
+- Wire schema allows all three depth values. Code rejects the whole body if an explicit `category_id` is assigned `basic_profile`. Code does not fill, drop, or clamp.
+- Model body fields are `category_id` and `depth` only. This component does not emit metrics. The metric contract is instruction text for later stages.
+- `depth` is stamped onto each existing `ResolvedCategory` and `InferredCategory`. Inferred entries stay in `inferred_categories`.
+- Reuse `self._providers` and `_call_providers`. Typed provider error vs typed validation error, each with `stage`. Validation is all-or-nothing.
+- This component does not search, retrieve, call Maps / web search / firecrawl / diffbot, resolve leftover flags, or tag priority.
+
+Sub-components
+
+1. Depth Contract and State Field
+2. Depth Assignment Instruction
+3. Constrained Depth Call and Body Validation
+4. Depth Stamp, Empty Skip, and interpret Sequencing
+5. Dummy-Provider Path Checks
+
+Order: 1 → 2 → 3 → 4 → 5.
+
+Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3 (or takes the empty-list skip). Sub-component 5 runs the assembled path end to end. The provider chain already exists from Mechanism 1. It is reused, not rebuilt.
 
 
 Mechanism 6 — Category-Specific Metric & Fact Definition
@@ -1072,9 +1173,9 @@ Responsibility: Responsibility 1 entry; holds the ordered providers. Mechanisms 
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-# Mechanism 2 (Explicit Category Resolution & Global Requirement Sufficiency Gate) ,Responsibility 1 (User's Requirement Interpretation)
+##  Mechanism 2 (Explicit Category Resolution & Global Requirement Sufficiency Gate) ,Responsibility 1 (User's Requirement Interpretation)
 
-## Process Flow — Component 2A: Category Scope & Ambiguity Resolution
+### Process Flow — Component 2A: Category Scope & Ambiguity Resolution
 
 Locked constraints carried into this breakdown:
 
@@ -1344,7 +1445,7 @@ After Operation 2 completes, the `ResolvedRequirements` object contains:
 This is the object the router inspects on the second pass. Because zero category flags remain, the router always clears to Mechanism 3.
 
 
-## Process flow -- Router & Component 2B (Router & User Feedback & Category resolution)
+### Process flow -- Router & Component 2B (Router & User Feedback & Category resolution)
 
 
 ### Sub-component 1: Pass-counted category-flag branch
@@ -1515,6 +1616,228 @@ Whether the fixture calls real providers or only recorded/mocked bodies: No real
 
 
 
+## Mechanism - 4 (Persona Driven Category Inference)
+
+
+### Sub-components
+
+1. Inferred Category Contract and State Field
+2. Inference Instruction and Distinctness Rules
+3. Constrained Inference Call and Body Validation
+4. Exact-Node Strip, Identity Stamp, and State Write
+5. Dummy-Provider Path Checks
+
+Order: 1 → 2 → 3 → 4 → 5.
+
+Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3. Sub-component 5 runs the assembled path end to end. Taxonomy access already exists from Mechanism 2 (`AMENITY_TAXONOMY_NODES`, `TAXONOMY_NODE_SET`). It is reused, not rebuilt.
+
+
+---
+
+### Sub-component 1: Inferred Category Contract and State Field
+
+Goal of Component:
+Define the machine-checkable types this component writes: the wire body the model returns, the `InferredCategory` entry stored on the state, and the `inferred_categories` field on `RequirementInterpretationState`.
+
+Problem It Aims to Solve:
+Mechanism 2's state has no place to hold inferred categories, and `ResolvedCategory` carries `raw_name`, `characteristics`, and `provenance`, which this component is forbidden to write. Without a separate contract, the call has nothing to constrain and later mechanisms have nothing typed to read.
+
+Finalized Approach:
+1. Split wire and store. A closed Pydantic wire model for the LLM body (`taxonomy_node`, `reasoning`, array `maxItems: 2`). A separate store type for `InferredCategory` (`taxonomy_node`, `category_id`, `reasoning`). `category_id` is absent from the provider schema, same pattern as extraction's programmatic `category_id`.
+
+Critical Decision Choices:
+* Empty `inferred_categories` default on the state is `[]`, not omitted and not `None`.
+* Failure surface is new typed errors: `InferenceProviderError` and `InferenceValidationError`.
+* Schema name the provider echoes with the constrained body: `inferred_categories_schema`.
+* Stored entry fields remain `taxonomy_node`, `category_id`, `reasoning` only. No characteristics. No priority tag.
+
+---
+
+### Sub-component 2: Inference Instruction and Distinctness Rules
+
+Goal of Component:
+Build the instruction text that makes one call return zero to two taxonomy nodes, each with `reasoning` that cites persona facts, and that applies the locked distinctness tests, evidence bar, and negation rule.
+
+Problem It Aims to Solve:
+The schema caps count and enumerates nodes. It does not define when a node is allowed. Without written rules, the same persona facts can yield a restated explicit category, a generic association with no evidence, or a negated category, and nothing in the schema will reject those.
+
+Finalized Approach:
+1. Rules plus few-shot worked pairs. Written evidence rule, distinctness Step 1 and Step 2 (reconstruction, discrimination, directionality), negation rule, and negative rules (do not invent nodes, do not force a category when evidence is thin, return `[]` in that case), plus fixed worked pairs.
+
+Critical Decision Choices:
+* Few-shot cases: empty persona → `[]`; one valid distinct node; exact-node collision omitted; negation omitted; two distinct nodes; Step 2 overlap (`gym` / `fitness_center`).
+* Examples use the maintained taxonomy node strings.
+* The full taxonomy is rendered in the instruction, not in user content.
+* `reasoning` cites which persona facts back the inference. It is not a purpose-reason for the amenity (Mechanism 3 is excluded).
+
+---
+
+### Sub-component 3: Constrained Inference Call and Body Validation
+
+Goal of Component:
+Execute the single inference call against the assembled user content and return either a schema-valid body or a typed failure.
+
+Problem It Aims to Solve:
+The response can exceed two entries, name a node outside the taxonomy, omit `reasoning`, or wrap extra keys. Downstream strip-and-write cannot consume that body, and an invalid body with no failure path stops the responsibility with no signal the caller can act on. Exact-node overlap with the explicit set is not this sub-component's failure. That is handled after a valid body exists.
+
+Finalized Approach:
+1. Provider-constrained structured output, then an independent second check. Pass the schema (including the taxonomy enum on `taxonomy_node` and `maxItems: 2`) at generation time. Validate the returned object with the same model. Then check every `taxonomy_node` is in `TAXONOMY_NODE_SET`. Unknown node rejects the whole body. More than two entries is a schema failure, not a truncation.
+
+Critical Decision Choices:
+* Reuse the existing ordered provider chain (`self._providers`, OpenAI then Groq).
+* User content is a JSON dump of the locked inputs: persona facts, explicit `taxonomy_node` plus `characteristics`, and payload. The full taxonomy is already in the instruction.
+* Invalid body (schema miss or unknown node) rejects the whole response. Count is not clamped in code.
+* The call always runs, including when `persona_facts` is empty. `[]` is a valid body.
+* One call for all candidates. Exact-node collision with the explicit set is not a validation failure here.
+
+---
+
+### Sub-component 4: Exact-Node Strip, Identity Stamp, and State Write
+
+Goal of Component:
+From a valid inference body, drop exact-node duplicates, stamp `category_id` on what remains, write `state.inferred_categories`, and sequence `interpret()` so this component runs after Mechanism 2.
+
+Problem It Aims to Solve:
+A schema-valid body can still repeat an explicit `taxonomy_node` or repeat the same inferred node twice. Failing the request on that collision would discard a valid sibling entry. Leaving the collision in place would put an inferred category on the same node as an explicit one and break explicit priority. Without a write onto the existing state, later mechanisms have no inferred list. Without an `interpret()` call after Mechanism 2, this component never runs.
+
+Finalized Approach:
+1. In-place filter and mutate. Walk the validated list. Drop an entry whose `taxonomy_node` is already in the explicit set. Drop a later inferred entry that repeats an earlier inferred `taxonomy_node`. Stamp `category_id` on survivors. Assign `state.inferred_categories`. `interpret()` calls this after `run_explicit_category_resolution`.
+
+Critical Decision Choices:
+* `category_id` is `max(extracted.explicit_categories.category_id) + 1`, or `0` if there are no explicit categories. It is not taken from `resolved_explicit_categories` only.
+* Stripped collisions are logged with the node and reason `exact_explicit_duplicate` or `duplicate_inferred_node`. Logging does not change the stored result beyond the strip.
+* Collision with an explicit node never raises. Survivors (zero, one, or two) are written. Empty list after a full strip is success.
+* Do not mix inferred entries into `resolved_explicit_categories`. Do not stamp ids until after the strip.
+
+---
+
+### Sub-component 5: Dummy-Provider Path Checks
+
+Goal of Component:
+Run a fixed set of inference bodies through the assembled path with a dummy provider (no live API call) and produce a pass or fail per check.
+
+Problem It Aims to Solve:
+Distinctness in the instruction is not checkable from the schema. Exact-node strip, empty-list success, id stamping, and "collision does not fail the request" are only visible if a known body is pushed through Operations 3 and 4. A live model call would change the body between runs and would not prove those rules.
+
+Finalized Approach:
+1. Dummy provider. A test double returns a fixture JSON body. The real validate, strip, stamp, and write path runs against it. Assertions check the stored `inferred_categories` and that no exception is raised on exact-node collision.
+
+Critical Decision Choices:
+* Fixture set: empty persona → `[]`; one valid node; two valid nodes; one collision plus one sibling (keep sibling, do not raise); both collide → `[]` (do not raise); two inferred entries with the same node (keep first); unknown taxonomy node (reject body); more than two entries (reject body, do not truncate).
+* Instruction-only rules (Step 2 overlap, negation, thin-evidence `[]`) are asserted via dummy bodies that already obey them.
+* No live provider call in these checks.
+* Maximum two is a schema failure, not truncation. Exact-node strip is not a request failure.
+
+## Mechanism 5 — Depth Assignment (sub-component breakdown)
+
+Parent spec: Per-Category Depth Calibration, above. Locked constraints in the Process Flow section are not reopened here.
+
+### Sub-components
+
+1. Depth Contract and State Field
+2. Depth Assignment Instruction
+3. Constrained Depth Call and Body Validation
+4. Depth Stamp, Empty Skip, and interpret Sequencing
+5. Dummy-Provider Path Checks
+
+Order: 1 → 2 → 3 → 4 → 5.
+
+Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3 (or takes the empty-list skip). Sub-component 5 runs the assembled path end to end. The provider chain already exists from Mechanism 1. It is reused, not rebuilt.
+
+---
+
+### Sub-component 1: Depth Contract and State Field
+
+Goal of Component:
+Define the machine-checkable types this component writes: the wire body the model returns, the `depth` field on `ResolvedCategory` and `InferredCategory`, and the typed errors the call can raise.
+
+Problem It Aims to Solve:
+Neither store type has a `depth` field. The call has nothing to constrain against and nothing to validate against. Later mechanisms have no typed band to read. Mixing `depth` into `ResolvedCategory` without a separate wire shape would also force the model to emit `raw_name`, `characteristics`, and `reasoning`.
+
+Finalized Approach:
+1. Split wire and store. Closed Pydantic wire model for the LLM body (`assignments[]` of `category_id` + `depth`). Dataclass field `depth` on the existing store types. `depth` is `None` until stamped. Same split as `InferredCategoriesResult` / `InferredCategory`.
+
+Critical Decision Choices:
+* Stored `depth` type on both `ResolvedCategory` and `InferredCategory` is the full three-member enum: `basic_profile | operating_details | specific_attributes`. Explicit `basic_profile` is still rejected at validation, before stamp.
+* Failure surface is new typed errors: `DepthAssignmentProviderError` and `DepthAssignmentValidationError`.
+* Schema name the provider echoes with the constrained body: `depth_assignment_schema`.
+* No metric objects, rationale field, or new top-level state list.
+
+---
+
+### Sub-component 2: Depth Assignment Instruction
+
+Goal of Component:
+Build the instruction text that makes one call assign a depth to every submitted category using the locked scale, origin floors, trigger-only escalation, acceptance test, and inlined metric contract.
+
+Problem It Aims to Solve:
+The schema enumerates depth values and requires `category_id`. It does not define floors, what a trigger is, or what each level contains. Without written rules, an explicit category can be assigned `basic_profile`, an inferred category with no attribute signal can be raised to `specific_attributes`, or two categories with the same origin and equivalent evidence can receive different depths.
+
+Finalized Approach:
+1. Rules plus few-shot worked pairs, in a dedicated instruction module with a `build_*` function (same pattern as `inference_instruction.py`). Task statement, scale, floors, escalation, acceptance test, metric contract, negative rules, and fixed worked pairs live as module-level strings.
+
+Critical Decision Choices:
+* Few-shot cases: explicit stay at `operating_details`; explicit escalate to `specific_attributes`; inferred stay at `basic_profile`; inferred escalate to `operating_details`; inferred escalate to `specific_attributes`; negative pair (explicit `basic_profile` is wrong).
+* Origin label (`explicit` / `inferred`) lives in user content. The model does not infer origin from `taxonomy_node`.
+* Metric contract (six fields plus the cozy / `ambiance` pair) is inlined in the instruction. This component still does not emit metrics.
+* Worked inputs must not be reused as the live sample-runner seed.
+
+---
+
+### Sub-component 3: Constrained Depth Call and Body Validation
+
+Goal of Component:
+When at least one category exists, execute the single depth-assignment call and return either a schema-valid body whose `category_id` set matches the submitted set and whose explicit rows are not `basic_profile`, or a typed failure.
+
+Problem It Aims to Solve:
+The response can omit an id, invent an id, duplicate an id, assign `basic_profile` to an explicit category, or wrap extra keys. Downstream stamp cannot consume that body. Repairing it (fill, drop, clamp) would write a depth the model did not assign. An invalid body with no failure path stops the responsibility with no signal the caller can act on.
+
+Finalized Approach:
+1. Provider-constrained structured output, then an independent second check. Pass the schema (three-value `depth` enum) at generation time. Validate the returned object with the same model. Then require the `category_id` set equals the submitted set, and reject the body if any explicit id is assigned `basic_profile`. First failure raises `DepthAssignmentValidationError`. Code does not fill, drop, or clamp.
+
+Critical Decision Choices:
+* Reuse the existing ordered provider chain (`self._providers`, OpenAI then Groq).
+* User content is a JSON dump of origin-labeled rows, `payload`, and `persona_facts`.
+* Coverage (id set) and explicit-floor failures are validation errors, not provider errors.
+* Fallback to the next provider is only for `LLMProviderError`, not for a returned invalid body.
+* The call always runs when at least one category exists, including thin `persona_facts` or empty `characteristics`. Empty both lists is not this sub-component (skip is sub-component 4).
+
+---
+
+### Sub-component 4: Depth Stamp, Empty Skip, and interpret Sequencing
+
+Goal of Component:
+From a valid body, write `depth` onto each matching store entry by `category_id`. If both category lists are empty, skip Operations 1 through 4 without a model call and without failure. Sequence `interpret()` so this component runs immediately after Mechanism 4.
+
+Problem It Aims to Solve:
+A valid body that is not written leaves every `depth` as `None`. Mechanism 6 then has no band. Filling missing ids here would hide a validation miss. Without an empty-list skip, a request with no categories would still call the model. Without an `interpret()` call after Mechanism 4, this component never runs.
+
+Finalized Approach:
+1. In-place stamp. Build a `category_id` lookup over both lists. For each assignment, set `.depth` on the matching object. If both lists are empty, return the state unchanged before instruction or call. `interpret()` calls this immediately after `run_persona_driven_category_inference`. Mechanism 3 is not inserted.
+
+Critical Decision Choices:
+* Lookup is by `category_id`, not by `taxonomy_node` name.
+* Log a stamp event with counts per depth value.
+* Empty skip is success, not a validation error.
+* Do not modify `taxonomy_node`, `characteristics`, `reasoning`, `raw_name`, `provenance`, `persona_facts`, `payload`, `extracted`, or `user_responses`. Do not mix inferred entries into `resolved_explicit_categories`.
+
+---
+
+### Sub-component 5: Dummy-Provider Path Checks
+
+Goal of Component:
+Run a fixed set of depth-assignment bodies through the assembled path with a dummy provider (no live API call) and produce a pass or fail per check.
+
+Problem It Aims to Solve:
+Floors, trigger rules, and the metric contract in the instruction are not checkable from the schema. Id-set equality, explicit `basic_profile` rejection, empty-list skip, and "code does not clamp" are only visible if a known body is pushed through sub-components 3 and 4. A live model call would change the body between runs and would not prove those rules.
+
+Finalized Approach:
+1. Dummy provider returns fixture JSON. The real validate and stamp path runs against it. Assertions check stamped `depth`, that other fields are unchanged, and that illegal bodies raise.
+
+Critical Decision Choices:
+* Fixture set: empty both lists (no call, no error); explicit `basic_profile` (reject, no stamp); missing id (reject); extra id (reject); duplicate id (reject); valid mixed batch (explicit `operating_details` / `specific_attributes`, inferred `basic_profile` / higher); other fields unchanged.
+* Instruction-only rules (trigger vs no-trigger) are asserted via dummy bodies that already obey them. They are not a programmatic clamp.
+* No live provider call in these checks. A live sample runner is a later implementation-plan artifact, not this sub-component.
 
 
 
@@ -1554,7 +1877,9 @@ Whether the fixture calls real providers or only recorded/mocked bodies: No real
 
 
 
-### 2. Amenity discovery 
+
+
+### 2. Amenity discovery  (responsibility Not implemented)
 
 **Responsibility:** Find the actual amenities that exist within the defined neighborhood.
 
@@ -1573,7 +1898,7 @@ It should **not decide whether those amenities satisfy the user's preferences**.
 
 ---
 
-### 3. Amenity data acquisition
+### 3. Amenity data acquisition (responsibility Not implemented)
 
 **Responsibility:** Collect the factual information needed about each candidate.
 
@@ -1594,7 +1919,7 @@ Its output should be **facts and metrics**, not conclusions.
 
 ---
 
-### 4. Accessibility evaluation
+### 4. Accessibility evaluation (responsibility Not implemented)
 
 I would consider this a **separate responsibility**, because it answers a different question from amenity discovery.
 
@@ -1615,7 +1940,7 @@ It takes an identified amenity and produces accessibility data. It does not deci
 
 ---
 
-### 5. Candidate selection
+### 5. Candidate selection (responsibility Not implemented)
 
 **Responsibility:** Determine which amenities within each category are worth presenting.
 
@@ -1631,7 +1956,7 @@ Your workflow explicitly has this narrowing step after the deeper search.
 
 ---
 
-### 6. Assessment / judgment
+### 6. Assessment / judgment (responsibility Not implemented)
 
 This is another very clear boundary.
 
@@ -1646,7 +1971,7 @@ The assessment should remain separate from the facts, while retaining the facts 
 
 ---
 
-### 7. Presentation
+### 7. Presentation (responsibility Not implemented)
 
 **Responsibility:** Convert the resulting information into the structure the user should see.
 
@@ -1658,7 +1983,6 @@ This includes:
 * Phrasing results against the user's requirements.
 
 This should **not perform new research or make new judgments**.
-
 
 
 
