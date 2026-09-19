@@ -35,8 +35,8 @@ from src.services.deep_search.feature_schemas.schemas import (
     inferred_categories_json_schema,
 )
 from src.services.deep_search.requirement_interpretation import (
-    CATEGORY_RESOLUTION_ATTEMPT_EVENT,
-    CATEGORY_RESOLUTION_RAW_BODY_EVENT,
+    LLM_PROVIDER_ATTEMPT_EVENT,
+    LLM_PROVIDER_RAW_BODY_EVENT,
     _render_inference_user_content,
     _resolved_requirements_dict,
     create_requirement_interpretation,
@@ -232,13 +232,13 @@ async def run_sample_inference() -> RequirementInterpretationState:
 
 
 def _print_attempts(collector: _RecordCollector) -> None:
-    for attempt in collector.events(CATEGORY_RESOLUTION_ATTEMPT_EVENT):
+    for attempt in collector.events(LLM_PROVIDER_ATTEMPT_EVENT):
         if attempt.get("stage") != _EXECUTE_STAGE:
             continue
         line = f"{attempt['provider']} ({attempt['model']}): {attempt['outcome']}"
         detail = attempt.get("detail")
         print(f"{line} - {detail}" if detail else line)
-    for answer in collector.events(CATEGORY_RESOLUTION_RAW_BODY_EVENT):
+    for answer in collector.events(LLM_PROVIDER_RAW_BODY_EVENT):
         if answer.get("stage") != _EXECUTE_STAGE:
             continue
         print(f"\nraw decoded body from {answer['provider']}:")

@@ -900,40 +900,395 @@ Order: 1 → 2 → 3 → 4 → 5.
 Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the validated body from 3 (or takes the empty-list skip). Sub-component 5 runs the assembled path end to end. The provider chain already exists from Mechanism 1. It is reused, not rebuilt.
 
 
-Mechanism 6 — Category-Specific Metric & Fact Definition
+# Mechanism 6 — Category-Specific Metric & Fact Definition
 
-Component 6A: Baseline Metric Definition per Category, user-specific metrics
+## Component: Per-Category Metric Definition
 
-Goal of Component: For each category, define the fixed set of metrics/characteristics/facts that should always be captured for that category type, regardless of what the customer specifically asked.
-Problem It Aims to Solve: Without a defined floor, "obviously relevant" information gets reasoned out fresh every time, risking inconsistent or missing baseline coverage — and the customer loses self-sufficient evaluation for anything he didn't think to ask about.
+### Goal of Component
 
-Approach:
-Research-derived category baseline library: research, per category type, what facts are universally expected to judge that type, maintained as a standing reference reused every time that category appears. (Considering what we can extract using our tools like Google Places API, Diffbot, Parallel Web)
+Six operations, in this order, after Mechanism 5 has stamped `depth` onto every category. Mechanism 3 is excluded and is not a prerequisite. This component defines, for every category that needs more than the fixed profile, the dynamic metrics its assigned depth authorizes, and records them in a separate workflow object. Every metric must pass the metric contract defined in Mechanism 5. Metrics that fail a code-side contract check are dropped; nothing is repaired.
+
+**Eligible category:** a `ResolvedCategory` or `InferredCategory` whose `depth` is `operating_details` or `specific_attributes`. A `basic_profile` category is not eligible: its content is the fixed dimensions only.
+
+**Branch A — no eligible category** (both lists empty, or every category is `basic_profile`): skip Operations 1–5 and do not call the model. Run Operation 6 only: write one `CategoryMetricSet` per existing category with `metrics = None` (nothing to write when both lists are empty). Do not fail the request.
+
+**Branch B — at least one eligible category:** run all six operations.
+
+1. **Assemble metric-definition input (runs in Branch B):** Read, from the `RequirementInterpretationState`, `payload.normalized_text`, `resolved.persona_facts`, the leftover characteristic and persona flags on `resolved.ambiguity_flags` (context only), and every eligible category: `category_id`, `taxonomy_node`, origin (`explicit` or `inferred`), `depth`, and `characteristics` (explicit) or `reasoning` (inferred). Label each row with origin and assigned depth in the user content. Load the depth scale, the band rule, the metric contract, the fixed-dimension list (as "do not propose these"), the negative rules, and the worked examples into the instruction.
+
+2. **Constrained metric definition (runs in Branch B):** One batched LLM call returns, for every submitted `category_id`, a list of metrics. Each metric carries the six contract fields plus a `band`. The model does not re-assign depth, does not define fixed dimensions, does not fetch anything, and does not add, drop, or remap categories.
+
+3. **Validate the body against the schema and the id set (runs after the call):** Accept the body only if it matches the metric-definition schema — every metric has every field, with the right types and values from the closed sets — and the set of returned `category_id` values is exactly the submitted set: no missing, extra, or duplicate ids. Either miss rejects the whole body with a typed validation error. Code does not fill, drop, or reorder ids.
+
+4. **Apply the metric contract rules per metric (runs on an accepted body):** Check each metric against the contract rules K1–K6 — the rules a schema cannot express. A metric that fails any rule is dropped and logged with its failed rule. Metrics that pass are kept in the order the model returned them.
+
+5. **Report shortfalls (runs after Operation 4):** For each eligible category, note whether it has zero surviving `operating_details`-band metrics, or (when `depth = specific_attributes`) zero surviving `specific_attributes`-band metrics. This is a logged report, not a failure and not a repair.
+
+6. **Write metric sets to state (runs after Operation 5, or alone in Branch A):** Append one `CategoryMetricSet` to `state.category_metrics` for every category (explicit entries first, then inferred), matched by `category_id`. `taxonomy_node` is copied from the matching `ResolvedCategory` or `InferredCategory`. `metrics` is the surviving list for an eligible category (possibly empty) and `None` for a `basic_profile` category. Do not modify `ResolvedCategory`, `InferredCategory`, or any other state field.
+
+### Problem It Aims to Solve
+
+Without one shared rule for what a metric must contain, "obviously relevant" information is reasoned out fresh each run: one run proposes `is it cozy?`, another proposes a comparable, resolvable metric, and retrieval either burns expensive tools on unresolvable questions or returns prose the customer cannot compare. Without a band rule, a category assigned `operating_details` could receive `specific_attributes`-level metrics, defeating Mechanism 5's depth decision. Without a stated owner for the contract, Mechanism 5 assumes Mechanism 6 applies it and Mechanism 6 assumes nothing. Consistency here means every category is treated by the same contract and the same depth-scale approach, not that every category of the same type receives an identical stored template.
+
+### Approach: Depth-band-driven definition, one batched call, contract-gated, drop-only rejection
+
+The depth scale from Mechanism 5 tells the model what each band contains and which tools it may use. The model defines only the two dynamic bands: an `operating_details` quality set and a `specific_attributes` user-specific set. The fixed dimensions are known to code and are never defined by the model. One constrained call sees every eligible category together so the same scale, contract, and rules apply to all of them. No predefined metric list per category type or taxonomy group exists in code or is required in the prompt. The prompt carries a few worked examples only. Results live in their own state object, keyed by `category_id`.
+
+### Critical Decision Choices
+
+#### What "baseline" means in this component
+
+The always-captured baseline is the **fixed dimensions** for the assigned depth. It is a code-owned constant, not a model output, and it is not stored on the state. Everything else is dynamic, defined by the model in this call, and gated by the contract.
+
+#### Fixed dimensions by depth
+
+| Depth | Fixed dimensions implied (cumulative) | Owner |
+|---|---|---|
+| `basic_profile` | Identity: name, category, address, website, `place_id`, coords. Accessibility: travel distance and duration per mode (walk / drive / transit / cycle), reachability within a threshold. | Code constant. The threshold value is a retrieval-stage decision, not set here. |
+| `operating_details` | `basic_profile` + hours, contact (phone), rating, review volume, price level. | Code constant. |
+| `specific_attributes` | `operating_details` fixed dimensions. No additional fixed dimensions. | Code constant. |
+
+Later stages read this constant by `depth`. It is the single source of truth for the fixed part of what is fetched.
+
+#### Bands the model may define
+
+A **band** is the depth level a metric belongs to: `operating_details` or `specific_attributes`. Bands are cumulative: a `specific_attributes` category carries the quality set and the user-specific set, and each metric is tagged with the band it came from.
+
+| Assigned depth | Bands the model may emit | Minimum expected | Maximum |
+|---|---|---|---|
+| `basic_profile` | none (category is not submitted) | — | — |
+| `operating_details` | `operating_details` | ≥1 (reported, not enforced) | 4 |
+| `specific_attributes` | `operating_details` and `specific_attributes` | ≥1 of each (reported, not enforced) | 4 per band |
+
+The band tag lets code check that no metric sits above its category's depth, and that each band uses only its allowed tools. The cap keeps each category's list short and later fetch cost bounded.
+
+#### How metrics are defined per band
+
+| Band | Question it answers | Tie to the user (goes in `question`) | Allowed tools |
+|---|---|---|---|
+| `operating_details` | Is it any good, and how does it run — beyond the fixed dimensions? | The category itself is a valid tie: the customer explicitly asked for it (explicit), or that entry's `reasoning` supports it (inferred). The `question` states which. | `google_maps` (attributes not already fixed), `parallel_web_search` |
+| `specific_attributes` | Does it fit my particular situation? | Must point at the trigger that raised the depth: a named characteristic, a payload statement, a persona fact, or the inferred entry's `reasoning`. | `parallel_web_search`, `firecrawl` |
+
+Decision test, applied to every metric: once resolved, would this value change how the customer weights or ranks this category? If not, the metric is not proposed. A metric must not restate a fixed dimension.
+
+#### Metric contract as typed fields
+
+The six fields come from Mechanism 5. This component types them and adds `band`:
+
+| Field | Wire type | Content |
+|---|---|---|
+| `label` | `str` | Human-readable metric name. |
+| `question` | `str` | The exact decision question for this user, tied directly or indirectly to their instruction, a persona fact, or the category's own request/inference. |
+| `value_type` | `Literal["number_with_unit", "boolean", "enum", "date_time"]` | Maps to `number+unit`, `boolean`, `enum[fixed set]`, `date/time`. Free-form prose is not a value type. |
+| `unit` | `str \| None` | Required when `value_type = number_with_unit`; `None` otherwise. |
+| `enum_values` | `list[str]` | ≥2 distinct members when `value_type = enum`; empty otherwise. |
+| `resolution_source` | `{tool: Literal["google_maps", "parallel_web_search", "firecrawl"], target: str}` | Concrete tool and target: the Maps field, the shape of the search query, or the page type firecrawl fetches. |
+| `verification` | `str` | What evidence confirms the value. |
+| `null_policy` | `Literal["null", "unknown"]` | What to emit if unresolved. Never a guess. |
+| `band` | `Literal["operating_details", "specific_attributes"]` | The band the metric belongs to. |
+
+#### Three-layer validation
+
+| Layer | What it checks | Action on failure |
+|---|---|---|
+| 1. Schema (Operation 3) | Field structure of every metric: all keys present, no extra keys, correct types, values inside the closed sets (`value_type`, `null_policy`, `tool`, `band`). The schema is passed at generation time and the returned body is validated against the same model. This is what keeps metric structure consistent across categories and runs. | Reject the whole body. Typed validation error with `stage`. |
+| 2. Id set (Operation 3) | Returned `category_id` set equals the submitted set. | Reject the whole body. Typed validation error with `stage`. |
+| 3. Contract rules (Operation 4) | Rules a schema cannot express: conditional fields, dependence on the category's `depth`, duplicates, cap, empty strings. | Drop that metric only. Log it. Keep the rest. |
+
+Contract rules (per metric, in order):
+
+| Rule | Check | On failure |
+|---|---|---|
+| K1 Text completeness | `label`, `question`, `verification`, `resolution_source.target` are non-empty after trimming. | Drop |
+| K2 Value-type parameters | `number_with_unit` → `unit` set and `enum_values` empty. `enum` → ≥2 distinct non-empty `enum_values` and `unit` unset. `boolean` / `date_time` → `unit` unset and `enum_values` empty. | Drop |
+| K3 Band within depth | `band = specific_attributes` only when the category's `depth = specific_attributes`. | Drop |
+| K4 Tool fits band | `firecrawl` only with `band = specific_attributes`. | Drop |
+| K5 No duplicate | Same `label` (case-insensitive, trimmed) already kept for this category. | Drop the later one |
+| K6 Cap | More than 4 survivors in one band for one category. | Drop the extras after the 4th, in model order |
+
+**Not checkable in code:** whether `resolution_source.target` is genuinely concrete, whether `verification` is a real obtainable evidence type, whether `question` is truly tied to this user, and whether a metric restates a fixed dimension. These are enforced by the instruction and the worked examples only. Code checks structure; it cannot judge the "cozy" case.
+
+#### Examples, not a catalog
+
+The instruction carries a few worked examples across different category types (for illustration, including the `ambiance` accept/reject pair). They are not a required set and are not a per-category lookup. No code path selects metrics by `taxonomy_node`.
+
+#### Leftover flags as context
+
+Leftover `characteristic` and `persona` flags on `resolved.ambiguity_flags` are rendered in a separate block of the user content. They are not resolved by asking the customer. When a metric addresses one of those phrases, its `question` states the single reading chosen. Mechanism 3 is excluded, so nothing else consumes them.
+
+#### Write target
+
+A new workflow object, separate from the category objects. `RequirementInterpretationState` gains `category_metrics: list[CategoryMetricSet]` (default empty list, empty until this component runs).
+
+`MetricSpec` (stored dataclass; same fields as the wire metric):
+
+| Field | Type | Content |
+|---|---|---|
+| `label` | `str` | As returned, trimmed. |
+| `question` | `str` | As returned. |
+| `value_type` | `Literal["number_with_unit", "boolean", "enum", "date_time"]` | As returned. |
+| `unit` | `str \| None` | As returned. |
+| `enum_values` | `list[str]` | As returned. |
+| `resolution_source` | `ResolutionSource(tool, target)` | As returned. |
+| `verification` | `str` | As returned. |
+| `null_policy` | `Literal["null", "unknown"]` | As returned. |
+| `band` | `Literal["operating_details", "specific_attributes"]` | As returned. |
+
+`CategoryMetricSet` (one per category, in `state.category_metrics`):
+
+| Field | Type | Content |
+|---|---|---|
+| `category_id` | `int` | Identity from Mechanism 2 (explicit) or Mechanism 4 (inferred). Join key. |
+| `taxonomy_node` | `str` | Copied by code from the matching `ResolvedCategory` or `InferredCategory` by `category_id`. Not produced by the model. |
+| `metrics` | `list[MetricSpec] \| None` | Surviving metrics for an eligible category (`[]` if none survived). `None` for a `basic_profile` category: no dynamic metrics are defined at that depth. |
+
+`ResolvedCategory` and `InferredCategory` are unchanged by this component.
+
+#### What this component reads
+
+| Source | Fields used |
+|---|---|
+| `state.payload` | `normalized_text` |
+| `state.resolved.persona_facts` | Situation and lifestyle facts |
+| `state.resolved.ambiguity_flags` | Leftover `characteristic` and `persona` flags, context only |
+| `state.resolved.resolved_explicit_categories` | `category_id`, `taxonomy_node`, `characteristics`, `depth`; origin = explicit |
+| `state.inferred_categories` | `category_id`, `taxonomy_node`, `reasoning`, `depth`; origin = inferred |
+| Instruction text | Depth scale, band rule, contract, fixed-dimension list, negative rules, examples |
+
+Only eligible categories are sent to the model. It does not read `user_responses`, `extracted.explicit_categories` names, or any Mechanism 3 field.
+
+#### What the model returns vs what code writes
+
+**Model body (schema):**
+
+| Field | Constraint |
+|---|---|
+| `categories` | Array. One entry per submitted eligible category. |
+| `categories[].category_id` | Integer. Must echo a submitted id exactly once. |
+| `categories[].metrics` | Array of metric objects (fields above). May be empty. |
+
+**Code then:** checks the id set equals the submitted set; applies K1–K6 per metric; reports shortfalls; builds one `CategoryMetricSet` per category, copying `taxonomy_node` by `category_id`; leaves every other field unchanged.
+
+Reuses `self._providers` and `_call_providers` with a new schema name (`metric_definition_schema`). Total provider failure raises a typed provider error with `stage`. A schema or id-set failure raises a typed validation error with `stage`. A contract-rule failure never raises.
+
+#### Empty or thin signals
+
+`persona_facts`, `characteristics`, and leftover flags may be empty; `reasoning` may be thin. The call still runs whenever one eligible category exists. Thin signals are not a skip and not a failure: the model still proposes contract-passing `operating_details`-band metrics tied to the category's own request or inference. It does not invent a `specific_attributes` metric without a trigger.
+
+#### What this component does not do
+
+- It does not assign or change `depth`.
+- It does not search, retrieve, resolve, or score an amenity, and it does not call Maps, parallel web search, or firecrawl. `resolution_source` names what a later stage will use.
+- It does not define the fixed dimensions and does not store them on the state.
+- It does not store a facts list. A fact is a contract-passing metric whose value is resolved later.
+- It does not tag priority or capture a reason (Mechanism 3 is excluded).
+- It does not resolve leftover flags with the customer.
+- It does not add, drop, or remap categories.
+- It does not repair a failing metric (no fill, no rewrite, no clamp).
+
+### Part 3 — Before/After state and residual gaps
+
+**Branch A — no eligible category (call skipped)**
+
+**Before:** both lists empty, or every category `depth = basic_profile`. `state.category_metrics = []`.
+**After:** no model call. One `CategoryMetricSet` per existing category, each with `metrics = None`. (Both lists empty: `category_metrics` stays `[]`.) No failure.
+
+**Branch B — at least one eligible category (call runs)**
+
+**Before Mechanism 6** (state after Mechanism 5):
+- Every category has `depth` stamped.
+- `state.category_metrics = []`.
+- `payload`, `persona_facts`, `extracted`, `user_responses`, `ambiguity_flags`, `category_resolution_passes` unchanged from Mechanism 5.
+
+**After Mechanism 6:**
+- `state.category_metrics` has one `CategoryMetricSet` per category (explicit first, then inferred).
+- Eligible categories: `metrics` = the metrics that passed K1–K6, each with `band` ≤ the category's depth.
+- `basic_profile` categories: `metrics = None`.
+- Every other state field, including all `ResolvedCategory` / `InferredCategory` fields, unchanged.
+
+| State field | Before M6 | After M6 (Branch B) | After M6 (Branch A) |
+|---|---|---|---|
+| `resolved.resolved_explicit_categories` | depth stamped | unchanged | unchanged |
+| `inferred_categories` | depth stamped | unchanged | unchanged |
+| `category_metrics` | `[]` | one `CategoryMetricSet` per category; `metrics` list for eligible, `None` for `basic_profile` | one per category, all `metrics = None` (or `[]` if no categories) |
+| `resolved.persona_facts` / `payload` | carried | unchanged | unchanged |
+| `resolved.ambiguity_flags` | leftover flags, if any | unchanged (read only) | unchanged |
+| `extracted` / `user_responses` | carried | unchanged | unchanged |
+| `category_resolution_passes` | from Mechanism 2 | unchanged | unchanged |
+
+**(a) Assumptions baked from D1–D6, this feedback, and un-overridden safe defaults**
+
+- One batched call. No predefined per-category metrics; examples only.
+- Schema miss and id-set mismatch reject the whole body; contract-rule failures drop the single metric.
+- Rejected metrics are logged, not stored on the state.
+- Minimum per band is a reported shortfall, not enforced. Cap is 4 per band per category.
+- `CategoryMetricSet` holds only `category_id`, `taxonomy_node`, `metrics`. `metrics = None` means "not eligible (basic_profile)"; `[]` means "eligible but nothing survived". This meaning of `None` is my assumption.
+- `value_type` uses four token values; `resolution_source` is `{tool, target}`.
+- `google_maps` is allowed for `operating_details`-band metrics only; `firecrawl` for `specific_attributes`-band only; `parallel_web_search` for both.
+- The fixed-dimension constant lives beside `DepthLevel` in the schema module (location is an implementation choice).
+- The accessibility "sensible threshold" is not set here.
+- Empty strings are a code-side drop (K1), not a schema rejection, so one blank field does not discard every category's metrics.
+
+**(b) Gaps vs current contracts**
+
+- G1. `RequirementInterpretationState` has no `category_metrics`; no `MetricSpec`, `CategoryMetricSet`, wire models, schema name, instruction module, or typed errors exist.
+- G2. `interpret()` ends at `run_per_category_depth_calibration`; it does not call this component.
+- G3. The Mechanism 5 spec table and `depth_assignment_instruction.py` still list "contact/website" under `operating_details` and name "firecrawl/diffbot". This spec moves website to `basic_profile` and uses firecrawl only. Mechanism 5 text is not edited here and will disagree until synced.
+- G4. Nothing here guarantees non-empty bands after drops. Only a logged shortfall exists.
+- G5. The Mechanisms list at lines 168–193 numbers Depth Assignment as 7 and Metric Definition as 8, while the headings say 5 and 6. Out of scope here; not edited.
+- G6. Semantic concreteness of `resolution_source` / `verification` is prompt-enforced only.
+
+## Process Flow — Component: Per-Category Metric Definition
+
+Locked constraints carried into this breakdown. They are fixed at the component level and are not reopened by any sub-component below.
+
+- Input is the `RequirementInterpretationState` after Mechanism 5 (`depth` stamped on every category). Mechanism 3 is excluded.
+- One constrained LLM call when at least one category has `depth ≠ basic_profile`; otherwise skip the call, write `metrics = None` sets, and do not fail.
+- No predefined per-category metric catalog. The model defines the two dynamic bands each run; examples in the prompt are illustrative.
+- Schema miss or id-set mismatch rejects the whole body. A single metric failing a contract rule is dropped and logged.
+- `band` never exceeds the category's assigned depth. `firecrawl` only for the `specific_attributes` band.
+- Fixed dimensions are a code constant looked up by `depth`; they are not model output and not stored on the state.
+- Results are written to a separate `state.category_metrics` list of `CategoryMetricSet`, keyed by `category_id`. Category objects are not modified.
+- Reuse `self._providers` and `_call_providers`. Typed provider error vs typed validation error, each with `stage`.
+- This component does not search, retrieve, call any external tool, assign depth, resolve flags, or tag priority.
+
+Sub-components
+
+1. Metric Contract and State Object
+2. Metric Definition Instruction
+3. Constrained Metric Call and Body Validation
+4. Contract Filter, Shortfall Report, State Write, and interpret Sequencing
+5. Dummy-Provider Path Checks
+
+Order: 1 → 2 → 3 → 4 → 5.
+
+Sub-component 3 consumes the schema from 1 and the instruction from 2. Sub-component 4 consumes the accepted body from 3 (or takes the no-eligible-category skip). Sub-component 5 runs the assembled path end to end. The provider chain already exists from Mechanism 1 and is reused.
+
+---
+
+### Sub-component 1: Metric Contract and State Object
+
+Goal of Component:
+Define every typed shape this component uses: the closed wire models for the LLM body, the strict JSON schema built from them, the stored dataclasses (`MetricSpec`, `ResolutionSource`, `CategoryMetricSet`), the new `category_metrics` field on `RequirementInterpretationState`, the fixed-dimension constant by depth, the schema name, and the typed errors.
+
+Problem It Aims to Solve:
+No wire shape exists, so the model body has nothing to be constrained or validated against. No stored shape exists, so a validated metric has nowhere to be written. Without a closed set for `value_type`, `null_policy`, `tool`, and `band`, the same metric can arrive under different spellings on different runs. Without the fixed-dimension constant, later stages and the instruction each hold their own copy of what "fixed" means.
+
+Finalized Approach:
+1. Split wire and store. Closed Pydantic models for the LLM body (`MetricEntry`, `CategoryMetricsEntry`, `MetricDefinitionResult`). Dataclasses for the stored types. The strict schema is derived from the Pydantic models with the existing `_apply_strict_object_rules`. Same split as `DepthAssignmentResult` / `ResolvedCategory` and `InferredCategoriesResult` / `InferredCategory`.
 
 Critical Decision Choices:
-Generic: whether baseline is purely category-type-specific, or has a small universal core (name, address, distance) layered under category-specific items.
-	Decision: Some datapoints will be universal core (name, website, address, distance, travel time by different modes of transportation) and rest of the baseline metrics & factual information that we need to fetch would be category-type-specific and additionally driven by user instructions
+* Locked at component level: the metrics live in a separate `state.category_metrics` list of `CategoryMetricSet(category_id, taxonomy_node, metrics)`. `ResolvedCategory` and `InferredCategory` are not changed. There is no facts list.
+* Locked: closed value sets are `value_type` (`number_with_unit`, `boolean`, `enum`, `date_time`), `null_policy` (`null`, `unknown`), `tool` (`google_maps`, `parallel_web_search`, `firecrawl`), and `band` (`operating_details`, `specific_attributes`).
+* `taxonomy_node` is not in the wire body. Code copies it by `category_id`. The model never emits it.
+* Which constraints the schema carries. Research result: Groq strict mode supports `type`, `properties`, `required`, `additionalProperties: false`, `enum`, `items`, `$ref`, and `anyOf`. It does not support `minLength`, `maxLength`, `minItems`, `maxItems`, or `if/then/else`. The OpenAI structured-outputs page fetched for this plan did not list its unsupported keywords. The schema therefore carries only required keys, closed objects, types, and closed enums. Empty-text, list-size, and cross-field rules are code checks in sub-component 4.
+* `unit` is `str | None`. Strict mode needs the null case as `anyOf`. Confirm that `_apply_strict_object_rules` keeps every property required and leaves the null branch intact.
+* `enum_values` is a list that is empty when unused. It is not nullable.
+* The fixed-dimension constant is one tuple per depth. It sits beside `DepthLevel` in the schema module. The instruction reads it, so the "do not propose these" list and the constant cannot drift.
+* The wire body carries no `depth`. Depth comes from state.
+* Typed errors follow the existing pattern in `src/exceptions/deep_search.py`: a base `MetricDefinitionError` with `stage`, then `MetricDefinitionProviderError` and `MetricDefinitionValidationError`.
+* Schema name constant: `METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"`.
 
-Context-specific: How tightly this baseline should couple to the Google Places New API's actual return fields — this responsibility can't retrieve anything to verify that coupling itself, so over-anchoring risks defining a baseline the next responsibility can't actually fill, and under-anchoring risks an "ideal" baseline that's unretrievable.
-	Decision: We have other tools that can be used to fetch additional and in depth and more specific information about amenities e.g. Diffbot (to extract and get information from website) and Parallel Web Search tool that allows to fetch information from web
+---
 
+### Sub-component 2: Metric Definition Instruction
 
+Goal of Component:
+Build the instruction text that makes one call define, for every submitted category, the dynamic metrics its assigned depth allows. The text holds the task statement, the depth scale and band rule, the metric contract as typed fields, the fixed-dimension list, the per-band tie rule, the decision test, the leftover-flag rule, the negative rules, the output rules, and the worked examples.
 
-Component 6B: Purpose-Fit Metric Definition per Category
-Goal of Component: For each category, beyond baseline, define the specific metrics/characteristics/facts — category-appropriate, not templated — that let someone judge whether an amenity actually serves the captured reason for wanting that category, scaled to its assigned depth.
+Problem It Aims to Solve:
+The schema fixes the shape of a metric but says nothing about which metrics to propose. Without written rules the model can restate a fixed dimension, propose a metric like "is it cozy?" that has no enumerable value, tie a `specific_attributes` metric to nothing the customer said, or emit a band above the assigned depth. Code cannot check most of these (concreteness, tie to the user, restating a fixed dimension), so the instruction is the only place they are enforced.
 
-Problem It Aims to Solve: Metrics that only describe existence (name, category, website, distance & some more category-specific) don't let the customer decide fit — he'd still have to investigate himself, which defeats the responsibility's purpose.
-
-Approach:
-Reason-to-metric mapping: feed the captured reason and assigned depth, universally core (for dedup), baseline fixed set of metrics/characteristics/facts (for dedup), context of the user instructions to the LLM and have it output the relevant metrics that describes characteristics of the amenities at the right level of depth directly, category-appropriate rather than from a template.
- 
-Instructions:
-Whichever approach is chosen, purpose-fit metric definition must run for every category in the finalized set — explicit and inferred alike, including ones with only baseline-level depth — so that even a shallow category carries at least a minimal relevant signal beyond bare existence facts.
+Finalized Approach:
+1. Rules plus worked pairs in a dedicated instruction module with a `build_metric_definition_instruction(json_schema)` function. Same pattern as `depth_assignment_instruction.py` and `inference_instruction.py`. Task statement, scale, contract, rules, and fixed worked pairs are module-level strings.
 
 Critical Decision Choices:
-Context-specific: how to keep purpose-fit metrics distinguishable from baseline metrics within the same category record — this matters specifically because Mechanism 6 needs both feeding into one record without conflating "always-there" facts with "reason-specific" facts, which is also what the overall feature's fact/assessment separation rule downstream will build on.
-	Decision: For every category we can keep them separate as baseline metrics & in-depth metrics in the same object.
+* Locked: no predefined metric list per category or taxonomy group appears in the instruction as a required set. Worked examples are illustrative. The metric contract and the depth-scale approach are what make outputs consistent.
+* Locked: the model defines only the `operating_details` and `specific_attributes` bands. It does not define fixed dimensions, re-assign depth, or call any tool.
+* Origin (`explicit` or `inferred`) and assigned `depth` are labeled per row in user content. The model does not infer either from the node name.
+* Tie rule per band. For `operating_details`, the category's own request (explicit) or `reasoning` (inferred) is a valid tie and the `question` states which. For `specific_attributes`, the `question` must point at the trigger that raised the depth.
+* Decision test in the text: a resolved value must be able to change how the customer weights or ranks the category.
+* Worked examples cover different taxonomy groups, show an `operating_details` metric and a `specific_attributes` metric, and include the `cozy` rejection with its `ambiance` reformulation. They are not reused as the live sample-runner seed.
+* Tool text states the band limits: `google_maps` and `parallel_web_search` for `operating_details`, `parallel_web_search` and `firecrawl` for `specific_attributes`. `firecrawl` fetches page content. `parallel_web_search` fetches web search results.
+* Leftover-flag rule: a metric that addresses a leftover phrase states the single reading chosen in its `question`.
+* Caps are stated as a rule (at most 4 per band per category). Code enforces them in sub-component 4.
+* The fixed-dimension list is rendered from the constant in sub-component 1.
 
+---
+
+### Sub-component 3: Constrained Metric Call and Body Validation
+
+Goal of Component:
+Assemble the user content, execute the single metric-definition call through the existing provider chain, and return either a body that matches the schema and whose `category_id` set equals the submitted set, or a typed failure. This covers Operations 1, 2, and 3.
+
+Problem It Aims to Solve:
+The response can omit a key, use a value outside a closed set, omit an id, invent an id, or repeat an id. Stamping or filtering such a body would write a metric set the model did not define for that category. A body that fails with no typed error gives the caller nothing to act on. Provider failure needs the same fallback behavior as the earlier mechanisms.
+
+Finalized Approach:
+1. Single-pass validation. Pass the schema at generation time. Validate the returned dict with `MetricDefinitionResult.model_validate`. Then compare the returned id list with the submitted id list. Either miss raises `MetricDefinitionValidationError`. Same order as `execute_depth_assignment`.
+
+Critical Decision Choices:
+* Locked: reuse `self._providers` and `_call_providers` with `stage="execute_metric_definition"`, `schema_name=METRIC_DEFINITION_SCHEMA_NAME`, and `provider_error_cls=MetricDefinitionProviderError`.
+* Locked: a schema miss or an id-set mismatch rejects the whole body. Code does not fill, drop, or reorder ids.
+* Locked: the contract rules K1 to K6 are not applied here. They run in sub-component 4.
+* Fallback to the next provider happens only on `LLMProviderError`, including `LLMResponseTruncatedError`. It does not happen for a returned invalid body.
+* Truncation risk is higher than in earlier mechanisms because the body can hold up to 8 metrics per category. The 4-per-band cap in the instruction is the only size control, since the provider adapters set no output token limit.
+* User content is a JSON dump with `payload.normalized_text`, `persona_facts`, one origin-labeled and depth-labeled row per eligible category, and a separate block of leftover `characteristic` and `persona` flags.
+* Only eligible categories (`depth` is `operating_details` or `specific_attributes`) are rendered and counted as submitted ids. `basic_profile` categories are not sent.
+* Reuse the existing id-coverage helper pattern (`_depth_id_coverage_miss`) if its signature is generic. Otherwise add a sibling helper with the same return shape.
+* Log events follow the M5 pattern: `metric_definition.validated` with verdict, and `metric_definition.rejected` with reason (`schema` or `category_id_coverage`).
+* An empty `metrics` list for a category is valid at this step.
+
+---
+
+### Sub-component 4: Contract Filter, Shortfall Report, State Write, and interpret Sequencing
+
+Goal of Component:
+From an accepted body, apply the contract rules K1 to K6 to each metric and drop the ones that fail (Operation 4). Report shortfalls (Operation 5). Write one `CategoryMetricSet` per category to `state.category_metrics` (Operation 6). When no category is eligible, skip Operations 1 to 5 and write `None` sets. Sequence `interpret()` so this component runs immediately after Mechanism 5.
+
+Problem It Aims to Solve:
+A body can pass the schema and still hold a metric that breaks a rule the schema does not check: a blank text field, a `number_with_unit` metric with no `unit`, a `band` above the category's depth, `firecrawl` on an `operating_details` metric, a repeated label, or a fifth metric in one band. Without a filter these reach retrieval. Without the write step no later stage can read the result. Without the skip branch a request with only `basic_profile` categories still calls the model. Without an `interpret()` call the component never runs.
+
+Finalized Approach:
+1. One filter function. `apply_metric_contract(state, body)` walks each category and each metric, applies K1 to K6 in fixed order, and returns the surviving metrics per `category_id` plus a list of rejection records. A separate `write_category_metrics` builds the `CategoryMetricSet` list from the survivors.
+
+Critical Decision Choices:
+* Locked: a metric that fails a rule is dropped and logged. Nothing is repaired, rewritten, or clamped. A rule failure never raises.
+* Locked: rules are K1 (text completeness), K2 (value-type parameters), K3 (band within depth), K4 (tool fits band), K5 (no duplicate label), K6 (cap of 4 per band). Order is K1 to K6. K5 and K6 count only metrics that passed the earlier rules.
+* K1 and K6 are code checks because the provider schema does not carry `minLength` or `maxItems` (see sub-component 1). K2 and K4 are code checks because strict mode does not carry conditional rules. K3 needs the category's `depth` from state, which the schema does not know. K5 compares metrics with each other.
+* K3 reads `depth` by `category_id` from the explicit and inferred lists.
+* Rejection log record: `event: metric_definition.metric_rejected`, `category_id`, `label`, `rule`. Rejected metrics are not stored on state.
+* Shortfall report: a `metric_definition.category_underspecified` event names each eligible category with zero surviving `operating_details`-band metrics, or with `depth = specific_attributes` and zero surviving `specific_attributes`-band metrics. It is not a failure.
+* `CategoryMetricSet.metrics` is a list for an eligible category (empty if none survived) and `None` for a `basic_profile` category.
+* `state.category_metrics` is assigned a fresh list, explicit entries first, then inferred, so a second run does not duplicate entries.
+* `taxonomy_node` on each set is copied from the matching `ResolvedCategory` or `InferredCategory` by `category_id`.
+* Skip branch: if both lists are empty, log `metric_definition.skipped` and leave `category_metrics` as `[]`. If every category is `basic_profile`, log the skip, write `None` sets, and build no instruction. Neither case fails.
+* `ResolvedCategory`, `InferredCategory`, `payload`, `persona_facts`, `extracted`, `user_responses`, and `ambiguity_flags` are not modified.
+* `interpret()` calls the new async workflow method (`run_per_category_metric_definition`) immediately after `run_per_category_depth_calibration`.
+
+---
+
+### Sub-component 5: Dummy-Provider Path Checks
+
+Goal of Component:
+Run a fixed set of metric-definition bodies through the assembled path (user content, call, body validation, contract filter, state write) with a dummy provider and no live API call, and report pass or fail per check.
+
+Problem It Aims to Solve:
+The schema, the id-set check, and rules K1 to K6 are only visible when a known body is pushed through sub-components 3 and 4. A live model call returns a different body on each run and cannot show that a specific bad metric is dropped while its neighbors are kept. The skip branch and the write shape (`None` versus empty list) are also only visible on a controlled input.
+
+Finalized Approach:
+1. Fake provider with recorded dict bodies. A `FakeStructuredProvider` (same shape as in `test_mechanism_5_depth.py`) returns fixture dicts. The real validate, filter, and write path runs against them. Assertions read `state.category_metrics`, log records, and raised errors.
+
+Critical Decision Choices:
+* Locked: no live provider call in these checks. A live sample runner is a separate later artifact.
+* Fixture set. No categories (no call, `category_metrics` stays `[]`). All `basic_profile` (no call, `None` sets). Schema miss: a missing field. Schema miss: a value outside a closed set. Missing id. Extra id. Duplicate id. Provider failure across the chain raises the provider error. Valid mixed batch: explicit `operating_details`, explicit `specific_attributes`, inferred `basic_profile`, inferred `operating_details`.
+* Per-rule fixtures, each showing the bad metric dropped and its neighbor kept: K1 blank text, K2 missing `unit`, K2 enum with one value, K3 `specific_attributes` band on an `operating_details` category, K4 `firecrawl` on an `operating_details` metric, K5 repeated label, K6 fifth metric in one band.
+* Shortfall fixture: an eligible category left with an empty band produces the `category_underspecified` log record and a `[]` list, with no error.
+* Write-shape assertions: `taxonomy_node` copied correctly for an explicit and an inferred category, `None` for `basic_profile`, `[]` for an eligible category with nothing surviving, explicit entries before inferred.
+* Unchanged-state assertions: `ResolvedCategory`, `InferredCategory`, `payload`, `persona_facts`, `extracted`, `user_responses`, `ambiguity_flags`, and `category_resolution_passes` are equal before and after.
+* User-content assertion: only eligible rows appear, each row carries origin and depth, and the leftover-flag block is present.
+* Rules that live only in the instruction (concrete `resolution_source`, tie to the user, restating a fixed dimension) are not asserted as code behavior. Fixtures that already obey them are used.
+* Tests are async and follow `test_mechanism_5_depth.py` (seeded post-Mechanism-5 state, `caplog` for log events). New file: `backend/tests/services/deep_search/test_mechanism_6_metrics.py`.
 
 
 Mechanism 7 — Specification Assembly & Priority Enforcement

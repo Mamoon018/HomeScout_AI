@@ -20,7 +20,7 @@ DEPTH SCALE
 Three levels exist. Higher levels include every band below them.
 
 basic_profile — Is it here, and can I reach it, at what cost?
-Contents: identity (name, category, address, place_id, coords) plus accessibility metrics:
+Contents: identity (name, category, address, website, place_id, coords) plus accessibility metrics:
 travel distance and duration per mode (walk / drive / transit / cycle) and reachability
 within a sensible threshold.
 Tools later stages may use: Google Maps Places (identity) and Distance Matrix
@@ -28,7 +28,7 @@ Tools later stages may use: Google Maps Places (identity) and Distance Matrix
 Contract-gated: no. These dimensions are fixed and known-resolvable.
 
 operating_details — Is it any good, and how does it run?
-Contents: basic_profile plus operational dimensions (hours, contact/website, rating,
+Contents: basic_profile plus operational dimensions (hours, contact phone, rating,
 review volume, price level) plus an LLM-defined, per-category quality set. The quality set
 is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric
 must pass the metric contract below.
@@ -40,7 +40,7 @@ dimensions are not contract-gated.
 specific_attributes — Does it fit my particular situation?
 Contents: user-specific metrics beyond the above — attributes the user emphasized, or that
 persona / inferred reasoning shows they would need.
-Tools later stages may use: parallel web search plus firecrawl/diffbot on targeted pages
+Tools later stages may use: parallel web search plus firecrawl on targeted pages
 (official site, schedule, menu, pricing).
 Contract-gated: yes. Every metric goes through the contract.
 
