@@ -9,9 +9,11 @@ For the better context, here is the file that provides the details about the fol
 4. Responsibilities of the feature
 5. problem context and problem statement of the responsibility 1
 6. Mechanisms of responsibility 1
-7. Implementation curx of the Mechanism 1 
+7. Implementation details in the form of sub-components of the Mechanism 6 
 
-Now, we will be implementing the mechanism 2 Component 2A of the Responsibility 1.  
+# Current Mechanism Implementation: 
+Now, we will be implementing the mechanism 6 of the Responsibility 1.  
+
 Note: We should not make classes for each mechanisms of the responsibility (Until it is necessary to have it otherwise feature would break):  
 
 Here is the more precise definition of how the overall structure of the feature can look like:
@@ -34,16 +36,14 @@ Stage Methods
 
 ### Here is how you should structure the implementation plan ###
 
-
 You need to follow the guidelines in Plan_output_format.md to compile your Implementation plan.
 
 
 **While producing the plan (Plan mode, before the user confirms):**
 - Output the implementation plan and architecture decisions in the plan
   document, following Plan_output_format.md.
-- Put the full Build checklist in the plan `todos`. That checklist MUST
-  include (a) writing the two canonical markdown files and (b) implementing
-  the mechanism in code (schemas, exceptions, prompt module, methods on
+- Put the full Build checklist in the plan `todos`. That checklist MUST no include "writing the two canonical markdown files". 
+  It MUST include only (a) implementing the mechanism in code (schemas, exceptions, prompt module, methods on
   the existing responsibility class, tests, **and a live sample runner**).
 - The sample runner is required, not optional. Plan it in Section 1 and
   Section 4 of Plan_output_format.md. It lives under
@@ -52,15 +52,11 @@ You need to follow the guidelines in Plan_output_format.md to compile your Imple
   already-implemented mechanisms. That seeded input must not reuse the
   mechanism's prompt worked-pair examples.
 - Do not execute any todo. Do not create or edit application code. Do not
-  write the markdown files to disk yet. Confirmation is clicking Build,
+  write the markdown files to disk yet. Confirmation is clicking accept,
   not this planning turn.
-**After the user confirms (Build):**
+**After the user confirms (accepts):**
 - Execute every todo on that checklist, in order.
-- First write the two files under
-  `backend/src/services/deep_search/feature_context/`:
-  - `mechanism_N_implementation_plan.md`
-  - `mechanism_N_architecture_decisions.md`
-- Then implement the mechanism in code as specified in that plan,
+- Implement the mechanism in code as specified in that plan,
   including the live sample runner. Do not stop after the markdown files.
 
 

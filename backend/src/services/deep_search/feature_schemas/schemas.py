@@ -36,6 +36,10 @@ NullPolicy = Literal["null", "unknown"]
 ResolutionTool = Literal["google_maps", "parallel_web_search", "firecrawl"]
 # The two dynamic depth bands the model defines metrics for; basic_profile is fixed.
 MetricBand = Literal["operating_details", "specific_attributes"]
+# The bands a pre-defined (code-owned, Google-Maps-resolved) metric belongs to. Includes
+# basic_profile, which dynamic metrics never use; excludes specific_attributes, which has no
+# fixed dimensions of its own.
+PredefinedBand = Literal["basic_profile", "operating_details"]
 
 # Upper bound on surviving metrics per band per category; code drops the extras.
 MAX_METRICS_PER_BAND = 4
@@ -610,6 +614,91 @@ class ResolutionSource:
 
 
 @dataclass
+class PredefinedMetric:
+    """One code-owned metric resolved from Google Maps for a fixed dimension.
+
+    Pre-defined metrics are not model output. Each names the depth band it belongs to and the
+    Google Maps target a later retrieval stage reads. `label` matches the corresponding entry
+    in FIXED_DIMENSIONS_BY_DEPTH for the same band.
+    """
+
+    label: str
+    band: PredefinedBand
+    resolution_source: ResolutionSource
+
+
+# Google Maps target for each fixed dimension, keyed by the dimension label. Most targets are
+# Places searchNearby field-mask tokens (see SEARCH_NEARBY_FIELD_MASK in
+# src/clients/google_places.py). Travel and reachability for walk/drive/cycle come from
+# `routingSummaries` in that same searchNearby response (one call per mode); transit travel is
+# fetched from a separate endpoint (Routes API / Distance Matrix). Tool stays "google_maps" for
+# all of these. The label is the exact string used in FIXED_DIMENSIONS_BY_DEPTH so the two lists
+# cannot drift.
+_BASIC_PROFILE_TARGETS: dict[str, str] = {
+    "name": "places.displayName",
+    "category": "places.primaryType",
+    "address": "places.formattedAddress",
+    "website": "places.websiteUri",
+    "place_id": "places.id",
+    "coordinates": "places.location",
+    "travel distance per mode (walk, drive, transit, cycle)": (
+        "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle "
+        "(one call per mode); Routes API / Distance Matrix for transit"
+    ),
+    "travel duration per mode (walk, drive, transit, cycle)": (
+        "routingSummaries.legs.duration via searchNearby for walk/drive/cycle "
+        "(one call per mode); Routes API / Distance Matrix for transit"
+    ),
+    "reachability within a threshold": (
+        "derived from travel duration (searchNearby routingSummaries for walk/drive/cycle, "
+        "Routes API / Distance Matrix for transit) against the reachability threshold"
+    ),
+}
+_OPERATING_DETAILS_TARGETS: dict[str, str] = {
+    "opening hours": "places.regularOpeningHours",
+    "contact phone": "places.internationalPhoneNumber",
+    "rating": "places.rating",
+    "review volume": "places.userRatingCount",
+    "price level": "places.priceLevel",
+}
+
+# Dimensions that operating_details adds on top of basic_profile, in order.
+_OPERATING_DETAILS_ONLY_DIMENSIONS: tuple[str, ...] = _OPERATING_DETAILS_DIMENSIONS[
+    len(_BASIC_PROFILE_DIMENSIONS) :
+]
+
+_BASIC_PROFILE_PREDEFINED: tuple[PredefinedMetric, ...] = tuple(
+    PredefinedMetric(
+        label=dimension,
+        band="basic_profile",
+        resolution_source=ResolutionSource(
+            tool="google_maps", target=_BASIC_PROFILE_TARGETS[dimension]
+        ),
+    )
+    for dimension in _BASIC_PROFILE_DIMENSIONS
+)
+_OPERATING_DETAILS_PREDEFINED: tuple[PredefinedMetric, ...] = _BASIC_PROFILE_PREDEFINED + tuple(
+    PredefinedMetric(
+        label=dimension,
+        band="operating_details",
+        resolution_source=ResolutionSource(
+            tool="google_maps", target=_OPERATING_DETAILS_TARGETS[dimension]
+        ),
+    )
+    for dimension in _OPERATING_DETAILS_ONLY_DIMENSIONS
+)
+
+# Pre-defined metrics later stages resolve from Google Maps for a depth, cumulative by band and
+# parallel to FIXED_DIMENSIONS_BY_DEPTH. basic_profile carries the basic set; operating_details
+# and specific_attributes both carry the basic set plus the operating set.
+PREDEFINED_METRICS_BY_DEPTH: dict[str, tuple[PredefinedMetric, ...]] = {
+    "basic_profile": _BASIC_PROFILE_PREDEFINED,
+    "operating_details": _OPERATING_DETAILS_PREDEFINED,
+    "specific_attributes": _OPERATING_DETAILS_PREDEFINED,
+}
+
+
+@dataclass
 class MetricSpec:
     """One stored metric that passed the contract rules."""
 
@@ -638,6 +727,24 @@ class CategoryMetricSet:
 
 
 @dataclass
+class CategoryMetricPlan:
+    """Compiled metric picture for one category, keyed by category_id.
+
+    Holds the pre-defined metrics (code-owned, resolved from Google Maps) and the LLM-defined
+    metrics (resolved from Parallel web search and Firecrawl) side by side but separate, so a
+    later retrieval stage fetches each subset through its own tools. `specific_metrics` is the
+    surviving set from the matching CategoryMetricSet, and is an empty list for a basic_profile
+    category. `depth` is carried so retrieval does not look the category back up.
+    """
+
+    category_id: int
+    taxonomy_node: str
+    depth: DepthLevel
+    predefined_metrics: list[PredefinedMetric]
+    specific_metrics: list[MetricSpec]
+
+
+@dataclass
 class ResolvedRequirements:
     """Component 2A's output object; Operation 2 appends resolved categories in place."""
 
@@ -658,3 +765,4 @@ class RequirementInterpretationState:
     category_resolution_passes: int = 0
     inferred_categories: list[InferredCategory] = field(default_factory=list)
     category_metrics: list[CategoryMetricSet] = field(default_factory=list)
+    category_metric_plans: list[CategoryMetricPlan] = field(default_factory=list)

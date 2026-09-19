@@ -291,6 +291,20 @@ async def run_sample_metric_definition() -> RequirementInterpretationState:
             f"{ {item.category_id: (None if item.metrics is None else len(item.metrics)) for item in state.category_metrics} }"
         )
 
+        interpretation.compile_category_metric_plans(state)
+        _section("STAGE - COMPILED METRIC PLANS")
+        print(
+            json.dumps(
+                [asdict(plan) for plan in state.category_metric_plans],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        print(
+            "\npre-defined / specific per plan: "
+            f"{ {plan.category_id: (len(plan.predefined_metrics), len(plan.specific_metrics)) for plan in state.category_metric_plans} }"
+        )
+
         _section("STAGE - UNCHANGED FIELDS")
         after = _unchanged_fields_snapshot(state)
         print(json.dumps(after, indent=2, ensure_ascii=False))

@@ -72,8 +72,10 @@ from src.services.deep_search.feature_schemas.schemas import (
     INFERRED_CATEGORIES_SCHEMA_NAME,
     MAX_METRICS_PER_BAND,
     METRIC_DEFINITION_SCHEMA_NAME,
+    PREDEFINED_METRICS_BY_DEPTH,
     TAXONOMY_MAPPING_SCHEMA_NAME,
     AmbiguityFlag,
+    CategoryMetricPlan,
     CategoryMetricSet,
     CategoryResolutionRoute,
     ClarificationResult,
@@ -1332,7 +1334,11 @@ class UserRequirementsInterpretation:
         self,
         state: RequirementInterpretationState,
     ) -> RequirementInterpretationState:
-        """Mechanism 6 workflow: skip when nothing is eligible, else instruction, call, filter, write."""
+        """Mechanism 6 workflow: define LLM metrics per category, then compile the metric plans.
+
+        Every branch falls through to compile_category_metric_plans so the pre-defined metrics
+        are attached even when no LLM call runs (all-basic_profile or no categories).
+        """
         assert state.resolved is not None  # Mechanism 2 always sets this before M6 runs.
 
         categories = _ordered_categories(state)
@@ -1351,9 +1357,7 @@ class UserRequirementsInterpretation:
                 )
             )
             state.category_metrics = []
-            return state
-
-        if not any(_is_metric_eligible(category) for category in categories):
+        elif not any(_is_metric_eligible(category) for category in categories):
             logger.info(
                 json.dumps(
                     {
@@ -1364,15 +1368,16 @@ class UserRequirementsInterpretation:
                 )
             )
             self.write_category_metrics(state, {})
-            return state
+        else:
+            instruction = self.build_metric_definition_instruction(
+                metric_definition_json_schema()
+            )
+            body = await self.execute_metric_definition(state, instruction)
+            survivors, _ = self.apply_metric_contract(state, body)
+            self.report_metric_shortfalls(state, survivors)
+            self.write_category_metrics(state, survivors)
 
-        instruction = self.build_metric_definition_instruction(
-            metric_definition_json_schema()
-        )
-        body = await self.execute_metric_definition(state, instruction)
-        survivors, _ = self.apply_metric_contract(state, body)
-        self.report_metric_shortfalls(state, survivors)
-        self.write_category_metrics(state, survivors)
+        self.compile_category_metric_plans(state)
         return state
 
     def build_metric_definition_instruction(self, json_schema: dict) -> str:
@@ -1607,6 +1612,59 @@ class UserRequirementsInterpretation:
                 }
             )
         )
+
+    def compile_category_metric_plans(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Compile one CategoryMetricPlan per category: pre-defined metrics plus LLM ones.
+
+        Reads each category's stamped depth to pull the cumulative pre-defined set from
+        PREDEFINED_METRICS_BY_DEPTH, and the surviving LLM metrics from state.category_metrics
+        (empty for a basic_profile category, whose metrics are None). Leaves
+        state.category_metrics unchanged.
+        """
+        metrics_by_id = {
+            metric_set.category_id: metric_set for metric_set in state.category_metrics
+        }
+        plans: list[CategoryMetricPlan] = []
+        for category in _ordered_categories(state):
+            assert category.depth is not None
+            metric_set = metrics_by_id.get(category.category_id)
+            specific_metrics = (
+                metric_set.metrics
+                if metric_set is not None and metric_set.metrics is not None
+                else []
+            )
+            plans.append(
+                CategoryMetricPlan(
+                    category_id=category.category_id,
+                    taxonomy_node=category.taxonomy_node,
+                    depth=category.depth,
+                    predefined_metrics=list(PREDEFINED_METRICS_BY_DEPTH[category.depth]),
+                    specific_metrics=list(specific_metrics),
+                )
+            )
+        state.category_metric_plans = plans
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "metric_compilation.written",
+                    "timestamp": _timestamp(),
+                    "plan_count": len(plans),
+                    "plans": [
+                        {
+                            "category_id": plan.category_id,
+                            "predefined_count": len(plan.predefined_metrics),
+                            "specific_count": len(plan.specific_metrics),
+                        }
+                        for plan in plans
+                    ],
+                }
+            )
+        )
+        return state
 
     async def aclose(self) -> None:
         """Close each provider's HTTP session after a run."""

@@ -24,7 +24,9 @@ from src.services.deep_search.feature_schemas.schemas import (
     FIXED_DIMENSIONS_BY_DEPTH,
     MAX_METRICS_PER_BAND,
     METRIC_DEFINITION_SCHEMA_NAME,
+    PREDEFINED_METRICS_BY_DEPTH,
     AmbiguityFlag,
+    CategoryMetricPlan,
     ExtractedCategory,
     ExtractedRequirements,
     InferredCategory,
@@ -595,3 +597,106 @@ def test_instruction_lists_fixed_dimensions_cap_and_tools() -> None:
     assert f"At most {MAX_METRICS_PER_BAND} metrics per band" in instruction
     assert "firecrawl" in instruction and "parallel_web_search" in instruction
     assert "diffbot" not in instruction.lower()
+
+
+# Sub-component 6 / 7: pre-defined catalog and per-category metric compilation.
+
+
+def _plan_map(state: RequirementInterpretationState) -> dict[int, CategoryMetricPlan]:
+    return {plan.category_id: plan for plan in state.category_metric_plans}
+
+
+def test_predefined_metrics_match_fixed_dimensions_and_resolve_from_google_maps() -> None:
+    for depth in ("basic_profile", "operating_details", "specific_attributes"):
+        catalog = PREDEFINED_METRICS_BY_DEPTH[depth]
+        assert tuple(metric.label for metric in catalog) == FIXED_DIMENSIONS_BY_DEPTH[depth]
+        assert all(metric.resolution_source.tool == "google_maps" for metric in catalog)
+    # specific_attributes adds no fixed dimensions beyond operating_details.
+    assert PREDEFINED_METRICS_BY_DEPTH["specific_attributes"] == PREDEFINED_METRICS_BY_DEPTH[
+        "operating_details"
+    ]
+    # basic_profile metrics carry the basic_profile band; the operating additions do not.
+    operating = PREDEFINED_METRICS_BY_DEPTH["operating_details"]
+    assert {metric.band for metric in operating} == {"basic_profile", "operating_details"}
+
+
+async def test_compilation_writes_one_plan_per_category_split_by_source() -> None:
+    provider = FakeStructuredProvider(
+        bodies=[
+            _body(
+                _entry(0, _metric(), _specific_metric()),
+                _entry(1, _metric()),
+                _entry(2, _metric()),
+            )
+        ]
+    )
+    state = _state_after_mechanism_5(inferred_categories=[_inferred("operating_details")])
+
+    await _interpretation(provider).run_per_category_metric_definition(state)
+
+    plans = _plan_map(state)
+    assert [plan.category_id for plan in state.category_metric_plans] == [0, 1, 2]
+    # Depth is carried onto each plan.
+    assert plans[0].depth == "specific_attributes"
+    assert plans[1].depth == "operating_details"
+    # Pre-defined metrics are the cumulative set for the category's depth, from Google Maps.
+    assert len(plans[0].predefined_metrics) == len(PREDEFINED_METRICS_BY_DEPTH["specific_attributes"])
+    assert all(m.resolution_source.tool == "google_maps" for m in plans[0].predefined_metrics)
+    # LLM metrics are carried over from category_metrics as specific_metrics.
+    assert plans[0].specific_metrics == _metric_map(state)[0]
+    assert [m.label for m in plans[0].specific_metrics] == _labels(state, 0)
+
+
+async def test_compilation_gives_basic_profile_predefined_only_and_empty_specific() -> None:
+    provider = FakeStructuredProvider(bodies=[])
+    explicit = _resolved_categories()
+    for category in explicit:
+        category.depth = "basic_profile"  # only for this seed; M5 rejects it in the real path
+    state = _state_after_mechanism_5(
+        resolved_explicit_categories=explicit, inferred_categories=[_inferred()]
+    )
+
+    await _interpretation(provider).run_per_category_metric_definition(state)
+
+    assert provider.calls == []
+    plans = _plan_map(state)
+    assert [plan.category_id for plan in state.category_metric_plans] == [0, 1, 2]
+    for plan in state.category_metric_plans:
+        assert plan.depth == "basic_profile"
+        assert len(plan.predefined_metrics) == len(PREDEFINED_METRICS_BY_DEPTH["basic_profile"])
+        assert plan.specific_metrics == []
+
+
+async def test_no_categories_leaves_metric_plans_empty() -> None:
+    provider = FakeStructuredProvider(bodies=[])
+    state = _state_after_mechanism_5(resolved_explicit_categories=[], inferred_categories=[])
+
+    await _interpretation(provider).run_per_category_metric_definition(state)
+
+    assert state.category_metric_plans == []
+
+
+async def test_compilation_leaves_category_metrics_untouched() -> None:
+    provider = FakeStructuredProvider(
+        bodies=[_body(_entry(0, _metric(), _specific_metric()), _entry(1, _metric()), _entry(2, _metric()))]
+    )
+    state = _state_after_mechanism_5(inferred_categories=[_inferred("operating_details")])
+
+    await _interpretation(provider).run_per_category_metric_definition(state)
+
+    # The raw LLM output stays separate: same ids, same objects as the plans' specific_metrics.
+    assert [item.category_id for item in state.category_metrics] == [0, 1, 2]
+    for plan in state.category_metric_plans:
+        assert plan.specific_metrics == _metric_map(state)[plan.category_id]
+
+
+async def test_compilation_is_logged_with_plan_count(caplog: pytest.LogCaptureFixture) -> None:
+    provider = FakeStructuredProvider(
+        bodies=[_body(_entry(0, _metric(), _specific_metric()), _entry(1, _metric()))]
+    )
+    state = _state_after_mechanism_5(inferred_categories=[])
+
+    with caplog.at_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME):
+        await _interpretation(provider).run_per_category_metric_definition(state)
+
+    assert "metric_compilation.written" in caplog.text
