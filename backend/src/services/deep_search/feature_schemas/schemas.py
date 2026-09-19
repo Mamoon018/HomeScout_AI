@@ -26,6 +26,47 @@ DEPTH_ASSIGNMENT_SCHEMA_NAME = "depth_assignment_schema"
 # Three-level information band stamped onto each remaining category by Mechanism 5.
 DepthLevel = Literal["basic_profile", "operating_details", "specific_attributes"]
 
+# Mechanism 6's constrained metric-definition call echoes this schema name back with the body.
+METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"
+
+# Value sets a metric may carry. `number_with_unit`, `enum`, and `date_time` map to the
+# contract's number+unit, enum[fixed set], and date/time value types.
+MetricValueType = Literal["number_with_unit", "boolean", "enum", "date_time"]
+NullPolicy = Literal["null", "unknown"]
+ResolutionTool = Literal["google_maps", "parallel_web_search", "firecrawl"]
+# The two dynamic depth bands the model defines metrics for; basic_profile is fixed.
+MetricBand = Literal["operating_details", "specific_attributes"]
+
+# Upper bound on surviving metrics per band per category; code drops the extras.
+MAX_METRICS_PER_BAND = 4
+
+_BASIC_PROFILE_DIMENSIONS: tuple[str, ...] = (
+    "name",
+    "category",
+    "address",
+    "website",
+    "place_id",
+    "coordinates",
+    "travel distance per mode (walk, drive, transit, cycle)",
+    "travel duration per mode (walk, drive, transit, cycle)",
+    "reachability within a threshold",
+)
+_OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
+    "opening hours",
+    "contact phone",
+    "rating",
+    "review volume",
+    "price level",
+)
+
+# Fixed dimensions later stages fetch for a depth, cumulative by band. Not model output and
+# not stored on the state; the metric instruction lists them as "do not propose these".
+FIXED_DIMENSIONS_BY_DEPTH: dict[str, tuple[str, ...]] = {
+    "basic_profile": _BASIC_PROFILE_DIMENSIONS,
+    "operating_details": _OPERATING_DETAILS_DIMENSIONS,
+    "specific_attributes": _OPERATING_DETAILS_DIMENSIONS,
+}
+
 # Router destination after each inspect of a fresh 2A output.
 CategoryResolutionRoute = Literal["component_2b", "mechanism_3"]
 
@@ -377,6 +418,97 @@ class DepthAssignmentResult(BaseModel):
     )
 
 
+class ResolutionSourceEntry(BaseModel):
+    """Wire shape of where a later stage resolves one metric."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: ResolutionTool = Field(
+        description=(
+            "The tool a later stage uses: 'google_maps' for a Maps field, "
+            "'parallel_web_search' for a web search, 'firecrawl' for a fetched page."
+        )
+    )
+    target: str = Field(
+        description=(
+            "The concrete target: the Maps field, the shape of the search query, or the "
+            "page type to fetch. Must name something specific."
+        )
+    )
+
+
+class MetricEntry(BaseModel):
+    """One wire metric proposed for a category by the Mechanism 6 call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Human-readable metric name.")
+    question: str = Field(
+        description=(
+            "The exact decision question this metric answers for this customer, tied to "
+            "their request, a persona fact, or the category's own request or inference."
+        )
+    )
+    value_type: MetricValueType = Field(
+        description=(
+            "'number_with_unit', 'boolean', 'enum', or 'date_time'. Free-form prose is "
+            "not a value type."
+        )
+    )
+    unit: str | None = Field(
+        description="The unit when value_type is 'number_with_unit'. Null otherwise."
+    )
+    enum_values: list[str] = Field(
+        description=(
+            "At least two distinct members when value_type is 'enum'. Empty list otherwise."
+        )
+    )
+    # No description here: strict provider schemas reject any keyword beside a $ref, and
+    # this field is a bare reference to ResolutionSourceEntry. The model's own docstring
+    # and field descriptions carry the meaning.
+    resolution_source: ResolutionSourceEntry
+    verification: str = Field(description="What evidence confirms the resolved value.")
+    null_policy: NullPolicy = Field(
+        description=(
+            "What to emit if the value cannot be resolved: 'null' or 'unknown'. Never a guess."
+        )
+    )
+    band: MetricBand = Field(
+        description=(
+            "The band this metric belongs to: 'operating_details' or 'specific_attributes'. "
+            "Never above the category's assigned depth."
+        )
+    )
+
+
+class CategoryMetricsEntry(BaseModel):
+    """Wire metrics proposed for one submitted category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category_id: int = Field(
+        description=(
+            "The category_id of the submitted category, echoed from the input. Do not "
+            "invent an id."
+        )
+    )
+    metrics: list[MetricEntry] = Field(
+        description="The metrics for this category. Empty list when none pass the contract."
+    )
+
+
+class MetricDefinitionResult(BaseModel):
+    """Mechanism 6 wire body: one metrics entry per submitted category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    categories: list[CategoryMetricsEntry] = Field(
+        description=(
+            "One entry for every submitted category. Do not invent, drop, or duplicate ids."
+        )
+    )
+
+
 def taxonomy_mapping_json_schema() -> dict:
     """Strict Operation 1 schema derived from the wire model, with the taxonomy enum."""
     schema = TaxonomyMappingResult.model_json_schema()
@@ -411,6 +543,17 @@ def inferred_categories_json_schema() -> dict:
 def depth_assignment_json_schema() -> dict:
     """Strict depth-assignment schema derived from the wire model. No taxonomy enum."""
     schema = DepthAssignmentResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    return schema
+
+
+def metric_definition_json_schema() -> dict:
+    """Strict metric-definition schema derived from the wire model. No taxonomy enum.
+
+    Carries closed objects, required keys, types, and closed enums only. Length, count, and
+    conditional rules are checked in code because strict provider mode does not support them.
+    """
+    schema = MetricDefinitionResult.model_json_schema()
     _apply_strict_object_rules(schema)
     return schema
 
@@ -459,6 +602,42 @@ class InferredCategory:
 
 
 @dataclass
+class ResolutionSource:
+    """Stored tool and target of one metric."""
+
+    tool: ResolutionTool
+    target: str
+
+
+@dataclass
+class MetricSpec:
+    """One stored metric that passed the contract rules."""
+
+    label: str
+    question: str
+    value_type: MetricValueType
+    unit: str | None
+    enum_values: list[str]
+    resolution_source: ResolutionSource
+    verification: str
+    null_policy: NullPolicy
+    band: MetricBand
+
+
+@dataclass
+class CategoryMetricSet:
+    """Metrics for one category, written by Mechanism 6 and keyed by category_id.
+
+    `metrics` is None for a basic_profile category (no dynamic metrics are defined at that
+    depth) and a list, possibly empty, for an eligible category.
+    """
+
+    category_id: int
+    taxonomy_node: str
+    metrics: list[MetricSpec] | None
+
+
+@dataclass
 class ResolvedRequirements:
     """Component 2A's output object; Operation 2 appends resolved categories in place."""
 
@@ -478,3 +657,4 @@ class RequirementInterpretationState:
     resolved: ResolvedRequirements | None = None
     category_resolution_passes: int = 0
     inferred_categories: list[InferredCategory] = field(default_factory=list)
+    category_metrics: list[CategoryMetricSet] = field(default_factory=list)

@@ -25,6 +25,8 @@ from src.exceptions.deep_search import (
     InferenceProviderError,
     InferenceValidationError,
     InputTooShortError,
+    MetricDefinitionProviderError,
+    MetricDefinitionValidationError,
     UnsupportedLanguageError,
 )
 from src.exceptions.llm import LLMProviderError
@@ -54,6 +56,10 @@ from src.services.deep_search.feature_prompts.inference_instruction import (
     build_inference_few_shot_examples,
     build_inference_instruction as build_inference_text,
 )
+from src.services.deep_search.feature_prompts.metric_definition_instruction import (
+    build_metric_definition_few_shot_examples,
+    build_metric_definition_instruction as build_metric_definition_text,
+)
 from src.services.deep_search.feature_schemas.amenity_taxonomy import (
     AMENITY_TAXONOMY_NODES,
     TAXONOMY_NODE_SET,
@@ -64,19 +70,27 @@ from src.services.deep_search.feature_schemas.schemas import (
     EXTRACTION_SCHEMA_NAME,
     FLAG_RESOLUTION_SCHEMA_NAME,
     INFERRED_CATEGORIES_SCHEMA_NAME,
+    MAX_METRICS_PER_BAND,
+    METRIC_DEFINITION_SCHEMA_NAME,
     TAXONOMY_MAPPING_SCHEMA_NAME,
     AmbiguityFlag,
+    CategoryMetricSet,
     CategoryResolutionRoute,
     ClarificationResult,
     DepthAssignmentResult,
+    DepthLevel,
     ExtractedCategory,
     ExtractedRequirements,
     FlagResolutionResult,
     InferredCategoriesResult,
     InferredCategory,
     InferredCategoryEntry,
+    MetricDefinitionResult,
+    MetricEntry,
+    MetricSpec,
     PayloadRecord,
     RequirementInterpretationState,
+    ResolutionSource,
     ResolvedCategory,
     ResolvedRequirements,
     TaxonomyMappingResult,
@@ -86,6 +100,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     extraction_json_schema,
     flag_resolution_json_schema,
     inferred_categories_json_schema,
+    metric_definition_json_schema,
     taxonomy_mapping_json_schema,
 )
 
@@ -99,10 +114,11 @@ ENGLISH_LANGUAGE_CODE = "en"
 PROVIDER_ATTEMPT_EVENT = "extraction.provider_attempt"
 RAW_BODY_EVENT = "extraction.raw_body"
 
-# Component 2A reuses the same read-back technique: the raw mapping/resolution body is a
-# local value inside the execute stages, so the runner reads these records to print it.
-CATEGORY_RESOLUTION_ATTEMPT_EVENT = "category_resolution.provider_attempt"
-CATEGORY_RESOLUTION_RAW_BODY_EVENT = "category_resolution.raw_body"
+# `_call_providers` is shared by every mechanism's constrained call, so its attempt and raw
+# body records carry no mechanism name; the `stage` field says which call they belong to.
+# The runners read these records back to print the attempt trail and the raw body.
+LLM_PROVIDER_ATTEMPT_EVENT = "llm_provider.attempt"
+LLM_PROVIDER_RAW_BODY_EVENT = "llm_provider.raw_body"
 
 _INPUT_TOO_SHORT_MESSAGE = (
     f"Instructions must be of more than {MIN_INPUT_WORD_COUNT} words"
@@ -141,7 +157,8 @@ class UserRequirementsInterpretation:
         state = await self.parse_unstructured_input(raw_input)
         state = await self.run_explicit_category_resolution(state)
         state = await self.run_persona_driven_category_inference(state)
-        return await self.run_per_category_depth_calibration(state)
+        state = await self.run_per_category_depth_calibration(state)
+        return await self.run_per_category_metric_definition(state)
 
     async def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
@@ -1311,6 +1328,286 @@ class UserRequirementsInterpretation:
             )
         )
 
+    async def run_per_category_metric_definition(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Mechanism 6 workflow: skip when nothing is eligible, else instruction, call, filter, write."""
+        assert state.resolved is not None  # Mechanism 2 always sets this before M6 runs.
+
+        categories = _ordered_categories(state)
+        assert all(
+            category.depth is not None for category in categories
+        )  # Mechanism 5 stamps depth on every category before M6 runs.
+
+        if not categories:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "metric_definition.skipped",
+                        "timestamp": _timestamp(),
+                        "reason": "no_categories",
+                    }
+                )
+            )
+            state.category_metrics = []
+            return state
+
+        if not any(_is_metric_eligible(category) for category in categories):
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "metric_definition.skipped",
+                        "timestamp": _timestamp(),
+                        "reason": "no_eligible_categories",
+                    }
+                )
+            )
+            self.write_category_metrics(state, {})
+            return state
+
+        instruction = self.build_metric_definition_instruction(
+            metric_definition_json_schema()
+        )
+        body = await self.execute_metric_definition(state, instruction)
+        survivors, _ = self.apply_metric_contract(state, body)
+        self.report_metric_shortfalls(state, survivors)
+        self.write_category_metrics(state, survivors)
+        return state
+
+    def build_metric_definition_instruction(self, json_schema: dict) -> str:
+        """Assemble bands, contract, fixed dimensions, tie rules, closed schema, worked pairs."""
+        instruction = build_metric_definition_text(json_schema)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "metric_definition.instruction.built",
+                    "timestamp": _timestamp(),
+                    "instruction_length": len(instruction),
+                    "few_shot_count": len(build_metric_definition_few_shot_examples()),
+                }
+            )
+        )
+        logger.debug(
+            json.dumps(
+                {"event": "metric_definition.instruction.text", "instruction": instruction}
+            )
+        )
+        return instruction
+
+    async def execute_metric_definition(
+        self,
+        state: RequirementInterpretationState,
+        instruction: str,
+    ) -> MetricDefinitionResult:
+        """One constrained call, then schema and id-set validation of the body."""
+        json_schema = metric_definition_json_schema()
+        user_content = _render_metric_definition_user_content(state)
+        body, answered_by = await self._call_providers(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=METRIC_DEFINITION_SCHEMA_NAME,
+            stage="execute_metric_definition",
+            provider_error_cls=MetricDefinitionProviderError,
+        )
+
+        try:
+            result = MetricDefinitionResult.model_validate(body)
+        except ValidationError as exc:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "metric_definition.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_metric_definition",
+                        "provider": answered_by,
+                        "reason": "schema",
+                        "error_count": exc.error_count(),
+                    }
+                )
+            )
+            raise MetricDefinitionValidationError(
+                f"The body returned by {answered_by} does not match the "
+                "metric-definition contract",
+                stage="execute_metric_definition",
+            ) from exc
+
+        submitted_ids = [
+            category.category_id
+            for category in _ordered_categories(state)
+            if _is_metric_eligible(category)
+        ]
+        returned_ids = [entry.category_id for entry in result.categories]
+        coverage_miss = _depth_id_coverage_miss(returned_ids, submitted_ids)
+        if coverage_miss is not None:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "metric_definition.rejected",
+                        "timestamp": _timestamp(),
+                        "stage": "execute_metric_definition",
+                        "provider": answered_by,
+                        "reason": "category_id_coverage",
+                        **coverage_miss,
+                    }
+                )
+            )
+            raise MetricDefinitionValidationError(
+                f"The body returned by {answered_by} did not cover the submitted "
+                f"category ids: {coverage_miss}",
+                stage="execute_metric_definition",
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "metric_definition.validated",
+                    "timestamp": _timestamp(),
+                    "provider": answered_by,
+                    "verdict": "accepted",
+                    "category_count": len(result.categories),
+                    "metric_count": sum(len(entry.metrics) for entry in result.categories),
+                }
+            )
+        )
+        return result
+
+    def apply_metric_contract(
+        self,
+        state: RequirementInterpretationState,
+        body: MetricDefinitionResult,
+    ) -> tuple[dict[int, list[MetricSpec]], list[dict]]:
+        """Drop each metric that fails K1 to K6; return survivors by id and the rejections."""
+        depth_by_id = {
+            category.category_id: category.depth for category in _ordered_categories(state)
+        }
+        survivors: dict[int, list[MetricSpec]] = {}
+        rejections: list[dict] = []
+
+        for entry in body.categories:
+            depth = depth_by_id[entry.category_id]
+            assert depth is not None
+            kept: list[MetricSpec] = []
+            kept_labels: set[str] = set()
+            band_counts = {"operating_details": 0, "specific_attributes": 0}
+
+            for metric in entry.metrics:
+                label_key = metric.label.strip().casefold()
+                rule = _metric_rule_failure(metric, depth)
+                if rule is None and label_key in kept_labels:
+                    rule = "duplicate_label"
+                if rule is None and band_counts[metric.band] >= MAX_METRICS_PER_BAND:
+                    rule = "band_cap"
+
+                if rule is not None:
+                    record = {
+                        "category_id": entry.category_id,
+                        "label": metric.label,
+                        "rule": rule,
+                    }
+                    rejections.append(record)
+                    logger.info(
+                        json.dumps(
+                            {
+                                "event": "metric_definition.metric_rejected",
+                                "timestamp": _timestamp(),
+                                **record,
+                            }
+                        )
+                    )
+                    continue
+
+                kept_labels.add(label_key)
+                band_counts[metric.band] += 1
+                kept.append(_to_metric_spec(metric))
+
+            survivors[entry.category_id] = kept
+
+        return survivors, rejections
+
+    def report_metric_shortfalls(
+        self,
+        state: RequirementInterpretationState,
+        survivors: dict[int, list[MetricSpec]],
+    ) -> list[dict]:
+        """Log each eligible category left without a required band; not a failure."""
+        shortfalls: list[dict] = []
+        for category in _ordered_categories(state):
+            if not _is_metric_eligible(category):
+                continue
+            kept = survivors.get(category.category_id, [])
+            required_bands = (
+                ["operating_details"]
+                if category.depth == "operating_details"
+                else ["operating_details", "specific_attributes"]
+            )
+            empty_bands = [
+                band
+                for band in required_bands
+                if not any(metric.band == band for metric in kept)
+            ]
+            if not empty_bands:
+                continue
+            record = {
+                "category_id": category.category_id,
+                "taxonomy_node": category.taxonomy_node,
+                "depth": category.depth,
+                "empty_bands": empty_bands,
+            }
+            shortfalls.append(record)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "metric_definition.category_underspecified",
+                        "timestamp": _timestamp(),
+                        **record,
+                    }
+                )
+            )
+        return shortfalls
+
+    def write_category_metrics(
+        self,
+        state: RequirementInterpretationState,
+        survivors: dict[int, list[MetricSpec]],
+    ) -> None:
+        """Write one CategoryMetricSet per category: survivors if eligible, else None."""
+        sets = [
+            CategoryMetricSet(
+                category_id=category.category_id,
+                taxonomy_node=category.taxonomy_node,
+                metrics=(
+                    survivors.get(category.category_id, [])
+                    if _is_metric_eligible(category)
+                    else None
+                ),
+            )
+            for category in _ordered_categories(state)
+        ]
+        state.category_metrics = sets
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "metric_definition.written",
+                    "timestamp": _timestamp(),
+                    "set_count": len(sets),
+                    "sets": [
+                        {
+                            "category_id": metric_set.category_id,
+                            "metric_count": (
+                                None
+                                if metric_set.metrics is None
+                                else len(metric_set.metrics)
+                            ),
+                        }
+                        for metric_set in sets
+                    ],
+                }
+            )
+        )
+
     async def aclose(self) -> None:
         """Close each provider's HTTP session after a run."""
         for provider in self._providers:
@@ -1339,16 +1636,21 @@ class UserRequirementsInterpretation:
                     schema_name=schema_name,
                 )
             except LLMProviderError as exc:
+                # The adapter wraps the SDK error; the SDK's own message (for example an
+                # HTTP 400 naming a rejected schema path) is only on __cause__.
+                detail = str(exc)
+                if exc.__cause__ is not None:
+                    detail = f"{detail} | cause: {type(exc.__cause__).__name__}: {exc.__cause__}"
                 logger.info(
                     json.dumps(
                         {
-                            "event": CATEGORY_RESOLUTION_ATTEMPT_EVENT,
+                            "event": LLM_PROVIDER_ATTEMPT_EVENT,
                             "timestamp": _timestamp(),
                             "stage": stage,
                             "provider": provider.name,
                             "model": provider.model,
                             "outcome": "failed",
-                            "detail": str(exc),
+                            "detail": detail,
                         }
                     )
                 )
@@ -1358,7 +1660,7 @@ class UserRequirementsInterpretation:
             logger.info(
                 json.dumps(
                     {
-                        "event": CATEGORY_RESOLUTION_ATTEMPT_EVENT,
+                        "event": LLM_PROVIDER_ATTEMPT_EVENT,
                         "timestamp": _timestamp(),
                         "stage": stage,
                         "provider": provider.name,
@@ -1373,7 +1675,7 @@ class UserRequirementsInterpretation:
             logger.info(
                 json.dumps(
                     {
-                        "event": "category_resolution.rejected",
+                        "event": "llm_provider.rejected",
                         "timestamp": _timestamp(),
                         "stage": stage,
                         "reason": "no_provider_answered",
@@ -1388,7 +1690,7 @@ class UserRequirementsInterpretation:
         logger.debug(
             json.dumps(
                 {
-                    "event": CATEGORY_RESOLUTION_RAW_BODY_EVENT,
+                    "event": LLM_PROVIDER_RAW_BODY_EVENT,
                     "stage": stage,
                     "provider": answered_by,
                     "body": body,
@@ -1658,6 +1960,114 @@ def _depth_id_coverage_miss(
     if unique_duplicates or unknown or missing:
         return {"duplicates": unique_duplicates, "unknown": unknown, "missing": missing}
     return None
+
+
+def _ordered_categories(
+    state: RequirementInterpretationState,
+) -> list[ResolvedCategory | InferredCategory]:
+    """Explicit entries then inferred entries, in list order."""
+    resolved = state.resolved
+    assert resolved is not None
+    return [*resolved.resolved_explicit_categories, *state.inferred_categories]
+
+
+def _is_metric_eligible(category: ResolvedCategory | InferredCategory) -> bool:
+    """True when the assigned depth authorizes dynamic metrics."""
+    return category.depth in ("operating_details", "specific_attributes")
+
+
+def _render_metric_definition_user_content(state: RequirementInterpretationState) -> str:
+    """Payload, persona facts, eligible origin-and-depth-labeled rows, and leftover flags."""
+    resolved = state.resolved
+    assert resolved is not None
+    categories: list[dict] = []
+    for category in _ordered_categories(state):
+        if not _is_metric_eligible(category):
+            continue
+        if isinstance(category, ResolvedCategory):
+            categories.append(
+                {
+                    "category_id": category.category_id,
+                    "taxonomy_node": category.taxonomy_node,
+                    "origin": "explicit",
+                    "depth": category.depth,
+                    "characteristics": list(category.characteristics),
+                }
+            )
+        else:
+            categories.append(
+                {
+                    "category_id": category.category_id,
+                    "taxonomy_node": category.taxonomy_node,
+                    "origin": "inferred",
+                    "depth": category.depth,
+                    "reasoning": category.reasoning,
+                }
+            )
+    leftover_flags = [
+        {
+            "phrase": flag.phrase,
+            "target": flag.target,
+            "category": flag.category,
+            "characteristic": flag.characteristic,
+        }
+        for flag in resolved.ambiguity_flags
+        if flag.target in ("characteristic", "persona")
+    ]
+    payload = {
+        "payload": {"normalized_text": state.payload.normalized_text},
+        "persona_facts": list(resolved.persona_facts),
+        "categories": categories,
+        "leftover_flags": leftover_flags,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
+    """First failed rule of K1 to K4 for one metric, or None when it passes them."""
+    texts = (
+        entry.label,
+        entry.question,
+        entry.verification,
+        entry.resolution_source.target,
+    )
+    if any(not text.strip() for text in texts):
+        return "text_completeness"
+
+    has_unit = bool(entry.unit and entry.unit.strip())
+    enum_members = [member.strip() for member in entry.enum_values if member.strip()]
+    if entry.value_type == "number_with_unit":
+        parameters_ok = has_unit and not entry.enum_values
+    elif entry.value_type == "enum":
+        parameters_ok = not has_unit and len(set(enum_members)) >= 2
+    else:
+        parameters_ok = not has_unit and not entry.enum_values
+    if not parameters_ok:
+        return "value_type_parameters"
+
+    if entry.band == "specific_attributes" and depth != "specific_attributes":
+        return "band_above_depth"
+    if entry.resolution_source.tool == "firecrawl" and entry.band != "specific_attributes":
+        return "tool_not_allowed_for_band"
+    return None
+
+
+def _to_metric_spec(entry: MetricEntry) -> MetricSpec:
+    """Wire metric to stored metric, text trimmed."""
+    return MetricSpec(
+        label=entry.label.strip(),
+        question=entry.question.strip(),
+        value_type=entry.value_type,
+        unit=entry.unit.strip() if entry.unit and entry.unit.strip() else None,
+        enum_values=[member.strip() for member in entry.enum_values],
+        resolution_source=ResolutionSource(
+            tool=entry.resolution_source.tool,
+            target=entry.resolution_source.target.strip(),
+        ),
+        verification=entry.verification.strip(),
+        null_policy=entry.null_policy,
+        band=entry.band,
+    )
 
 
 def _render_clarification_user_content(state: RequirementInterpretationState) -> str:

@@ -128,3 +128,27 @@ class DepthAssignmentValidationError(DepthAssignmentError):
     """Raised when a returned body failed schema, id coverage, or the explicit floor."""
 
     stage: ClassVar[str] = "execute_depth_assignment"
+
+
+class MetricDefinitionError(Exception):
+    """Base failure surface of Mechanism 6 (per-category metric definition)."""
+
+    # Named so a caller can tell provider-vs-validation without reading a traceback.
+    stage: ClassVar[str] = "execute_metric_definition"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class MetricDefinitionProviderError(MetricDefinitionError):
+    """Raised when no provider in the bound order returned a metric-definition body."""
+
+    stage: ClassVar[str] = "execute_metric_definition"
+
+
+class MetricDefinitionValidationError(MetricDefinitionError):
+    """Raised when a returned body failed the metric-definition schema or id coverage."""
+
+    stage: ClassVar[str] = "execute_metric_definition"
