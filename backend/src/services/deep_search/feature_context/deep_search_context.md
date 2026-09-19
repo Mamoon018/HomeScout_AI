@@ -1,19 +1,18 @@
-Google Places API Integration with Deep Search feature
+# Google Places API Integration with Deep Search feature
 
-Hierarchy in deep search feature:
-
-Listings & their Quality
+## Hierarchy in deep search feature:
+1. Listings & their Quality
 2. Apartment Amenities
 3. Neighborhood Quality
 Essentially Deep search is just going to be an orchestrator. And we can consider its responsibilities as feature itself and they will be orchestrated by Deep Search.
 
 
-Problem Context of the feature (Neighborhood Quality):
-Overall Feature Problem:
+# Problem Context of the Neighborhood Quality aspect of the feature:
+## Overall Feature Problem:
 The feature needs to determine whether the neighborhood surrounding an apartment meets the user's stated preferences by identifying relevant amenities and providing reliable information about their proximity, accessibility, characteristics, and quality. The information must be sufficiently specific to the user's requirements at the required level of depth rather than presenting a generic list of nearby amenities, while distinguishing factual information and information in the form of metrics about each amenity from assessments derived from that information.
 
 
-User:
+## User:
 Stakeholder 1: Customer
 Want (Preference Match): knowing which of the amenities he actually cares about exist nearby. Friction: manually checking a map means searching for each preferred amenity type one at a time and cross-referencing distance himself, with no single view of whether his actual list of priorities is met.
 
@@ -52,7 +51,7 @@ Want (Fact/Assessment Separation as a structural rule): *[added]* an explicit, e
 **Completeness check:** if the customer gets preference-matched, genuinely accessible, appropriately-detailed, characteristic-matched, non-redundant amenity information with baseline coverage and traceable judgments, and the developer can rely on structured data, adjustable depth, guaranteed baseline metrics, tools, and a clean fact/assessment boundary, both sides would now consider this solved, including the two overall-problem terms (accessibility, fact-vs-assessment separation) that the original list didn't explicitly cover.
 
 
-Environment:
+## Environment:
 Facts constraining what success can look like:
 Users vary in how much they specify, some will name specific amenities and characteristics, others will name only a few or none, so the feature can't assume complete input every time.
 What counts as a good or relevant characteristic for an amenity type differs by category (a gym's relevant quality isn't a park's), so "quality" isn't a single generic measure across all types.
@@ -66,15 +65,15 @@ The evaluative judgment about an amenity (whether it's "good," matches a charact
 
 Completeness check: each fact explains why a naive, fixed-tool, fixed-depth, fixed-metric version would fail, differing input specificity would leave gaps for under-specifying users, a single tool would miss information types other tools are better suited for, and a fixed depth would either waste effort or under-serve deeper requests.
 
-Problem relevance:
+## Problem relevance:
 If amenity information isn't matched to what the user actually cares about, at the depth and characteristic level he cares about, and isn't clearly separated from the judgment drawn on top of it, he's left to manually re-derive relevance and quality himself from a generic report, which defeats the purpose of the feature responsibility doing that evaluation for him, and undermines his ability to trust the assessment when deciding whether a listing's surroundings actually fit his needs.
 
 
-Actual Problem Statement:
+## Actual Problem Statement:
 The feature must first identify amenities within a user-defined radius of the listing, covering the amenity categories the user explicitly specified at full priority and a smaller, fixed set of common categories he did not specify, based on the understanding of his explicit and hidden requirements. For each identified amenity (in each category), it must retrieve a fixed baseline set of metrics using whichever available tool is best suited to that data (Google Places New API) and extending to deeper, page-level detail only where the user's stated need calls for it using additional tools like LLMs, Diffbot extractor and Parallel Web Search. For every amenity, it must compute travel-based accessibility (route, mode, time), not straight-line distance alone. Within each category, it must narrow results to a representative set, keeping only amenities that match a user-specified characteristic or a reasonably close alternative where such criteria were given, rather than returning every instance found. From this factual data, it must produce an assessment for every amenity (of every category), specified or baseline, keeping that assessment structurally separate from the underlying facts while carrying the specific facts it was derived from. Finally, the output must be organized by amenity category and metric, with depth scaled to how much the user specified about that category, and each result phrased against the user's stated requirement rather than as a generic summary.
 
 
-Workflow of the Feature:
+## Workflow of the Feature:
 Shortlist the categories of amenities that we need to look for as per user preference
 After shortlisting categories from explicit user preference, add a step that appends the fixed, predefined set of baseline amenity categories the user did not mention, before moving to metric definition. (This set of categories will be decided based on the user persona and analysis of he specified instructions)
 Define the Baseline metrics, User specific metrics, User specific factual information at right level of depth, context of the user requirements that needs to bring for the user (one by one for all categories of amenities)
@@ -90,7 +89,7 @@ Structure the additional information in a way that it can be merged into already
 Now, based on the complete information which includes baseline metrics, user specific metrics, factual information at right depth, we need to generate the traceable judgement for each category of amenity.
 
 
-Responsibilities of the feature:
+## Responsibilities of the feature:
 
 1. User's Requirement interpretation (Responsibility-1 of the feature)
 
@@ -113,8 +112,7 @@ This responsibility should end with something like:
 It should **not search for restaurants or retrieve their data**.
 
 
-Problem Context of User's requirements interpretation:
-
+### Problem Context of User's requirements interpretation:
 User
 Stakeholder: Customer
 
@@ -149,47 +147,26 @@ If this responsibility misreads what the customer actually needs to evaluate, or
 Filter test: any capability written into this responsibility's problem statement should trace back to producing an accurate, appropriately prioritized, sufficiently deep specification per category. If a capability doesn't trace back to that, it belongs to a different responsibility (search, retrieval, or evaluation), not this one.
 
 
-Actual Problem statement:
+#### Actual Problem statement:
 This responsibility must first parse the customer's stated requirements and instructions to come up with the discrete amenity categories, resolving each to its correct real-world scope and, where a stated characteristic for any category of amenity is vague or open to more than one meaning, resolving it to a single reasonable interpretation, and capturing the underlying reason behind why each explicit category matters to him. These explicit categories and their captured reasoning are treated as fixed, top priority input in the context of customer's described persona, situation, and lifestyle,. Next, based on the customer's described persona, situation, and lifestyle, it must infer additional categories and their characteristics he did not explicitly state, appended below the explicit set as lower-priority, probabilistic additions that cannot compete with or dilute what was explicitly stated. For every category, explicit or inferred, it must assign a depth of information (metrics, factual information, characteristics) to the surface, based on how much the customer specifications about that particular category or if not specified then understanding what level of depth a category amenity would require to evaluate it, applying this depth-assignment logic the same way across all categories rather than case by case. Finally, for every category, it must define the specific metrics and factual points, category-appropriate rather than drawn from one fixed template, that are sufficient to judge whether an amenity actually serves the customer's underlying purpose for wanting that category, not merely to describe that the amenity exists. The output of this responsibility is this specification per category (reason, priority, depth, metrics) and nothing beyond it, no search or retrieval of amenities happens here.
 
 Filter check (problem relevance): every clause traces back to producing an accurate, appropriately prioritized, sufficiently deep specification per category, since anything wrong or missing here propagates uncorrected into search, retrieval, and the final judgment. Nothing here performs search or retrieval, which belongs to a later responsibility.
 
 
-Implementation Mechanisms of the User's Requirement Interpretation:
-
+##### Implementation (Workflow/Process flow of the responsibility) Mechanisms of the User's Requirement Interpretation:
 Process Flow — "User's Requirement Interpretation" Responsibility
 
 Scope reminder: everything below stops at producing a per-category specification (reason, priority, depth, metrics). Nothing here searches, retrieves, or scores an actual amenity — that starts in the next responsibility, which consumes this one's output as its only input.
 
 Mechanisms identified
-Unstructured Input Parsing (prerequisite)
+1. Unstructured Input Parsing (prerequisite)
 2. Explicit Category Resolution
 3. Router --> Global Requirement Sufficiency Gate --> Explicit Category Resolution
-4. Explicit Reason Capture & Priority Tagging
-5. Router --> Explicit Category Detail Elicitation --> Explicit Reason Capture & Priority Tagging
-6. Persona-Driven Category Inference
-7. Depth Assignment
-8. Category-Specific Metric & Fact Definition
-9. Specification Assembly & Priority Enforcement
+4. Persona-Driven Category Inference
+5. Depth Assignment
+6. Category-Specific Metric & Fact Definition
 
 
-Process Flow — "User's Requirement Interpretation" Responsibility
-
-Scope reminder: everything below stops at producing a per-category specification (reason, priority, depth, metrics). Nothing here searches, retrieves, or scores an actual amenity — that starts in the next responsibility, which consumes this one's output as its only input.
-
-Mechanisms identified
-Unstructured Input Parsing (prerequisite)
-2. Explicit Category Resolution 
-3. Router --> Global Requirement Sufficiency Gate --> Explicit Category Resolution
-4. Explicit Reason Capture & Priority Tagging
-5. Router --> Explicit Category Detail Elicitation Resolution --> Explicit Reason Capture & Priority Tagging
-6. Persona-Driven Category Inference
-7. Depth Assignment
-8. Category-Specific Metric & Fact Definition
-9. Specification Assembly & Priority Enforcement
-
-Dependency flow: 1 → 2.1 → 2.2 → 3.1 → {4.1 ∥ 5.1} → 5.2 → 6.1
-(5.1 only needs the finalized category set from 3.1, so it can run alongside 4.1; 5.2 needs both the depth from 4.1 and the reason from 2.2, so it waits on both.)
 
 # Mechanism 1 — Unstructured Input Parsing
 ## Component: Requirement & Persona Extraction
