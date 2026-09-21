@@ -22,7 +22,7 @@ Three levels exist. Higher levels include every band below them.
 basic_profile — Is it here, and can I reach it, at what cost?
 Contents: identity (name, category, address, website, place_id, coords) plus accessibility metrics:
 travel distance and duration per mode (walk / drive / cycle), and transit_details (Routes API,
-one call per bus / subway / train).
+travelMode TRANSIT; bus, subway, and train allowed in the same call).
 Tools later stages may use: Google Maps Places (identity and walk/drive/cycle
 routingSummaries) and Routes API (transit_details). Fully Maps-resolvable.
 Contract-gated: no. These dimensions are fixed and known-resolvable.
@@ -240,11 +240,11 @@ _DEPTH_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                 },
                 {
                     "category_id": 1,
-                    "taxonomy_node": "daycare",
+                    "taxonomy_node": "child_care_agency",
                     "origin": "inferred",
                     "reasoning": (
                         "The persona fact that they have a four-year-old who needs care "
-                        "during the workday supports daycare as a distinct need from "
+                        "during the workday supports child_care_agency as a distinct need from "
                         "the explicit supermarket."
                     ),
                 },
@@ -350,12 +350,12 @@ _DEPTH_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                 },
                 {
                     "category_id": 1,
-                    "taxonomy_node": "daycare",
+                    "taxonomy_node": "child_care_agency",
                     "origin": "inferred",
                     "reasoning": (
                         "The persona fact that they have a four-year-old who needs care "
-                        "during the workday supports daycare. No attribute of the "
-                        "daycare itself is named."
+                        "during the workday supports child_care_agency. No attribute of the "
+                        "child_care_agency itself is named."
                     ),
                 },
             ],

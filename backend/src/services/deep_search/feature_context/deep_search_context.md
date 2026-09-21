@@ -1365,7 +1365,7 @@ Three levels exist. All three are defined in the prompt. All three are assignabl
 
 | Level | Question it answers | Contents | Tools | Contract-gated? |
 |---|---|---|---|---|
-| `basic_profile` | Is it here, and can I reach it — at what cost? | Identity (name, category, address, `place_id`, coords) + accessibility metrics: travel distance and duration per mode (walk / drive / cycle), `transit_details` (Routes API, one call per bus / subway / train). | Google Maps: Places (identity and walk/drive/cycle `routingSummaries`) + Routes API (`transit_details`). Fully Maps-resolvable. | No — these are fixed, known-resolvable dimensions. |
+| `basic_profile` | Is it here, and can I reach it — at what cost? | Identity (name, category, address, `place_id`, coords) + accessibility metrics: travel distance and duration per mode (walk / drive / cycle), `transit_details` (Routes API, travelMode TRANSIT; bus, subway, and train allowed in the same call). | Google Maps: Places (identity and walk/drive/cycle `routingSummaries`) + Routes API (`transit_details`). Fully Maps-resolvable. | No — these are fixed, known-resolvable dimensions. |
 | `operating_details` | Is it any good, and how does it run? | `basic_profile` + operational dimensions (hours, contact/website, rating, review volume, price level) + an LLM-defined, per-category quality set. The quality set is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric must pass the metric contract. | Maps (hours, rating, ratings count, `price_level`, attributes) + parallel web search (reputation synthesis). | Yes — every LLM-proposed quality metric goes through the contract. The fixed Maps operational dimensions do not. |
 | `specific_attributes` | Does it fit my particular situation? | User-specific metrics beyond the above — attributes the user emphasized, or that persona / inferred reasoning shows they would need. | Parallel web search + firecrawl/diffbot on targeted pages (official site, schedule, menu, pricing). | Yes — every metric goes through the contract. |
 
@@ -1723,7 +1723,7 @@ The always-captured baseline is the **fixed dimensions** for the assigned depth.
 
 | Depth | Fixed dimensions implied (cumulative) | Owner |
 |---|---|---|
-| `basic_profile` | Identity: name, category, address, website, `place_id`, coords. Accessibility: travel distance and duration per mode (walk / drive / cycle), `transit_details` (Routes API, one call per bus / subway / train). | Code constant. |
+| `basic_profile` | Identity: name, category, address, website, `place_id`, coords. Accessibility: travel distance and duration per mode (walk / drive / cycle), `transit_details` (Routes API, travelMode TRANSIT; bus, subway, and train allowed in the same call). | Code constant. |
 | `operating_details` | `basic_profile` + hours, contact (phone), rating, review volume, price level. | Code constant. |
 | `specific_attributes` | `operating_details` fixed dimensions. No additional fixed dimensions. | Code constant. |
 
@@ -2193,7 +2193,7 @@ Taking the per‑category specification produced by Responsibility‑1 (categori
 Request the amenities per category along with their predefined metrics, including walk, drive, and cycle travel distance/duration from Places `searchNearby` `routingSummaries` (one call per mode). Ensure every value comes back in the correct format with complete details.
 
 2. Fetch `transit_details` from the Routes API:
-Run a separate Routes API call path over the results from step 1, **one call per transit mode (bus, subway, train)**. Transit is not bundled into the walk/drive/cycle `searchNearby` calls and is not part of the travel distance/duration metrics.
+Run a separate Routes API call path over the results from step 1 with `travelMode: TRANSIT` (bus, subway, and train allowed in the same call — not one call per transit mode). Extra calls are only to batch destinations against the pair cap. Transit is not bundled into the walk/drive/cycle `searchNearby` calls and is not part of the travel distance/duration metrics.
 
 3. Parse the extracted data:
 Parse the fetched values into the target shape for each amenity. Derived metrics are out of the predefined catalog and are not decided here.
@@ -2232,228 +2232,243 @@ Research grounded a few specifics that shape the approaches below: Places API (N
 Below is the technical process flow: the mechanisms, then each broken into buildable components per the Write Guide structure.
 
 ---
-# Mechanisms & Dependency Order
+Mechanisms & Dependency Order
 
-R2's core aspects group into four mechanisms plus a prerequisite layer. Dependency chain:
+### Mechanism 1 — Predefined‑Metric Search & Retrieval (Final)
 
-- **M0 (Prerequisite): Spec Ingestion, Routing & Execution Substrate** → everything depends on it
-- **M1: Predefined‑Metric Search & Retrieval (Google)** → produces candidates + baseline metrics
-- **M2: Correctness Filtering & Representative Narrowing** → consumes M1's pool
-- **M3: LLM‑Defined Metric Resolution** → runs only on M2's narrowed set
-- **M4: Output — Null Policy & Structured Assembly** → consumes M1+M3 outputs
+Units (finalized): the user supplies radius in km (default 2 km) → convert to meters for any API that needs meters. All stored/output distances are km (convert if an API returns meters) and all durations are minutes (convert Google's "###s" seconds → minutes).
 
-Order: **C0.1 → C0.2 → C1.1 → C1.2 → C1.3 → C2.1 → C2.2 → C3.1 → C3.2 → C4.1 → C4.2.**
+Predefined‑metric catalog unchanged from the last table (reachability removed; walk/drive/cycle via routingSummaries.legs.distanceMeters / .duration; transit via Routes API), with the units rule above applied at parse.
 
+#### Mechanism goal (ordered): (1) discover the canonical places per category → (2) enrich them with routing + transit → (3) deterministically attach and emit one typed record per amenity per category.
+
+R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_specs.
+
+### Component M1.1 — Place Discovery (Agent 1)
+
+Goal of Component (ordered):
+
+(Trigger: per CategorySpec.) Map taxonomy_node → a single Google primaryType using the place‑types reference.
+Issue a Nearby Search (New) bounded by locationRestriction (circle: center state.origin, radius state.radius km → meters), includedPrimaryTypes = [mapped type], maxResultCount = 3, field mask = the basic_profile + operating_details targets + places.id. No routingParameters, no transit.
+Freeze the returned places as the canonical set for that category, keyed by place.id.
+
+Problem It Aims to Solve: Establishes the candidate amenities and the place.id identity every later step joins on; freezing the set makes enrichment and attachment deterministic.
+
+#### Finalized Approach: Agent‑driven discovery via the Places API tool, taxonomy→type mapping from the place‑types doc, Nearby Search (New) with includedPrimaryTypes.
+
+Mandatory Sub‑Tasks Independent of Approaches Taken: field mask = exactly basic + operating targets + places.id; apply radius as a hard locationRestriction; freeze the set (no later rediscovery); dedup within a category by place_id.
+
+#### Critical Decision Choices:
+
+Search endpoint: Nearby Search (New) — and Nearby remains the path even on a weak/empty result (no Text‑Search fallback).
+Type‑mapping granularity: one primaryType per node.
+Candidate volume: maxResultCount = 3, kept configurable for future tuning.
+Radius: default 2 km, hard locationRestriction, km→m conversion at call time.
+
+
+### Component M1.2 — Accessibility Enrichment (Agent 2)
+
+Goal of Component (ordered):
+(Trigger: after M1.1; input = the frozen canonical places.) Walk/drive/cycle: for each of the three modes, re‑issue the Nearby search with routingParameters (origin = state.origin, travelMode = <mode>) and read routingSummaries.legs.distanceMeters / .duration, tagging each by place.id.
+Transit: call Routes API computeRoutes per canonical place with origin = state.origin, destination = place.location, travelMode: TRANSIT, departureTime = now (N1), field mask routes.legs.steps.transitDetails + routes.legs.duration + routes.legs.distanceMeters; tag by place.id.
+Return routing + transit results keyed by place.id; do not alter, drop, or rediscover places.
+
+#### Problem It Aims to Solve: routingSummaries need routingParameters (excluded from discovery by design) and transit lives on a different API; both must decorate the frozen set without changing it.
+
+#### Finalized Approach: Places API routingParameters for walk/drive/cycle; Routes API computeRoutes (per place) for transit — see the confirmation callout; every result tagged with place.id.
+
+Mandatory Sub‑Tasks Independent of Approaches Taken: one routing search per non‑transit mode (a routingParameters block carries a single travelMode); set routingParameters.origin = state.origin; transit uses origin = state.origin, destination = place (D‑C2.5); key every result by place.id; mark a mode/transit route absent when the API returns none — never fabricate.
+
+#### Critical Decision Choices:
+
+Transit time anchor: departureTime = now (N1).
+Transit scope: transitDetails plus transit duration/distance (N2).
+Call shape: transit via computeRoutes per place (matrix can't return transitDetails; at maxResultCount = 3 per‑place cost is negligible).
+Route‑absent handling: represent as absent, don't fabricate.
+Origin/destination: transit origin = user origin; destinations = canonical places.
+
+Residual implementation note (for M1.2): because routingSummaries only come back attached to a Nearby search's own results, walk/drive/cycle enrichment re‑issues the discovery search per mode and attaches by place_id; a canonical place absent from a mode's re‑search gets that mode marked absent. This is stable at maxResultCount = 3 with the identical query; if it ever proves fragile, computeRouteMatrix is the drop‑in robust alternative for those three modes (it can't be used for transit, per the callout).
+
+### Component M1.3 — Deterministic Result Attachment & Output Contract
+
+#### Goal of Component (ordered):
+
+(Trigger: after M1.2.) Join routing + transit onto each canonical place by place.id, programmatically — no agent reasoning (D4.3).
+Normalize units (distances → km, durations → minutes) and assemble one AmenityRecord per amenity per category (D7).
+Write to state.amenity_records; flag any metric the API didn't return in _absent.
+
+#### Problem It Aims to Solve: Results arrive from three call families in different shapes; downstream needs one predictable, versioned contract (D8).
+
+#### Finalized Approach: deterministic join by place.id into a typed AmenityRecord.
+
+Mandatory Sub‑Tasks Independent of Approaches Taken: join strictly by place.id; per‑category record (no cross‑category merge, D7); attach units (km / minutes); set a presence flag per metric.
+
+#### Critical Decision Choices:
+
+Record identity: keyed by (category_id, place_id).
+Absent‑value representation: null value + _absent set.
+Contract versioning: version tag on the record shape for downstream stability.
+
+#### Output contract — AmenityRecord (one per amenity per category):
+
+Field	Type	Content
+contract_version	str	schema version tag
+category_id	int	from CategorySpec
+taxonomy_node	str	from CategorySpec
+place_id	str	places.id — identity/join key
+name	str	places.displayName
+category	str	places.primaryType
+address	str	places.formattedAddress
+website	str | null	places.websiteUri
+coordinates	{lat,lng}	places.location
+opening_hours	obj | null	places.regularOpeningHours
+contact_phone	str | null	places.internationalPhoneNumber
+rating	float | null	places.rating
+review_volume	int | null	places.userRatingCount
+price_level	enum | null	places.priceLevel
+routing	map<{walk,drive,cycle} → {distance_km:float|null, duration_min:float|null}>	from per‑mode routingSummaries
+transit	{distance_km:float|null, duration_min:float|null, details:obj|null} | null	computeRoutes legs duration/distance + transitDetails
+_absent	set[str]	metric labels the API didn't return (consumed later by C4.1)
+Before / After State
+
+#### AmenitySearchState: origin, radius, category_specs (inputs); discovered_places, enrichment (transient), amenity_records (output).
+
+State field	Before M1	After M1.1	After M1.2	After M1.3
+origin	set	set	set	set
+radius	set	set	set	set
+category_specs	set	set	set	set
+discovered_places	∅	populated (frozen, per category)	unchanged	unchanged
+enrichment	∅	∅	populated (routing+transit by place_id)	discarded
+amenity_records	∅	∅	∅	populated — M1 output
+
+Finalized assumptions: radius input in km (default 2 km) → meters for APIs; all output distances km, durations minutes; transit departureTime = now; LLM reasoning used only for taxonomy→primaryType mapping (search parameterization, enrichment calls, and attachment are deterministic); type mapping cached per taxonomy_node.
 ---
 
-# M0 — Prerequisite: Spec Ingestion, Routing & Execution Substrate
 
-## Component C0.1 — Input Contract & Per‑Metric Resolution Plan
 
-**Goal of Component:** A validated, normalized plan that, per category, lists each metric with its `resolution_source`, `value_type`, `unit`, `enum_values`, `verification`, `null_policy`, and `band`, grouped by resolving tool (Google vs web/scrape). Once complete, every later stage knows exactly what to fetch and where to route it, and every amenity/metric has a stable key.
 
-**Problem It Aims to Solve:** R2's only input is R1's spec object. Without parsing and validating it into a routing plan, each stage re‑interprets the spec ad hoc and source‑appropriate routing has no backbone. It also establishes the identity keys that make M4's merge deterministic.
+### These Mechanisms show what needs to be done but they are not yet finalized:
+M2 — Correctness Filtering & Representative Narrowing
+Component C2.1 — Category‑Correctness Filter
 
-**Three Common Approaches:**
-1. **Typed models (Pydantic) mirroring R1's output**, with per‑tool grouping derived in code.
-2. **JSON‑Schema validation + a routing table** keyed by `resolution_source.tool` over a plain dict plan.
-3. **Shared‑model adapter** that consumes R1's typed objects directly (one model package) and computes routing views lazily.
+Goal of Component: Drop candidates that aren't genuine members of the category, leaving a pool where every member truly belongs.
 
-*(Each fully yields the plan on its own; they differ only in how tightly R2 couples to R1's types.)*
+Problem It Aims to Solve: Search inherently returns adjacent/mislabeled places (park under "daycare"); shipping these is the single failure the responsibility exists to prevent. Correctness ≠ volume, so it's separate and runs before the expensive M3.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** partition metrics into predefined (Google) vs LLM‑defined (web/scrape) buckets; carry `verification`/`null_policy`/`enum_values` through untouched; assign stable category/amenity/metric keys.
+Three Common Approaches:
 
-**Critical Decision Choices:**
-- *Generally mandatory:* coupling to R1's models (shared package vs re‑declared schema); validation strictness (reject vs coerce); the identity keys used for later merge.
-- *Problem‑context‑specific:* how to represent a metric whose `resolution_source` names **multiple tools** (web *and* Firecrawl) — model it as one metric with an ordered tool chain; how the category's assigned **depth/band gates whether LLM‑defined metrics run at all** (a depth‑driven skip that saves the whole M3 cost for shallow categories).
+Rule‑based on Google types (primaryType/types must intersect the taxonomy node's allowed set) + name heuristics.
+LLM classifier judging member/non‑member from profile + category intent.
+Hybrid: type rules as a fast gate, LLM only for ambiguous cases.
 
-## Component C0.2 — Concurrency, Rate‑Limit & Caching Substrate
+Mandatory Sub‑Tasks Independent of Approaches Taken: derive the per‑category allowed‑type set from taxonomy_node; record a drop reason for traceability.
 
-**Goal of Component:** A shared execution layer offering bounded parallelism, per‑tool rate limiting, retry/backoff, and request caching, so every fetch‑heavy stage inherits cost/latency control rather than re‑implementing it.
+Critical Decision Choices:
 
-**Problem It Aims to Solve:** The run spans many amenities × categories × metrics in one pass; serial calls are too slow and unbounded fan‑out trips rate limits and blows budget. This boundary condition must exist before the fetching mechanisms.
+Generally mandatory: precision‑vs‑recall threshold; deterministic vs LLM; drop logging.
+Problem‑context‑specific: strictness given C1.1 already type‑restricted (avoid double‑dropping valid ones); LLM‑filter cost vs value (runs before deep search, so it saves more than it costs); broad‑type categories (grocery vs convenience).
+Component C2.2 — Representative Narrowing
 
-**Three Common Approaches:**
-1. **asyncio + per‑tool semaphores** with an async HTTP client and a TTL cache (single process).
-2. **Task queue / worker pool** (Celery/RQ or bounded thread pool) with a shared limiter and Redis cache.
-3. **Structured‑concurrency library** (anyio/trio‑style) with token‑bucket limiters per tool.
+Goal of Component: Reduce an over‑represented category to a bounded, representative subset so deep search runs on a manageable set.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** distinct concurrency caps and rate limits per tool (Google, Parallel, Firecrawl, LLM differ); retry/backoff on transient failures; idempotent caching keyed by (tool, params). These hold regardless of approach because the tools have independent limits.
+Problem It Aims to Solve: Density is uneven and M3 is the expensive stage, so narrowing before it is the main cost lever; Non‑Redundant Set is a customer want.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* async vs threads vs external workers; cache store (in‑memory vs Redis) and TTL; retry policy.
-- *Problem‑context‑specific:* cache TTL must respect the **as‑of‑fetch‑time currency** fact (short TTL for volatile metrics like hours/rating/price); per‑tool **budget ceilings tied to the cost bound**; whether transit's 100‑pair matrix cap needs its own batching lane.
+Three Common Approaches:
 
----
+Rank + top‑N by data completeness and proximity/reachability.
+Diversity sampling across sub‑areas/attributes.
+Threshold + cap: keep all within an accessibility threshold, capped at N.
 
-## M1 — Predefined‑Metric Search & Retrieval
+Mandatory Sub‑Tasks Independent of Approaches Taken: define N (or cap policy) per category; deterministic tie‑break.
 
-### Component C1.1 — Per‑Category Nearby Search with Field‑Masked Predefined Metrics + Non‑Transit Routing
+Critical Decision Choices:
 
-**Goal of Component:** For each category, a single constrained Places API (New) call within the user radius returning candidate amenities plus every Google‑resolvable predefined metric (basic profile + operating details) and walk/drive/cycle routing summaries.
+Generally mandatory: N per category; ranking signal; determinism.
+Problem‑context‑specific: narrow on completeness/proximity only (characteristic values don't exist yet) — the open decision; a possible second light narrowing after M3; how N scales with the category's depth.
+M3 — LLM‑Defined Metric Resolution
+Component C3.1 — Multi‑Source Evidence Acquisition
 
-**Problem It Aims to Solve:** This is the entry fetch that produces the candidate set and most predefined metrics. Since search is inherently proximity/type‑ranked (irrelevance is built in), the call must be as precise as the API allows to reduce downstream filter load; and `routingSummaries` only returns when `routingParameters.origin` (the listing location) is set.
+Goal of Component: For each narrowed amenity and each specific_metrics entry, assemble the raw evidence: ensure a URL (discover via web search if Google gave none), run web search for the metric's target, and scrape the official site with Firecrawl.
 
-**Three Common Approaches:**
-1. **Nearby Search (New)** with `includedPrimaryTypes` + circular `locationRestriction` + `routingParameters`.
-2. **Text Search (New)** with a category text query + `locationRestriction`/bias + `routingParameters` (better for fuzzy categories).
-3. **Hybrid selector:** taxonomy node → primary type when a clean type exists, else Text Search — one selector decides per category.
+Problem It Aims to Solve: LLM‑defined metrics have no structured source and must be built from free text; the rule is to use both web search and Firecrawl so the value can be cross‑checked; a missing website must be discovered first.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** field mask lists exactly the plan's predefined fields **plus** `routingSummaries`; set `routingParameters.origin` to the listing coords; **issue one call per non‑transit mode** (walk/drive/cycle), since `routingParameters` carries a single `travelMode` — these per‑mode calls are mandatory parallel work, not alternatives; honor the user radius via `locationRestriction`.
+Three Common Approaches:
 
-**Critical Decision Choices:**
-- *Generally mandatory:* field‑mask scope (it drives the billing SKU tier); pagination (`nextPageToken`); ranking (relevance vs distance).
-- *Problem‑context‑specific:* type‑restriction **strictness vs recall** (tighter type = fewer irrelevants but risks dropping valid ones — trades directly against C2.1's load); radius as `locationRestriction` (hard) vs `locationBias` (soft); `maxResultCount` per category given uneven density; whether to pull `operating_details` fields for **all** candidates now or defer them until after narrowing to cut field cost.
+Query‑per‑metric: targeted Parallel search per metric + one reused Firecrawl scrape.
+Batched‑per‑amenity: one broad web search + one Firecrawl schema‑extraction pass for all metrics.
+Agent‑style: Firecrawl /agent given the metric list + URLs.
 
-### Component C1.2 — Transit Accessibility Retrieval (`transit_details`)
+Mandatory Sub‑Tasks Independent of Approaches Taken: URL resolution when websiteUri is absent; run both web search and Firecrawl (both mandated); cache the scrape so it isn't re‑fetched per metric. Search and scrape are mandatory parallel work, not alternatives.
 
-**Goal of Component:** Resolve the `transit_details` predefined metric for the candidates, from the listing origin, via the Routes API — **one call per transit mode (bus, subway, train)**.
+Critical Decision Choices:
 
-**Problem It Aims to Solve:** `routingSummaries` covers walk/drive/cycle but not transit; `transit_details` is a separate predefined metric (not a slice of travel distance/duration) and needs its own Routes API calls, one per bus / subway / train.
+Generally mandatory: web‑search provider; Firecrawl format (markdown vs schema‑guided JSON); scrape depth (page vs crawl).
+Problem‑context‑specific: query construction from each metric's question/target; how many reviews/pages to pull to satisfy verification (e.g., ≥5 reviews); freshness for currency; per‑amenity cost cap.
+Component C3.2 — LLM Cross‑Check & Verification Resolution
 
-**Three Common Approaches:**
-1. **`computeRouteMatrix` TRANSIT**, one origin × N destinations per transit mode (bus, subway, train), chunked to ≤100 pairs per call.
-2. **`computeRoutes` per amenity** for each transit mode, parallelized (simpler calls, more of them).
-3. **Distance Matrix API (legacy) transit** as a fallback where New Routes transit is unavailable.
+Goal of Component: Turn the evidence into one committed, schema‑valid value per specific metric by cross‑checking web vs scrape, applying the metric's verification rule, and conforming to value_type/enum_values.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** issue **one call per transit mode (bus, subway, train)**; chunk destinations to respect the transit pair cap; set a departure/arrival time anchor (transit requires one); map matrix rows back to amenity ids.
+Problem It Aims to Solve: The two sources will partly agree or conflict; the value must be decided by verification, not last‑source‑wins, and must be enum/type‑valid. This is where trustworthiness is produced.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* `computeRoutes` vs `computeRouteMatrix` (per‑call cost vs cardinality limit); departure‑time strategy (now vs a typical time); field mask (duration only vs +fare/route).
-- *Problem‑context‑specific:* run transit **before narrowing** (current workflow step 2, more calls) vs **after narrowing** (cheaper) — the cost trade I flagged; and **skip transit entirely** when no transit metric/threshold is in the spec.
+Three Common Approaches:
 
-### Component C1.3 — Predefined‑Metric Parsing & Normalization
+One constrained LLM call per amenity (all metrics + evidence + rules → structured output).
+Per‑metric constrained calls (isolated context).
+Two‑stage: extraction then reconciliation/verification.
 
-**Goal of Component:** Transform the field‑masked responses (search + `transit_details`) into one normalized predefined‑metric record per amenity, with units attached. Derived metrics are out of the predefined catalog and are not decided here.
+Mandatory Sub‑Tasks Independent of Approaches Taken: pass verification + enum_values into the call; encode "web trusted unless the scrape contradicts it, and still read the scrape for more/precise detail"; return provenance; constrain output to the schema.
 
-**Problem It Aims to Solve:** Raw API JSON isn't the target shape (efficient parsing is a developer want). It also consolidates walk/drive/cycle travel with `transit_details` into one accessibility sub‑record.
+Critical Decision Choices:
 
-**Three Common Approaches:**
-1. **Schema‑driven mapper** (Pydantic per metric) that validates and coerces the field‑masked JSON.
-2. **Declarative field‑map table** (`resolution_source.target` → internal field) applied generically.
-3. **Per‑family adapters** (profile, hours, accessibility) with explicit unit handling.
+Generally mandatory: one call vs per‑metric; provider + fallback (OpenAI primary / Groq fallback, matching R1); structured‑output enforcement.
+Problem‑context‑specific: the contradiction‑resolution policy; confidence/provenance for the fact/assessment boundary; how "evidence insufficient for the threshold" maps toward null_policy (hand‑off to C4.1); currency weighting.
+M4 — Output: Null Policy & Structured Assembly
+Component C4.1 — Null‑Policy & Completeness Enforcement
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** attach unit/scale (completeness); merge the walk/drive/cycle results with `transit_details` into one accessibility object keyed by `place_id`; mark a Google metric absent when its field is null.
+Goal of Component: For every metric (predefined and specific), commit either a complete value (unit/scale/working link) or an explicit null per its null_policy, so a genuine absence is distinct from a wrong value.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* coercion vs strict parse; unit‑normalization strategy; the merge key.
-- *Problem‑context‑specific:* de‑duplicating a `place_id` that appears under multiple categories/modes; whether a missing Google field flows to the null policy **here or in M4** (the hand‑off boundary with C4.1).
+Problem It Aims to Solve: Honest Absence + Data‑Point Completeness wants; metrics go missing for different reasons. Without one enforcement point, absences and partial values leak inconsistently.
 
----
+Three Common Approaches:
 
-## M2 — Correctness Filtering & Representative Narrowing
+Central validator pass over the assembled record.
+Inline enforcement at C1.3 and C3.2 via a shared helper.
+Schema‑level enforcement in the output model's validators.
 
-### Component C2.1 — Category‑Correctness Filter
+Mandatory Sub‑Tasks Independent of Approaches Taken: validate links resolve (else null/flag); ensure unit/scale on numeric metrics; apply null_policy uniformly.
 
-**Goal of Component:** Drop candidates that aren't genuine members of the category, leaving a pool where every member truly belongs.
+Critical Decision Choices:
 
-**Problem It Aims to Solve:** Search inherently returns adjacent/mislabeled places (park under "daycare"); shipping these is the single failure the responsibility exists to prevent. Correctness (membership) is a different problem from volume (narrowing), so it's its own component and runs **before** the expensive M3.
+Generally mandatory: where enforcement lives; link‑liveness depth; null representation.
+Problem‑context‑specific: link‑validation cost vs value; "unknown" vs "not applicable"; an as‑of‑fetch‑time timestamp on volatile values.
+Component C4.2 — Record Assembly & Display‑Ready Structuring
 
-**Three Common Approaches:**
-1. **Rule‑based on Google types** (`primaryType`/`types` must intersect the taxonomy node's allowed set) + name heuristics.
-2. **LLM classifier** judging member/non‑member from the amenity profile + category intent.
-3. **Hybrid:** type rules as a fast gate, LLM only for ambiguous cases.
+Goal of Component: Merge each amenity's predefined + specific metrics into one record, organized by category and metric, in the output schema — mergeable and ready for downstream display and assessment.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** derive the per‑category allowed‑type set / criteria from the taxonomy node; record a drop reason for traceability.
+Problem It Aims to Solve: Facts arrive from different tools/stages in different shapes; without a single assembly target they can't be presented or consumed. Mergeable Output + Display‑Ready Structure wants.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* precision‑vs‑recall threshold; deterministic vs LLM; drop logging.
-- *Problem‑context‑specific:* how strict, **given C1.1 already type‑restricted** (avoid double‑dropping valid ones); the LLM filter's cost vs its value (running before deep search means it saves more than it costs); handling categories mapped to broad types (grocery vs convenience store).
+Three Common Approaches:
 
-### Component C2.2 — Representative Narrowing
+Typed output model per amenity nested under its category.
+Normalized rows (amenity, metric) for frontend + assessment to join.
+Plan‑shaped document mirroring R1's per‑category object shape.
 
-**Goal of Component:** Reduce an over‑represented category to a bounded, representative subset, so deep search runs on a manageable set and the customer isn't handed every instance.
+Mandatory Sub‑Tasks Independent of Approaches Taken: key by category + amenity + metric; carry provenance/timestamp; keep facts structurally separate from any later assessment field.
 
-**Problem It Aims to Solve:** Density is uneven and M3 is the expensive stage, so narrowing before it is the primary cost lever; Non‑Redundant Set is a customer want.
+Critical Decision Choices:
 
-**Three Common Approaches:**
-1. **Rank + top‑N:** by data completeness and proximity/reachability, keep top‑N per category.
-2. **Diversity sampling:** spread the kept set across sub‑areas/attributes.
-3. **Threshold + cap:** keep all within an accessibility threshold, capped at N.
+Generally mandatory: output schema + versioning; nesting by category vs flat rows; serialization.
+Problem‑context‑specific: the shape the downstream assessment consumes without reshaping; keeping the fact/assessment boundary structural; how the consolidated accessibility object is nested.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** define N (or the cap policy) per category; a deterministic tie‑break.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* N per category; ranking signal; determinism.
-- *Problem‑context‑specific:* narrow on **completeness/proximity only** (characteristic values don't exist yet) — the open decision I flagged; whether a **second light narrowing** runs after M3 if characteristic‑match narrowing belongs here; how N scales with the category's **depth/priority from R1**.
 
----
 
-#*# M3 — LLM‑Defined Metric Resolution
 
-### Component C3.1 — Multi‑Source Evidence Acquisition
 
-**Goal of Component:** For each narrowed amenity and each LLM‑defined metric, assemble the raw evidence corpus: ensure a URL (discover via web search if Google gave none), run web search for the metric's target, and scrape the official site with Firecrawl.
 
-**Problem It Aims to Solve:** LLM‑defined metrics have no structured source and must be built from free text. The requirement is to use **both** web search and Firecrawl so the value can be cross‑checked; and a missing website must first be discovered or Firecrawl has nothing to open.
 
-**Three Common Approaches:**
-1. **Query‑per‑metric:** targeted Parallel web search per metric + one reused Firecrawl scrape of the site.
-2. **Batched‑per‑amenity:** one broad web search + one Firecrawl schema‑extraction pass returning all metrics at once.
-3. **Agent‑style:** Firecrawl `/agent` (or a search agent) given the metric list + URLs, returning structured evidence across the web.
 
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** URL resolution (web‑search the site when `websiteUri` is absent); run **both** a web‑search retrieval and a Firecrawl scrape (both sources are mandated); cache the scrape so it isn't re‑fetched per metric. Search and scrape are mandatory parallel work, not alternatives.
 
-**Critical Decision Choices:**
-- *Generally mandatory:* web‑search provider (Parallel vs other); Firecrawl format (markdown for the LLM vs schema‑guided JSON); scrape depth (single page vs crawl).
-- *Problem‑context‑specific:* query construction from each metric's `question`/`target`; how many reviews/pages to pull to satisfy **verification thresholds** (e.g., ≥5 reviews); preferring **fresh** sources for currency; a per‑amenity **cost cap** (this is the expensive stage); skipping metrics whose band/depth wasn't requested.
-
-### Component C3.2 — LLM Cross‑Check & Verification Resolution
-
-**Goal of Component:** Turn the evidence corpus into one committed, schema‑valid value per LLM‑defined metric by cross‑checking web vs scraped content, applying the metric's verification rule, and conforming to `value_type`/`enum_values`.
-
-**Problem It Aims to Solve:** The two sources will partly agree or conflict; the value must be decided by the verification rule, not last‑source‑wins, and must be enum/type‑valid for downstream. This is where trustworthiness is produced.
-
-**Three Common Approaches:**
-1. **One constrained LLM call per amenity:** all metrics + all evidence + verification rules → structured output.
-2. **Per‑metric constrained calls:** isolated context per metric (more calls, cleaner isolation).
-3. **Two‑stage:** an extraction call (candidate facts per source) then a reconciliation/verification call.
-
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** pass the `verification` rule + `enum_values` into the call; encode the "**web trusted unless the scrape contradicts it, and still read the scrape for more/precise detail**" rule; return provenance (which source supported the value); constrain output to the schema.
-
-**Critical Decision Choices:**
-- *Generally mandatory:* one call vs per‑metric; provider + fallback (OpenAI primary / Groq fallback, matching R1's pattern); structured‑output enforcement.
-- *Problem‑context‑specific:* the exact **contradiction‑resolution policy**; carrying confidence/provenance to preserve the fact/assessment boundary; how "**evidence insufficient for the verification threshold**" maps toward null (hand‑off to C4.1); currency weighting between a fresh review and a static page.
-
----
-
-## M4 — Output: Null Policy & Structured Assembly
-
-### Component C4.1 — Null‑Policy & Completeness Enforcement
-
-**Goal of Component:** For every metric (predefined and LLM‑defined), commit either a complete value (unit/scale/working link present) or an explicit null per its `null_policy`, so a genuine absence is distinct from a wrong value.
-
-**Problem It Aims to Solve:** Honest Absence and Data‑Point Completeness are customer wants; metrics go missing for different reasons (null Google field, no evidence, verification threshold unmet). Without one enforcement point, absences and partial values leak inconsistently.
-
-**Three Common Approaches:**
-1. **Central validator pass** over the assembled record applying each metric's `null_policy` + completeness checks.
-2. **Inline enforcement** at each producing stage (C1.3, C3.2) via a shared policy helper.
-3. **Schema‑level enforcement:** the output model's validators encode `null_policy` + completeness.
-
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** validate that links resolve (else mark broken → null/flag); ensure unit/scale present for numeric metrics; apply `null_policy` uniformly.
-
-**Critical Decision Choices:**
-- *Generally mandatory:* where enforcement lives (central vs inline vs schema); link‑liveness check depth; null representation.
-- *Problem‑context‑specific:* link‑validation cost vs value (a bounded HEAD check within budget); distinguishing "unknown" from "not applicable"; ensuring an **as‑of‑fetch‑time timestamp** travels with volatile values.
-
-### Component C4.2 — Record Assembly & Display‑Ready Structuring
-
-**Goal of Component:** Merge each amenity's predefined + LLM‑defined metrics into one record, organized by category and metric, in the output schema — mergeable and ready for downstream display and assessment.
-
-**Problem It Aims to Solve:** Facts arrive from different tools and stages in different shapes; without a single assembly target they can't be presented or consumed. Mergeable Output and Display‑Ready Structure are wants.
-
-**Three Common Approaches:**
-1. **Typed output model** (Pydantic) per amenity nested under its category, serialized to JSON.
-2. **Normalized rows** (amenity, metric) keyed for the frontend and assessment to join.
-3. **Plan‑shaped document** assembled from C0.1's resolution plan structure.
-
-**Mandatory Sub‑Tasks Independent of Approaches Taken:** key by category + amenity + metric; carry provenance/timestamp; keep facts structurally separate from any later assessment field (the fact/assessment boundary).
-
-**Critical Decision Choices:**
-- *Generally mandatory:* output schema + versioning; nesting by category vs flat rows; serialization.
-- *Problem‑context‑specific:* the exact shape the **downstream assessment** consumes without reshaping; keeping the **fact/assessment boundary structural** (facts only here); how the consolidated accessibility object is nested.
-
----
 
 
 Sources: [Places routing summaries](https://developers.google.com/maps/documentation/places/web-service/routing-summary), [Nearby Search (New)](https://developers.google.com/maps/documentation/places/web-service/nearby-search), [computeRouteMatrix](https://developers.google.com/maps/documentation/routes/reference/rest/v2/TopLevel/computeRouteMatrix), [Transit route matrix](https://developers.google.com/maps/documentation/routes/transit-rm), [Firecrawl scrape](https://www.firecrawl.dev/blog/mastering-firecrawl-scrape-endpoint), [Parallel Search API](https://docs.parallel.ai/search/search-quickstart).

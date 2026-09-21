@@ -26,17 +26,17 @@ from src.services.deep_search.feature_schemas.schemas import (
 from src.services.deep_search.requirement_interpretation import UserRequirementsInterpretation
 
 _DAYCARE_ENTRY = {
-    "taxonomy_node": "daycare",
+    "taxonomy_node": "child_care_agency",
     "reasoning": (
         "The persona fact that they have a four-year-old who needs care during the "
-        "workday supports daycare as a distinct need from the explicit gym."
+        "workday supports child_care_agency as a distinct need from the explicit gym."
     ),
 }
 _PHARMACY_ENTRY = {
     "taxonomy_node": "pharmacy",
     "reasoning": (
         "The persona fact that they take weekly prescription medication supports "
-        "pharmacy as a distinct need from gym and daycare."
+        "pharmacy as a distinct need from gym and child_care_agency."
     ),
 }
 _PARK_ENTRY = {
@@ -218,7 +218,7 @@ async def test_one_valid_distinct_node_stamps_id_after_extracted_max() -> None:
 
     assert len(state.inferred_categories) == 1
     stored = state.inferred_categories[0]
-    assert stored.taxonomy_node == "daycare"
+    assert stored.taxonomy_node == "child_care_agency"
     assert stored.category_id == 2
     assert stored.reasoning == _DAYCARE_ENTRY["reasoning"]
 
@@ -231,7 +231,7 @@ async def test_two_valid_distinct_nodes_get_consecutive_ids() -> None:
     await interpretation.run_persona_driven_category_inference(state)
 
     assert [entry.taxonomy_node for entry in state.inferred_categories] == [
-        "daycare",
+        "child_care_agency",
         "pharmacy",
     ]
     assert [entry.category_id for entry in state.inferred_categories] == [2, 3]
@@ -252,7 +252,7 @@ async def test_one_collision_plus_sibling_keeps_sibling_and_logs(
         await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
-    assert state.inferred_categories[0].taxonomy_node == "daycare"
+    assert state.inferred_categories[0].taxonomy_node == "child_care_agency"
     assert state.inferred_categories[0].category_id == 2
     assert "exact_explicit_duplicate" in caplog.text
     assert [
@@ -277,7 +277,7 @@ async def test_duplicate_inferred_node_keeps_first(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     duplicate = {
-        "taxonomy_node": "daycare",
+        "taxonomy_node": "child_care_agency",
         "reasoning": "A later repeat of the same inferred node.",
     }
     provider = FakeStructuredProvider(bodies=[_body(_DAYCARE_ENTRY, duplicate)])
@@ -288,7 +288,7 @@ async def test_duplicate_inferred_node_keeps_first(
         await interpretation.run_persona_driven_category_inference(state)
 
     assert len(state.inferred_categories) == 1
-    assert state.inferred_categories[0].taxonomy_node == "daycare"
+    assert state.inferred_categories[0].taxonomy_node == "child_care_agency"
     assert state.inferred_categories[0].reasoning == _DAYCARE_ENTRY["reasoning"]
     assert "duplicate_inferred_node" in caplog.text
 
@@ -342,7 +342,7 @@ async def test_no_explicit_categories_numbering_starts_at_zero() -> None:
 
     assert len(state.inferred_categories) == 1
     assert state.inferred_categories[0].category_id == 0
-    assert state.inferred_categories[0].taxonomy_node == "daycare"
+    assert state.inferred_categories[0].taxonomy_node == "child_care_agency"
 
 
 async def test_instruction_only_step2_negation_and_thin_evidence_are_not_clamped() -> None:

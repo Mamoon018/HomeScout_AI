@@ -292,7 +292,7 @@ characteristics), inferred `dog_park` (`operating_details`, reasoning about a ne
 adopted dog that needs off-leash time), inferred `library` (`basic_profile`, reasoning
 about a student in the household). One leftover characteristic flag ("not too crowded" on
 the pool). Payload is new wording. The seed does not reuse the worked-pair nodes or
-wording (restaurant, gym, pharmacy, daycare). Mechanisms 1 to 5 are not called. One live
+wording (restaurant, gym, pharmacy, child_care_agency). Mechanisms 1 to 5 are not called. One live
 metric-definition call.
 
 It builds the responsibility through `create_requirement_interpretation(get_settings())`,

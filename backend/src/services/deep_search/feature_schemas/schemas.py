@@ -631,10 +631,11 @@ class PredefinedMetric:
 # Places searchNearby field-mask tokens (see SEARCH_NEARBY_FIELD_MASK in
 # src/clients/google_places.py). Travel distance/duration for walk/drive/cycle come from
 # `routingSummaries` in that same searchNearby response (one call per mode). Transit is a
-# separate predefined metric (`transit_details`) fetched from the Routes API, one call per
-# transit mode (bus, subway, train). Predefined metrics are fetch-only; derived metrics are
-# not in this catalog. Tool stays "google_maps" for all of these. The label is the exact
-# string used in FIXED_DIMENSIONS_BY_DEPTH so the two lists cannot drift.
+# separate predefined metric (`transit_details`) fetched from the Routes API with
+# travelMode TRANSIT; bus, subway, and train are allowed in that same call (not one call
+# per transit mode). Predefined metrics are fetch-only; derived metrics are not in this
+# catalog. Tool stays "google_maps" for all of these. The label is the exact string used
+# in FIXED_DIMENSIONS_BY_DEPTH so the two lists cannot drift.
 _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "name": "places.displayName",
     "category": "places.primaryType",
@@ -651,7 +652,7 @@ _BASIC_PROFILE_TARGETS: dict[str, str] = {
         "(one call per mode)"
     ),
     "transit_details": (
-        "Routes API, one call per transit mode (bus, subway, train)"
+        "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
     ),
 }
 _OPERATING_DETAILS_TARGETS: dict[str, str] = {

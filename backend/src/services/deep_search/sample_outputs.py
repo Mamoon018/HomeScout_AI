@@ -93,12 +93,12 @@
   {
     "taxonomy_node": "dog_park",
     "category_id": 2,
-    "reasoning": "The persona fact that they adopted a rescue dog last month and walk it twice a day supports a distinct need for dog-friendly outdoor space, such as a dog park, beyond the explicit swimming pool and bookstore."
+    "reasoning": "The persona fact that they adopted a rescue dog last month and walk it twice a day supports a distinct need for dog-friendly outdoor space, such as a dog park, beyond the explicit swimming pool and book_store."
   },
   {
-    "taxonomy_node": "urgent_care_center",
+    "taxonomy_node": "medical_clinic",
     "category_id": 3,
-    "reasoning": "The persona fact that the partner is in the third trimester, together with the stated need for somewhere she can be seen quickly if something feels off, supports urgent care as a distinct information need."
+    "reasoning": "The persona fact that the partner is in the third trimester, together with the stated need for somewhere she can be seen quickly if something feels off, supports a medical clinic as a distinct information need."
   }
 ]
 
@@ -187,7 +187,7 @@
         "band": "basic_profile",
         "resolution_source": {
           "tool": "google_maps",
-          "target": "Routes API, one call per transit mode (bus, subway, train)"
+          "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
         }
       },
       {
@@ -372,7 +372,7 @@
         "band": "basic_profile",
         "resolution_source": {
           "tool": "google_maps",
-          "target": "Routes API, one call per transit mode (bus, subway, train)"
+          "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
         }
       },
       {
@@ -543,7 +543,7 @@
         "band": "basic_profile",
         "resolution_source": {
           "tool": "google_maps",
-          "target": "Routes API, one call per transit mode (bus, subway, train)"
+          "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
         }
       },
       {
@@ -728,7 +728,7 @@
         "band": "basic_profile",
         "resolution_source": {
           "tool": "google_maps",
-          "target": "Routes API, one call per transit mode (bus, subway, train)"
+          "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
         }
       }
     ],

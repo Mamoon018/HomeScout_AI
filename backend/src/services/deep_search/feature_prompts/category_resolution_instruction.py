@@ -160,7 +160,7 @@ _MAPPING_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
         },
         {
             "resolved_categories": [
-                {"taxonomy_node": "daycare", "category_id": 0},
+                {"taxonomy_node": "child_care_agency", "category_id": 0},
                 {"taxonomy_node": "park", "category_id": 1},
             ],
             "unmapped_category_ids": [],

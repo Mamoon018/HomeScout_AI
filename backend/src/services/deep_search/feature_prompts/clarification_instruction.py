@@ -128,7 +128,7 @@ _CLARIFICATION_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
             "resolved_explicit_categories": [
                 {
                     "category_id": 0,
-                    "taxonomy_node": "daycare",
+                    "taxonomy_node": "child_care_agency",
                     "raw_name": "daycare",
                     "characteristics": ["within a short walk"],
                     "provenance": "confident",

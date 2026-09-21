@@ -139,11 +139,11 @@ def _resolved_categories() -> list[ResolvedCategory]:
 
 def _inferred_daycare() -> InferredCategory:
     return InferredCategory(
-        taxonomy_node="daycare",
+        taxonomy_node="child_care_agency",
         category_id=2,
         reasoning=(
             "The persona fact that they have a four-year-old who needs care during the "
-            "workday supports daycare as a distinct need from gym and supermarket."
+            "workday supports child_care_agency as a distinct need from gym and supermarket."
         ),
     )
 
