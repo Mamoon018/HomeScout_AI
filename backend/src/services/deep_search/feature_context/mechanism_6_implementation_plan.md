@@ -139,7 +139,7 @@ Rules surfaced here:
 - `unit` is nullable. `enum_values` is a list that is empty when unused.
 - `taxonomy_node` and `depth` are not on the wire body.
 - `METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"`.
-- Fixed dimensions: `basic_profile` = name, category, address, website, `place_id`, coords, travel distance and duration per mode (walk, drive, transit, cycle), reachability. `operating_details` = those plus hours, contact (phone), rating, review volume, price level. `specific_attributes` = same as `operating_details`.
+- Fixed dimensions: `basic_profile` = name, category, address, website, `place_id`, coords, travel distance and duration per mode (walk, drive, cycle), `transit_details`. `operating_details` = those plus hours, contact (phone), rating, review volume, price level. `specific_attributes` = same as `operating_details`.
 
 `metric_definition_json_schema()` derives from `MetricDefinitionResult` and reuses
 `_apply_strict_object_rules`. It does not inject the taxonomy enum.

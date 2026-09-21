@@ -619,6 +619,24 @@ def test_predefined_metrics_match_fixed_dimensions_and_resolve_from_google_maps(
     operating = PREDEFINED_METRICS_BY_DEPTH["operating_details"]
     assert {metric.band for metric in operating} == {"basic_profile", "operating_details"}
 
+    basic = PREDEFINED_METRICS_BY_DEPTH["basic_profile"]
+    by_label = {metric.label: metric for metric in basic}
+    assert "reachability within a threshold" not in by_label
+    assert "transit_details" in by_label
+    transit = by_label["transit_details"]
+    assert transit.band == "basic_profile"
+    assert transit.resolution_source.tool == "google_maps"
+    assert "Routes API" in transit.resolution_source.target
+    assert "bus" in transit.resolution_source.target
+    assert "subway" in transit.resolution_source.target
+    assert "train" in transit.resolution_source.target
+    for label in (
+        "travel distance per mode (walk, drive, cycle)",
+        "travel duration per mode (walk, drive, cycle)",
+    ):
+        assert "transit" not in label
+        assert label in by_label
+
 
 async def test_compilation_writes_one_plan_per_category_split_by_source() -> None:
     provider = FakeStructuredProvider(

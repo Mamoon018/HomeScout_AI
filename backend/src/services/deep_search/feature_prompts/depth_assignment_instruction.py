@@ -21,10 +21,10 @@ Three levels exist. Higher levels include every band below them.
 
 basic_profile — Is it here, and can I reach it, at what cost?
 Contents: identity (name, category, address, website, place_id, coords) plus accessibility metrics:
-travel distance and duration per mode (walk / drive / transit / cycle) and reachability
-within a sensible threshold.
-Tools later stages may use: Google Maps Places (identity) and Distance Matrix
-(accessibility). Fully Maps-resolvable.
+travel distance and duration per mode (walk / drive / cycle), and transit_details (Routes API,
+one call per bus / subway / train).
+Tools later stages may use: Google Maps Places (identity and walk/drive/cycle
+routingSummaries) and Routes API (transit_details). Fully Maps-resolvable.
 Contract-gated: no. These dimensions are fixed and known-resolvable.
 
 operating_details — Is it any good, and how does it run?

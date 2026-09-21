@@ -51,9 +51,9 @@ _BASIC_PROFILE_DIMENSIONS: tuple[str, ...] = (
     "website",
     "place_id",
     "coordinates",
-    "travel distance per mode (walk, drive, transit, cycle)",
-    "travel duration per mode (walk, drive, transit, cycle)",
-    "reachability within a threshold",
+    "travel distance per mode (walk, drive, cycle)",
+    "travel duration per mode (walk, drive, cycle)",
+    "transit_details",
 )
 _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
     "opening hours",
@@ -629,11 +629,12 @@ class PredefinedMetric:
 
 # Google Maps target for each fixed dimension, keyed by the dimension label. Most targets are
 # Places searchNearby field-mask tokens (see SEARCH_NEARBY_FIELD_MASK in
-# src/clients/google_places.py). Travel and reachability for walk/drive/cycle come from
-# `routingSummaries` in that same searchNearby response (one call per mode); transit travel is
-# fetched from a separate endpoint (Routes API / Distance Matrix). Tool stays "google_maps" for
-# all of these. The label is the exact string used in FIXED_DIMENSIONS_BY_DEPTH so the two lists
-# cannot drift.
+# src/clients/google_places.py). Travel distance/duration for walk/drive/cycle come from
+# `routingSummaries` in that same searchNearby response (one call per mode). Transit is a
+# separate predefined metric (`transit_details`) fetched from the Routes API, one call per
+# transit mode (bus, subway, train). Predefined metrics are fetch-only; derived metrics are
+# not in this catalog. Tool stays "google_maps" for all of these. The label is the exact
+# string used in FIXED_DIMENSIONS_BY_DEPTH so the two lists cannot drift.
 _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "name": "places.displayName",
     "category": "places.primaryType",
@@ -641,17 +642,16 @@ _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "website": "places.websiteUri",
     "place_id": "places.id",
     "coordinates": "places.location",
-    "travel distance per mode (walk, drive, transit, cycle)": (
+    "travel distance per mode (walk, drive, cycle)": (
         "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle "
-        "(one call per mode); Routes API / Distance Matrix for transit"
+        "(one call per mode)"
     ),
-    "travel duration per mode (walk, drive, transit, cycle)": (
+    "travel duration per mode (walk, drive, cycle)": (
         "routingSummaries.legs.duration via searchNearby for walk/drive/cycle "
-        "(one call per mode); Routes API / Distance Matrix for transit"
+        "(one call per mode)"
     ),
-    "reachability within a threshold": (
-        "derived from travel duration (searchNearby routingSummaries for walk/drive/cycle, "
-        "Routes API / Distance Matrix for transit) against the reachability threshold"
+    "transit_details": (
+        "Routes API, one call per transit mode (bus, subway, train)"
     ),
 }
 _OPERATING_DETAILS_TARGETS: dict[str, str] = {
