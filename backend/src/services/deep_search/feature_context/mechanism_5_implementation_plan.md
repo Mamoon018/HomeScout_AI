@@ -296,11 +296,11 @@ From `backend/`:
 
 It seeds a Mechanism-4-style `RequirementInterpretationState` (`state.resolved` set;
 `inferred_categories` already written; every `depth` is `None`). Explicit nodes:
-`climbing_gym` with beginner-class / auto-belay characteristics, `farmers_market` with an
-empty characteristic list. Inferred: `veterinary_clinic` (id after extracted max) with
+`sports_complex` with beginner-class / auto-belay characteristics, `farmers_market` with an
+empty characteristic list. Inferred: `veterinary_care` (id after extracted max) with
 reasoning about a newly adopted cat that still needs vaccinations. Payload: a couple
 moving near a canal, one climbs indoors, they shop outdoor markets, night-shift nurse,
-rescue cat. The seed does not reuse the depth few-shot inputs (gym, supermarket, daycare,
+rescue cat. The seed does not reuse the depth few-shot inputs (gym, supermarket, child_care_agency,
 pharmacy, park, cafe). Mechanisms 1–4 are not called. One live depth call.
 
 It builds the responsibility through `create_requirement_interpretation(get_settings())`,

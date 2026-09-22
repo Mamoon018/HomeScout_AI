@@ -146,7 +146,7 @@ def _resolved_categories() -> list[ResolvedCategory]:
     ]
 
 
-def _inferred(depth: str = "basic_profile", node: str = "daycare") -> InferredCategory:
+def _inferred(depth: str = "basic_profile", node: str = "child_care_agency") -> InferredCategory:
     return InferredCategory(
         taxonomy_node=node,
         category_id=2,
@@ -281,7 +281,7 @@ async def test_valid_mixed_batch_writes_sets_by_id_in_explicit_then_inferred_ord
     assert [(s.category_id, s.taxonomy_node) for s in state.category_metrics] == [
         (0, "gym"),
         (1, "supermarket"),
-        (2, "daycare"),
+        (2, "child_care_agency"),
     ]
     assert _labels(state, 0) == ["Monthly fee", "Dedicated platform present"]
     assert _labels(state, 1) == ["Service speed"]
@@ -618,6 +618,25 @@ def test_predefined_metrics_match_fixed_dimensions_and_resolve_from_google_maps(
     # basic_profile metrics carry the basic_profile band; the operating additions do not.
     operating = PREDEFINED_METRICS_BY_DEPTH["operating_details"]
     assert {metric.band for metric in operating} == {"basic_profile", "operating_details"}
+
+    basic = PREDEFINED_METRICS_BY_DEPTH["basic_profile"]
+    by_label = {metric.label: metric for metric in basic}
+    assert "reachability within a threshold" not in by_label
+    assert "transit_details" in by_label
+    transit = by_label["transit_details"]
+    assert transit.band == "basic_profile"
+    assert transit.resolution_source.tool == "google_maps"
+    assert "Routes API" in transit.resolution_source.target
+    assert "bus" in transit.resolution_source.target
+    assert "subway" in transit.resolution_source.target
+    assert "train" in transit.resolution_source.target
+    assert "one call per" not in transit.resolution_source.target
+    for label in (
+        "travel distance per mode (walk, drive, cycle)",
+        "travel duration per mode (walk, drive, cycle)",
+    ):
+        assert "transit" not in label
+        assert label in by_label
 
 
 async def test_compilation_writes_one_plan_per_category_split_by_source() -> None:

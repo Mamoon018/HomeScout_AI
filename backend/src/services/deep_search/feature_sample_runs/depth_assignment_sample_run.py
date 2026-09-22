@@ -47,7 +47,7 @@ _RULE = "=" * 78
 _EXECUTE_STAGE = "execute_depth_assignment"
 
 # Seeded as after Mechanism 4. Deliberately disjoint from the depth few-shots
-# (those use gym, supermarket, daycare, pharmacy, park, cafe).
+# (those use gym, supermarket, child_care_agency, pharmacy, park, cafe).
 _SAMPLE_PAYLOAD = PayloadRecord(
     normalized_text=(
         "We're looking at a flat near the canal. I climb indoors most weeknights and need "
@@ -95,7 +95,7 @@ def _build_sample_state() -> RequirementInterpretationState:
         resolved_explicit_categories=[
             ResolvedCategory(
                 category_id=0,
-                taxonomy_node="climbing_gym",
+                taxonomy_node="sports_complex",
                 raw_name="a climbing gym with beginner classes and auto-belay",
                 characteristics=["beginner classes", "auto-belay"],
                 provenance="confident",
@@ -117,12 +117,12 @@ def _build_sample_state() -> RequirementInterpretationState:
         resolved=resolved,
         inferred_categories=[
             InferredCategory(
-                taxonomy_node="veterinary_clinic",
+                taxonomy_node="veterinary_care",
                 category_id=2,
                 reasoning=(
                     "The persona fact that they adopted a rescue cat last month that "
                     "still needs its first round of vaccinations supports a veterinary "
-                    "clinic as a distinct need from climbing_gym and farmers_market."
+                    "clinic as a distinct need from sports_complex and farmers_market."
                 ),
             )
         ],

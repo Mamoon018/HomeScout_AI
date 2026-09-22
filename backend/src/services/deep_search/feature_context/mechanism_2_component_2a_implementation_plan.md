@@ -42,7 +42,7 @@ operation or per stage — 2A extends the same class in the same file as Mechani
 
 | File | Owns | Contains |
 | --- | --- | --- |
-| [feature_schemas/amenity_taxonomy.py](../feature_schemas/amenity_taxonomy.py) | Sub-component 3: the maintained taxonomy as data | `AMENITY_TAXONOMY_NODES: tuple[str, ...]` (128 nodes), `TAXONOMY_NODE_SET: frozenset[str]`, `render_taxonomy()` |
+| [feature_schemas/amenity_taxonomy.py](../feature_schemas/amenity_taxonomy.py) | Sub-component 3: the maintained taxonomy as data | `AMENITY_TAXONOMY_NODES: tuple[str, ...]` (478 nodes), `TAXONOMY_NODE_SET: frozenset[str]`, `render_taxonomy()` |
 | [feature_prompts/category_resolution_instruction.py](../feature_prompts/category_resolution_instruction.py) | Sub-components 4 & 5 prompt text | task statements, mapping/resolution rules, worked pairs, `build_taxonomy_mapping_instruction`, `build_flag_resolution_instruction` |
 | [feature_sample_runs/category_resolution_sample_run.py](../feature_sample_runs/category_resolution_sample_run.py) | manual run entry point, terminal output | `SAMPLE_STATE` builder, first-pass and second-pass runs, `main()` |
 

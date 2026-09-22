@@ -47,7 +47,7 @@ _RULE = "=" * 78
 _EXECUTE_STAGE = "execute_category_inference"
 
 # Seeded as after Mechanism 2. Deliberately disjoint from the inference few-shots
-# (those use gym/supermarket, daycare, pharmacy, nightlife, fitness_center).
+# (those use gym/supermarket, child_care_agency, pharmacy, nightlife, fitness_center).
 # Explicit nodes are a lane pool and an independent bookstore. Persona can support
 # a dog-walking need and a prenatal clinic need; restaurants are negated.
 _SAMPLE_PAYLOAD = PayloadRecord(
@@ -106,7 +106,7 @@ def _build_sample_state() -> RequirementInterpretationState:
             ),
             ResolvedCategory(
                 category_id=1,
-                taxonomy_node="bookstore",
+                taxonomy_node="book_store",
                 raw_name="an independent bookstore",
                 characteristics=["within a walk", "Saturday mornings"],
                 provenance="confident",

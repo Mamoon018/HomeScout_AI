@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -183,3 +184,108 @@ class GooglePlacesClient:
             ) from exc
         except google_exceptions.GoogleAPIError as exc:
             raise PlacesClientError("Places searchNearby failed") from exc
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2, Mechanism 1, Component M1.1 — async discovery client
+# ---------------------------------------------------------------------------------
+
+# Discovery is a no-routing searchNearby: the caller supplies a narrow field mask built from
+# the category's pre-defined metrics, so routingSummaries is never requested and no
+# routingParameters are attached. Retry is explicit here because the generated searchNearby
+# method carries no default retry: up to two re-issues on a transient failure with a 2s then
+# 3s backoff, each attempt bounded by a 15s call timeout, then the mapped error.
+_DISCOVERY_CALL_TIMEOUT_SECONDS = 15.0
+_DISCOVERY_RETRY_BACKOFFS_SECONDS = (2.0, 3.0)
+_DISCOVERY_TRANSIENT_ERRORS = (
+    google_exceptions.DeadlineExceeded,
+    google_exceptions.ServiceUnavailable,
+    google_exceptions.ResourceExhausted,
+    google_exceptions.RetryError,
+)
+
+
+def create_places_async_client(settings: Settings) -> "GooglePlacesAsyncClient":
+    """Authenticated async Places client for no-routing discovery searchNearby."""
+    sdk_client = places_v1.PlacesAsyncClient(
+        client_options=ClientOptions(api_key=settings.google_maps_api),
+    )
+    return GooglePlacesAsyncClient(sdk_client)
+
+
+class GooglePlacesAsyncClient:
+    """Async searchNearby for place discovery: no routing, caller-supplied field mask."""
+
+    def __init__(self, client: places_v1.PlacesAsyncClient) -> None:
+        self._client = client
+
+    async def search_nearby_discovery(
+        self,
+        *,
+        latitude: float,
+        longitude: float,
+        radius_meters: float,
+        primary_type: str,
+        field_mask: str,
+        max_result_count: int,
+    ) -> places_v1.SearchNearbyResponse:
+        origin = {"latitude": latitude, "longitude": longitude}
+        request = places_v1.SearchNearbyRequest(
+            included_primary_types=[primary_type],
+            max_result_count=max_result_count,
+            location_restriction=places_v1.SearchNearbyRequest.LocationRestriction(
+                circle=places_v1.types.Circle(center=origin, radius=radius_meters),
+            ),
+            rank_preference=places_v1.SearchNearbyRequest.RankPreference.DISTANCE,
+        )
+        metadata = (("x-goog-fieldmask", field_mask),)
+
+        logger.info(
+            json.dumps(
+                {
+                    "endpoint": "places.searchNearby.discovery",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "radius_meters": radius_meters,
+                    "primary_type": primary_type,
+                    "max_result_count": max_result_count,
+                }
+            )
+        )
+
+        last_exc: Exception | None = None
+        for attempt in range(len(_DISCOVERY_RETRY_BACKOFFS_SECONDS) + 1):
+            try:
+                return await self._client.search_nearby(
+                    request=request,
+                    metadata=metadata,
+                    timeout=_DISCOVERY_CALL_TIMEOUT_SECONDS,
+                )
+            except (
+                google_exceptions.InvalidArgument,
+                google_exceptions.FailedPrecondition,
+            ) as exc:
+                raise PlacesInvalidRequestError(
+                    "Places searchNearby rejected the discovery request"
+                ) from exc
+            except _DISCOVERY_TRANSIENT_ERRORS as exc:
+                last_exc = exc
+                if attempt < len(_DISCOVERY_RETRY_BACKOFFS_SECONDS):
+                    await asyncio.sleep(_DISCOVERY_RETRY_BACKOFFS_SECONDS[attempt])
+                    continue
+            except google_exceptions.GoogleAPIError as exc:
+                raise PlacesClientError("Places searchNearby discovery failed") from exc
+            break
+
+        if isinstance(last_exc, google_exceptions.ResourceExhausted):
+            raise PlacesRateLimitError(
+                "Places searchNearby discovery was rate limited"
+            ) from last_exc
+        raise PlacesTimeoutError(
+            "Places searchNearby discovery timed out after retries"
+        ) from last_exc
+
+    async def aclose(self) -> None:
+        """Close the async transport channel opened by the SDK client."""
+        await self._client.transport.close()

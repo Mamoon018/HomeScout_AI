@@ -51,9 +51,10 @@ _BASIC_PROFILE_DIMENSIONS: tuple[str, ...] = (
     "website",
     "place_id",
     "coordinates",
-    "travel distance per mode (walk, drive, transit, cycle)",
-    "travel duration per mode (walk, drive, transit, cycle)",
-    "reachability within a threshold",
+    "travel distance per mode (walk, drive, cycle)",
+    "travel duration per mode (walk, drive, cycle)",
+    "transit_details",
+    "google_maps_uri",
 )
 _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
     "opening hours",
@@ -61,6 +62,7 @@ _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
     "rating",
     "review volume",
     "price level",
+    "reviews",
 )
 
 # Fixed dimensions later stages fetch for a depth, cumulative by band. Not model output and
@@ -629,11 +631,13 @@ class PredefinedMetric:
 
 # Google Maps target for each fixed dimension, keyed by the dimension label. Most targets are
 # Places searchNearby field-mask tokens (see SEARCH_NEARBY_FIELD_MASK in
-# src/clients/google_places.py). Travel and reachability for walk/drive/cycle come from
-# `routingSummaries` in that same searchNearby response (one call per mode); transit travel is
-# fetched from a separate endpoint (Routes API / Distance Matrix). Tool stays "google_maps" for
-# all of these. The label is the exact string used in FIXED_DIMENSIONS_BY_DEPTH so the two lists
-# cannot drift.
+# src/clients/google_places.py). Travel distance/duration for walk/drive/cycle come from
+# `routingSummaries` in that same searchNearby response (one call per mode). Transit is a
+# separate predefined metric (`transit_details`) fetched from the Routes API with
+# travelMode TRANSIT; bus, subway, and train are allowed in that same call (not one call
+# per transit mode). Predefined metrics are fetch-only; derived metrics are not in this
+# catalog. Tool stays "google_maps" for all of these. The label is the exact string used
+# in FIXED_DIMENSIONS_BY_DEPTH so the two lists cannot drift.
 _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "name": "places.displayName",
     "category": "places.primaryType",
@@ -641,18 +645,18 @@ _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "website": "places.websiteUri",
     "place_id": "places.id",
     "coordinates": "places.location",
-    "travel distance per mode (walk, drive, transit, cycle)": (
+    "travel distance per mode (walk, drive, cycle)": (
         "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle "
-        "(one call per mode); Routes API / Distance Matrix for transit"
+        "(one call per mode)"
     ),
-    "travel duration per mode (walk, drive, transit, cycle)": (
+    "travel duration per mode (walk, drive, cycle)": (
         "routingSummaries.legs.duration via searchNearby for walk/drive/cycle "
-        "(one call per mode); Routes API / Distance Matrix for transit"
+        "(one call per mode)"
     ),
-    "reachability within a threshold": (
-        "derived from travel duration (searchNearby routingSummaries for walk/drive/cycle, "
-        "Routes API / Distance Matrix for transit) against the reachability threshold"
+    "transit_details": (
+        "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
     ),
+    "google_maps_uri": "places.googleMapsUri",
 }
 _OPERATING_DETAILS_TARGETS: dict[str, str] = {
     "opening hours": "places.regularOpeningHours",
@@ -660,6 +664,7 @@ _OPERATING_DETAILS_TARGETS: dict[str, str] = {
     "rating": "places.rating",
     "review volume": "places.userRatingCount",
     "price level": "places.priceLevel",
+    "reviews": "places.reviews",
 }
 
 # Dimensions that operating_details adds on top of basic_profile, in order.
@@ -766,3 +771,56 @@ class RequirementInterpretationState:
     inferred_categories: list[InferredCategory] = field(default_factory=list)
     category_metrics: list[CategoryMetricSet] = field(default_factory=list)
     category_metric_plans: list[CategoryMetricPlan] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 — Mechanism 1, Component M1.1 (Place Discovery) contracts.
+# ---------------------------------------------------------------------------------
+
+# Locked M1.1 caps. Configurable later; kept as module constants like MIN_INPUT_WORD_COUNT.
+DISCOVERY_MAX_RESULTS = 10
+DEFAULT_RADIUS_KM = 2.0
+
+
+@dataclass(frozen=True)
+class GeoPoint:
+    """The listing origin the neighborhood radius is measured from."""
+
+    latitude: float
+    longitude: float
+
+
+@dataclass(frozen=True)
+class DiscoveryRequest:
+    """One validated, no-routing searchNearby call spec for a single category."""
+
+    category_id: int
+    primary_type: str
+    latitude: float
+    longitude: float
+    radius_meters: float
+    field_mask: str
+    max_result_count: int
+
+
+@dataclass(frozen=True)
+class CanonicalPlace:
+    """One deduplicated place; `place` holds the returned fields with no unit conversion."""
+
+    place_id: str
+    place: dict
+
+
+@dataclass
+class AmenitySearchState:
+    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`.
+
+    `discovered_places` is keyed category_id then place_id, so dedup is within a category
+    only (a place matching two categories is one record per category). `radius_km` defaults
+    to DEFAULT_RADIUS_KM.
+    """
+
+    origin: GeoPoint
+    radius_km: float
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)

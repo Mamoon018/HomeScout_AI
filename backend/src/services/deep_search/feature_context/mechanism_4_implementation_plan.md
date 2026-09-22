@@ -287,9 +287,9 @@ From `backend/`:
 `python -m src.services.deep_search.feature_sample_runs.category_inference_sample_run`
 
 It seeds a Mechanism-2-style `RequirementInterpretationState` (`state.resolved` set;
-`swimming_pool` and `bookstore` mapped; persona facts about a rescue dog and a third-trimester
+`swimming_pool` and `book_store` mapped; persona facts about a rescue dog and a third-trimester
 pregnancy; restaurants negated). The seed does not reuse the inference few-shot inputs
-(gym/supermarket, daycare, pharmacy, nightlife, fitness_center). Mechanism 1 and Mechanism 2
+(gym/supermarket, child_care_agency, pharmacy, nightlife, fitness_center). Mechanism 1 and Mechanism 2
 are not called. One live inference call.
 
 It builds the responsibility through `create_requirement_interpretation(get_settings())`,

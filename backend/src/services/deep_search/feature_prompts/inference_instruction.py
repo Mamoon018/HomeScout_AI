@@ -22,7 +22,7 @@ EVIDENCE_RULES = """\
 EVIDENCE
 
 - Infer a node only when persona facts support it as a real information need, not a generic
-  association. "has a four-year-old" can support daycare; "lives in a city" does not support
+  association. "has a four-year-old" can support child_care_agency; "lives in a city" does not support
   a supermarket.
 - Cite the persona facts in `reasoning`. A reader must be able to see which facts back the
   inference.
@@ -61,7 +61,7 @@ NEGATION_RULE = """\
 NEGATION
 
 - A category the persona facts negate must not be inferred. "no interest in nightlife" does
-  not support nightclub or bar."""
+  not support night_club or bar."""
 
 NEGATIVE_RULES = """\
 DO NOT
@@ -139,10 +139,10 @@ _INFERENCE_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
         {
             "inferred_categories": [
                 {
-                    "taxonomy_node": "daycare",
+                    "taxonomy_node": "child_care_agency",
                     "reasoning": (
                         "The persona fact that they have a four-year-old who needs care "
-                        "during the workday supports daycare as a distinct information "
+                        "during the workday supports child_care_agency as a distinct information "
                         "need from the explicit gym."
                     ),
                 }
@@ -217,10 +217,10 @@ _INFERENCE_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
         {
             "inferred_categories": [
                 {
-                    "taxonomy_node": "daycare",
+                    "taxonomy_node": "child_care_agency",
                     "reasoning": (
                         "The persona fact that they have a four-year-old who needs care "
-                        "during the workday supports daycare, which is not recoverable "
+                        "during the workday supports child_care_agency, which is not recoverable "
                         "from the explicit gym."
                     ),
                 },
@@ -228,7 +228,7 @@ _INFERENCE_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                     "taxonomy_node": "pharmacy",
                     "reasoning": (
                         "The persona fact that they take weekly prescription medication "
-                        "supports pharmacy as a second distinct need from gym and daycare."
+                        "supports pharmacy as a second distinct need from gym and child_care_agency."
                     ),
                 },
             ]

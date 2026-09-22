@@ -139,7 +139,7 @@ Rules surfaced here:
 - `unit` is nullable. `enum_values` is a list that is empty when unused.
 - `taxonomy_node` and `depth` are not on the wire body.
 - `METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"`.
-- Fixed dimensions: `basic_profile` = name, category, address, website, `place_id`, coords, travel distance and duration per mode (walk, drive, transit, cycle), reachability. `operating_details` = those plus hours, contact (phone), rating, review volume, price level. `specific_attributes` = same as `operating_details`.
+- Fixed dimensions: `basic_profile` = name, category, address, website, `place_id`, coords, travel distance and duration per mode (walk, drive, cycle), `transit_details`. `operating_details` = those plus hours, contact (phone), rating, review volume, price level. `specific_attributes` = same as `operating_details`.
 
 `metric_definition_json_schema()` derives from `MetricDefinitionResult` and reuses
 `_apply_strict_object_rules`. It does not inject the taxonomy enum.
@@ -292,7 +292,7 @@ characteristics), inferred `dog_park` (`operating_details`, reasoning about a ne
 adopted dog that needs off-leash time), inferred `library` (`basic_profile`, reasoning
 about a student in the household). One leftover characteristic flag ("not too crowded" on
 the pool). Payload is new wording. The seed does not reuse the worked-pair nodes or
-wording (restaurant, gym, pharmacy, daycare). Mechanisms 1 to 5 are not called. One live
+wording (restaurant, gym, pharmacy, child_care_agency). Mechanisms 1 to 5 are not called. One live
 metric-definition call.
 
 It builds the responsibility through `create_requirement_interpretation(get_settings())`,
