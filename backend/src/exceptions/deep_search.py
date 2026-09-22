@@ -152,3 +152,27 @@ class MetricDefinitionValidationError(MetricDefinitionError):
     """Raised when a returned body failed the metric-definition schema or id coverage."""
 
     stage: ClassVar[str] = "execute_metric_definition"
+
+
+class PlaceDiscoveryError(Exception):
+    """Base failure surface of Responsibility 2 Mechanism 1 Component M1.1 (place discovery)."""
+
+    # Named so a caller can report which stage exited without reading a traceback.
+    stage: ClassVar[str] = "unknown"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class PlaceDiscoveryRequestError(PlaceDiscoveryError):
+    """Raised when the origin, radius, node, or field set cannot build a valid request."""
+
+    stage: ClassVar[str] = "build_discovery_request"
+
+
+class PlaceDiscoveryCallError(PlaceDiscoveryError):
+    """Raised when the searchNearby discovery call failed after its retries."""
+
+    stage: ClassVar[str] = "execute_discovery"

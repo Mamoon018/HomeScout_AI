@@ -2244,17 +2244,18 @@ Predefined‑metric catalog unchanged from the last table (reachability removed;
 
 R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_specs.
 
-### Component M1.1 — Place Discovery (Agent 1)
+### Component M1.1 — Place Discovery 
 
 Goal of Component (ordered):
 
-(Trigger: per CategorySpec.) Map taxonomy_node → a single Google primaryType using the place‑types reference.
+(Trigger: per CategorySpec.)
 Issue a Nearby Search (New) bounded by locationRestriction (circle: center state.origin, radius state.radius km → meters), includedPrimaryTypes = [mapped type], maxResultCount = 3, field mask = the basic_profile + operating_details targets + places.id. No routingParameters, no transit.
 Freeze the returned places as the canonical set for that category, keyed by place.id.
 
 Problem It Aims to Solve: Establishes the candidate amenities and the place.id identity every later step joins on; freezing the set makes enrichment and attachment deterministic.
 
-#### Finalized Approach: Agent‑driven discovery via the Places API tool, taxonomy→type mapping from the place‑types doc, Nearby Search (New) with includedPrimaryTypes.
+Finalized Approach:
+discovery via the Places API call Nearby Search (New) with includedPrimaryTypes.
 
 Mandatory Sub‑Tasks Independent of Approaches Taken: field mask = exactly basic + operating targets + places.id; apply radius as a hard locationRestriction; freeze the set (no later rediscovery); dedup within a category by place_id.
 
@@ -2264,6 +2265,60 @@ Search endpoint: Nearby Search (New) — and Nearby remains the path even on a w
 Type‑mapping granularity: one primaryType per node.
 Candidate volume: maxResultCount = 3, kept configurable for future tuning.
 Radius: default 2 km, hard locationRestriction, km→m conversion at call time.
+
+##### Sub-component M1.1.a — Nearby Search Request Builder
+Goal of Component: Assemble a valid Nearby Search (New) request per category, holding the locationRestriction circle, includedPrimaryTypes, maxResultCount, and the field mask.
+
+Problem it Aims to Solve: The endpoint requires a precise request object plus a field mask that names exactly the fields to return. The field mask sets both cost and which metrics come back. Without a builder, the request is assembled ad hoc and drifts between categories.
+
+Finalized Approach: A builder function that composes the request object field by field.
+
+Critical Decision Choices:
+
+Generic: field-mask construction, and request-object input validation before send (confirm origin, radius, and taxonomy_node are present and well formed).
+Context-specific: the field mask carries only the basic_profile and operating_details targets plus places.id (no routingParameters, no transit, per the locked M1.1 scope). includedPrimaryTypes is set to [taxonomy_node] used directly. locationRestriction is a circle centered on state.origin with radius converted from km to meters (default 2 km). maxResultCount is set to 3 and kept as a configurable value.
+
+##### Sub-component M1.1.b — Search Execution and Failure Handling
+
+Goal of Component: Issue the Nearby call, apply retry on transient failure, and return the raw places array or a typed failure.
+
+Problem it Aims to Solve: The call can fail on network or rate-limit conditions. Downstream cannot consume an unvalidated or missing response. The locked decision is that Nearby stays the path even on a weak result, so there is no alternate endpoint fallback.
+
+Finalized Approach: Google client library call that supplies its own retry. Open verification before build: do not assume the Places client library retries the Nearby call automatically. Check the client's behavior, and if it does not retry the Nearby call, add an explicit retry wrapper around it.
+
+Critical Decision Choices:
+
+Generic: retry backoff intervals of 2 seconds and 3 seconds, a per-call timeout of 15 seconds, and a defined predictable error type returned on total failure.
+Context-specific: retry re-issues the same Nearby request (no switch to Text Search). Execution runs through the shared async layer with 3 concurrent per-category searches. The rate-limit substrate must keep those 3 concurrent searches within the tool's limits.
+
+##### Sub-component M1.1.c — Canonical Place Set Assembly and Within-Category Dedup
+
+Goal of Component: Convert the raw response into the frozen canonical place set for the category, keyed by place_id, deduplicated within the category, carrying the basic and operating fields, and hold it in state.discovered_places.
+
+Problem it Aims to Solve: Enrichment and attachment operate on a fixed set. Duplicates inside a category cause repeated enrichment calls. Without a freeze step, a later stage could re-search and change the set.
+
+Finalized Approach: A dictionary keyed by place_id per category, stored in state.discovered_places.
+
+Critical Decision Choices:
+Generic: the collection type is the per-category place_id dictionary held in state.discovered_places.
+Context-specific: the dedup key is place_id and dedup runs within a category only, not across categories (per D7). Basic and operating fields are stored as returned at this stage. Conversion to km and minutes and absence flagging are deferred to M1.3. After dedup, the set is frozen.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 ### Component M1.2 — Accessibility Enrichment (Agent 2)
@@ -2311,43 +2366,67 @@ Contract versioning: version tag on the record shape for downstream stability.
 
 #### Output contract — AmenityRecord (one per amenity per category):
 
-Field	Type	Content
-contract_version	str	schema version tag
-category_id	int	from CategorySpec
-taxonomy_node	str	from CategorySpec
-place_id	str	places.id — identity/join key
-name	str	places.displayName
-category	str	places.primaryType
-address	str	places.formattedAddress
-website	str | null	places.websiteUri
-coordinates	{lat,lng}	places.location
-opening_hours	obj | null	places.regularOpeningHours
-contact_phone	str | null	places.internationalPhoneNumber
-rating	float | null	places.rating
-review_volume	int | null	places.userRatingCount
-price_level	enum | null	places.priceLevel
-routing	map<{walk,drive,cycle} → {distance_km:float|null, duration_min:float|null}>	from per‑mode routingSummaries
-transit	{distance_km:float|null, duration_min:float|null, details:obj|null} | null	computeRoutes legs duration/distance + transitDetails
-_absent	set[str]	metric labels the API didn't return (consumed later by C4.1)
-Before / After State
+| Field | Type | Content |
+|---|---|---|
+| contract_version | str | schema version tag |
+| category_id | int | from CategorySpec |
+| taxonomy_node | str | from CategorySpec |
+| place_id | str | places.id — identity/join key |
+| name | str | places.displayName |
+| category | str | places.primaryType |
+| address | str | places.formattedAddress |
+| website | str \| null | places.websiteUri |
+| coordinates | {lat,lng} | places.location |
+| opening_hours | obj \| null | places.regularOpeningHours |
+| contact_phone | str \| null | places.internationalPhoneNumber |
+| rating | float \| null | places.rating |
+| review_volume | int \| null | places.userRatingCount |
+| price_level | enum \| null | places.priceLevel |
+| routing | map&lt;{walk,drive,cycle} → {distance_km:float\|null, duration_min:float\|null}&gt; | from per-mode routingSummaries |
+| transit | {distance_km:float\|null, duration_min:float\|null, details:obj\|null} \| null | computeRoutes legs duration/distance + transitDetails |
+| _absent | set[str] | metric labels the API didn't return (consumed later by C4.1) |
 
-#### AmenitySearchState: origin, radius, category_specs (inputs); discovered_places, enrichment (transient), amenity_records (output).
+#### AmenitySearchState: 
 
-State field	Before M1	After M1.1	After M1.2	After M1.3
-origin	set	set	set	set
-radius	set	set	set	set
-category_specs	set	set	set	set
-discovered_places	∅	populated (frozen, per category)	unchanged	unchanged
-enrichment	∅	∅	populated (routing+transit by place_id)	discarded
-amenity_records	∅	∅	∅	populated — M1 output
+origin, radius, category_specs (inputs); discovered_places, enrichment (transient), amenity_records (final output).
 
-Finalized assumptions: radius input in km (default 2 km) → meters for APIs; all output distances km, durations minutes; transit departureTime = now; LLM reasoning used only for taxonomy→primaryType mapping (search parameterization, enrichment calls, and attachment are deterministic); type mapping cached per taxonomy_node.
+| State field | Before M1 | After M1.1 | After M1.2 | After M1.3 |
+|---|---|---|---|---|
+| origin | set | set | set | set |
+| radius | set | set | set | set |
+| category_specs | set | set | set | set |
+| discovered_places | ∅ | populated (frozen, per category) | unchanged | unchanged |
+| enrichment | ∅ | ∅ | populated (routing + transit by place_id) | discarded |
+| amenity_records | ∅ | ∅ | ∅ | populated — M1 output |
+
+### Finalized assumptions: 
+radius input in km (default 2 km) → meters for APIs; all output distances km, durations minutes; transit departureTime = now; LLM reasoning used only for taxonomy→primaryType mapping (search parameterization, enrichment calls, and attachment are deterministic); type mapping cached per taxonomy_node.
+
 ---
 
 
 
 
-### These Mechanisms show what needs to be done but they are not yet finalized:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### These Mechanisms of responsibility - 2 show what needs to be done but they are not yet finalized:
 M2 — Correctness Filtering & Representative Narrowing
 Component C2.1 — Category‑Correctness Filter
 

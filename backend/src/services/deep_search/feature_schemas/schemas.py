@@ -54,6 +54,7 @@ _BASIC_PROFILE_DIMENSIONS: tuple[str, ...] = (
     "travel distance per mode (walk, drive, cycle)",
     "travel duration per mode (walk, drive, cycle)",
     "transit_details",
+    "google_maps_uri",
 )
 _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
     "opening hours",
@@ -61,6 +62,7 @@ _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
     "rating",
     "review volume",
     "price level",
+    "reviews",
 )
 
 # Fixed dimensions later stages fetch for a depth, cumulative by band. Not model output and
@@ -654,6 +656,7 @@ _BASIC_PROFILE_TARGETS: dict[str, str] = {
     "transit_details": (
         "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
     ),
+    "google_maps_uri": "places.googleMapsUri",
 }
 _OPERATING_DETAILS_TARGETS: dict[str, str] = {
     "opening hours": "places.regularOpeningHours",
@@ -661,6 +664,7 @@ _OPERATING_DETAILS_TARGETS: dict[str, str] = {
     "rating": "places.rating",
     "review volume": "places.userRatingCount",
     "price level": "places.priceLevel",
+    "reviews": "places.reviews",
 }
 
 # Dimensions that operating_details adds on top of basic_profile, in order.
@@ -767,3 +771,56 @@ class RequirementInterpretationState:
     inferred_categories: list[InferredCategory] = field(default_factory=list)
     category_metrics: list[CategoryMetricSet] = field(default_factory=list)
     category_metric_plans: list[CategoryMetricPlan] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 — Mechanism 1, Component M1.1 (Place Discovery) contracts.
+# ---------------------------------------------------------------------------------
+
+# Locked M1.1 caps. Configurable later; kept as module constants like MIN_INPUT_WORD_COUNT.
+DISCOVERY_MAX_RESULTS = 10
+DEFAULT_RADIUS_KM = 2.0
+
+
+@dataclass(frozen=True)
+class GeoPoint:
+    """The listing origin the neighborhood radius is measured from."""
+
+    latitude: float
+    longitude: float
+
+
+@dataclass(frozen=True)
+class DiscoveryRequest:
+    """One validated, no-routing searchNearby call spec for a single category."""
+
+    category_id: int
+    primary_type: str
+    latitude: float
+    longitude: float
+    radius_meters: float
+    field_mask: str
+    max_result_count: int
+
+
+@dataclass(frozen=True)
+class CanonicalPlace:
+    """One deduplicated place; `place` holds the returned fields with no unit conversion."""
+
+    place_id: str
+    place: dict
+
+
+@dataclass
+class AmenitySearchState:
+    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`.
+
+    `discovered_places` is keyed category_id then place_id, so dedup is within a category
+    only (a place matching two categories is one record per category). `radius_km` defaults
+    to DEFAULT_RADIUS_KM.
+    """
+
+    origin: GeoPoint
+    radius_km: float
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
