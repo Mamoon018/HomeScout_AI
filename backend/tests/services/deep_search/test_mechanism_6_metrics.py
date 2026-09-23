@@ -622,15 +622,19 @@ def test_predefined_metrics_match_fixed_dimensions_and_resolve_from_google_maps(
     basic = PREDEFINED_METRICS_BY_DEPTH["basic_profile"]
     by_label = {metric.label: metric for metric in basic}
     assert "reachability within a threshold" not in by_label
-    assert "transit_details" in by_label
-    transit = by_label["transit_details"]
-    assert transit.band == "basic_profile"
-    assert transit.resolution_source.tool == "google_maps"
-    assert "Routes API" in transit.resolution_source.target
-    assert "bus" in transit.resolution_source.target
-    assert "subway" in transit.resolution_source.target
-    assert "train" in transit.resolution_source.target
-    assert "one call per" not in transit.resolution_source.target
+    # Transit is re-scoped to distance + duration (parallel to walk/drive/cycle), resolved from
+    # the Routes API computeRouteMatrix, rather than a single transit_details metric.
+    assert "transit_details" not in by_label
+    for transit_label in ("transit travel distance", "transit travel duration"):
+        assert transit_label in by_label
+        transit = by_label[transit_label]
+        assert transit.band == "basic_profile"
+        assert transit.resolution_source.tool == "google_maps"
+        target = transit.resolution_source.target
+        assert "Routes API" in target and "computeRouteMatrix" in target
+        assert "TRANSIT" in target
+        assert "bus" in target and "subway" in target and "train" in target
+        assert "one call per" not in target
     for label in (
         "travel distance per mode (walk, drive, cycle)",
         "travel duration per mode (walk, drive, cycle)",
