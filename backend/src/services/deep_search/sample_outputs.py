@@ -1258,3 +1258,243 @@
   }
 }
 
+
+
+
+
+# ==============================================================================
+# STATE.ENRICHMENT (FINAL - written onto the handoff state)
+# ==============================================================================
+{
+  "ChIJY4ZI450JvUcRjTDtxXhyNi4": {
+    "routing": {
+      "walk": {
+        "distance_m": 1054,
+        "duration_s": 882
+      },
+      "drive": {
+        "distance_m": 1244,
+        "duration_s": 200
+      },
+      "cycle": {
+        "distance_m": 2163,
+        "duration_s": 389
+      }
+    },
+    "transit": {
+      "distance_m": 1054,
+      "duration_s": 882,
+      "used_fallback": false
+    }
+  },
+  "ChIJ8XQv_QIJvUcROkzXexWdpvo": {
+    "routing": {
+      "walk": {
+        "distance_m": 406,
+        "duration_s": 332
+      },
+      "drive": {
+        "distance_m": 768,
+        "duration_s": 231
+      },
+      "cycle": {
+        "distance_m": 406,
+        "duration_s": 69
+      }
+    },
+    "transit": {
+      "distance_m": 406,
+      "duration_s": 332,
+      "used_fallback": false
+    }
+  },
+  "ChIJb639J9UJvUcRQ7zplnNAkC0": {
+    "routing": {
+      "walk": {
+        "distance_m": 432,
+        "duration_s": 353
+      },
+      "drive": {
+        "distance_m": 827,
+        "duration_s": 249
+      },
+      "cycle": {
+        "distance_m": 432,
+        "duration_s": 76
+      }
+    },
+    "transit": {
+      "distance_m": 432,
+      "duration_s": 353,
+      "used_fallback": false
+    }
+  },
+  "ChIJ3ThJAmwJvUcRiJWH23UG-F0": {
+    "routing": {
+      "walk": {
+        "distance_m": 1126,
+        "duration_s": 979
+      },
+      "drive": {
+        "distance_m": 2038,
+        "duration_s": 413
+      },
+      "cycle": {
+        "distance_m": 1396,
+        "duration_s": 294
+      }
+    },
+    "transit": {
+      "distance_m": 1159,
+      "duration_s": 387,
+      "used_fallback": false
+    }
+  },
+  "ChIJCwqRAAAJvUcRV9YCH7wnLw8": {
+    "routing": {
+      "walk": {
+        "distance_m": 1011,
+        "duration_s": 895
+      },
+      "drive": {
+        "distance_m": 1439,
+        "duration_s": 277
+      },
+      "cycle": {
+        "distance_m": 1271,
+        "duration_s": 274
+      }
+    },
+    "transit": {
+      "distance_m": 1034,
+      "duration_s": 381,
+      "used_fallback": false
+    }
+  },
+  "ChIJIVDnAVkJvUcR0QoIz_ep6MA": {
+    "routing": {
+      "walk": {
+        "distance_m": 1377,
+        "duration_s": 1154
+      },
+      "drive": {
+        "distance_m": 1770,
+        "duration_s": 285
+      },
+      "cycle": {
+        "distance_m": 1647,
+        "duration_s": 287
+      }
+    },
+    "transit": {
+      "distance_m": 1416,
+      "duration_s": 437,
+      "used_fallback": false
+    }
+  },
+  "ChIJWxyNJKoJvUcRWzaRMflxw5o": {
+    "routing": {
+      "walk": {
+        "distance_m": 1416,
+        "duration_s": 1183
+      },
+      "drive": {
+        "distance_m": 1463,
+        "duration_s": 223
+      },
+      "cycle": {
+        "distance_m": 1463,
+        "duration_s": 343
+      }
+    },
+    "transit": {
+      "distance_m": 1478,
+      "duration_s": 554,
+      "used_fallback": false
+    }
+  },
+  "ChIJi4FnoFYJvUcRlv2TFQfMI40": {
+    "routing": {
+      "walk": {
+        "distance_m": 1650,
+        "duration_s": 1435
+      },
+      "drive": {
+        "distance_m": 2874,
+        "duration_s": 382
+      },
+      "cycle": {
+        "distance_m": 2277,
+        "duration_s": 503
+      }
+    },
+    "transit": {
+      "distance_m": 2069,
+      "duration_s": 1060,
+      "used_fallback": false
+    }
+  },
+  "ChIJ2WrzCwAJvUcRkdQ0_vvX6Qg": {
+    "routing": {
+      "walk": {
+        "distance_m": 2073,
+        "duration_s": 1731
+      },
+      "drive": {
+        "distance_m": 3241,
+        "duration_s": 519
+      },
+      "cycle": {
+        "distance_m": 2250,
+        "duration_s": 485
+      }
+    },
+    "transit": {
+      "distance_m": 2920,
+      "duration_s": 925,
+      "used_fallback": false
+    }
+  },
+  "ChIJjy3sREcJvUcR6HXVuNC9D74": {
+    "routing": {
+      "walk": {
+        "distance_m": 1505,
+        "duration_s": 1307
+      },
+      "drive": {
+        "distance_m": 2533,
+        "duration_s": 447
+      },
+      "cycle": {
+        "distance_m": 1875,
+        "duration_s": 379
+      }
+    },
+    "transit": {
+      "distance_m": 1652,
+      "duration_s": 409,
+      "used_fallback": false
+    }
+  },
+  "ChIJtxtvpJsJvUcR53-lMBQWKzE": {
+    "routing": {
+      "walk": {
+        "distance_m": 1740,
+        "duration_s": 1452
+      },
+      "drive": {
+        "distance_m": 1928,
+        "duration_s": 369
+      },
+      "cycle": {
+        "distance_m": 2459,
+        "duration_s": 513
+      }
+    },
+    "transit": {
+      "distance_m": 2414,
+      "duration_s": 773,
+      "used_fallback": false
+    }
+  }
+}
