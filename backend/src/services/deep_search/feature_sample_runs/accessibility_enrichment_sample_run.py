@@ -32,7 +32,6 @@ from src.services.deep_search.amenity_search import (
 from src.services.deep_search.feature_schemas.schemas import (
     DEFAULT_RADIUS_KM,
     PREDEFINED_METRICS_BY_DEPTH,
-    Absence,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
@@ -107,20 +106,20 @@ class _RecordCollector(logging.Handler):
         return [record for record in self.records if record.get("event") in names]
 
 
-def _describe_route(value: RouteLeg | Absence) -> dict:
+def _describe_route(value: RouteLeg | None) -> dict:
     if isinstance(value, RouteLeg):
         return {"distance_m": value.distance_m, "duration_s": value.duration_s}
-    return {"absent": value.reason}
+    return {"absent": True}
 
 
-def _describe_transit(value: TransitLeg | Absence) -> dict:
+def _describe_transit(value: TransitLeg | None) -> dict:
     if isinstance(value, TransitLeg):
         return {
             "distance_m": value.distance_m,
             "duration_s": value.duration_s,
             "used_fallback": value.used_fallback,
         }
-    return {"absent": value.reason}
+    return {"absent": True}
 
 
 def _describe_bundle(bundle) -> dict:

@@ -850,27 +850,19 @@ class TransitLeg:
 
 
 @dataclass(frozen=True)
-class Absence:
-    """Typed 'no routable result' marker: distinct from a real leg so callers must narrow first.
-
-    `no_route` — the API returned the place but reported no routable result for it.
-    `not_returned` — the place was not present in that mode's result at all.
-    """
-
-    reason: Literal["no_route", "not_returned"]
-
-
-@dataclass(frozen=True)
 class EnrichmentBundle:
     """One place's accessibility, keyed by the deduplicated union of place_ids across categories.
 
-    `routing` carries every mode in ROUTING_MODES, each a RouteLeg or an Absence. `transit` is a
-    TransitLeg or an Absence. Units stay raw; conversion happens in M1.3.
+    `routing` carries every mode in ROUTING_MODES, each a RouteLeg or None when that mode returned
+    no leg. `transit` is a TransitLeg or None when no route was returned. A None leg is a nullable
+    value the caller must narrow before reading distance_m/duration_s; the reason for absence is
+    not stored here — M1.3 derives it from the record's depth. Units stay raw; conversion happens
+    in M1.3.
     """
 
     place_id: str
-    routing: dict[str, RouteLeg | Absence]
-    transit: TransitLeg | Absence
+    routing: dict[str, RouteLeg | None]
+    transit: TransitLeg | None
 
 
 @dataclass

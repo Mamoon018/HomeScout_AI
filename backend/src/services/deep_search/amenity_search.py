@@ -28,7 +28,6 @@ from src.services.deep_search.feature_schemas.schemas import (
     DISCOVERY_MAX_RESULTS,
     ROUTING_MODES,
     TRANSIT_MATRIX_MAX_DESTINATIONS,
-    Absence,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
@@ -414,7 +413,7 @@ class AmenitySearch:
         self,
         place_index: dict[str, GeoPoint],
         origin: GeoPoint,
-    ) -> dict[str, TransitLeg | Absence]:
+    ) -> dict[str, TransitLeg | None]:
         """M1.2.b: batched TRANSIT computeRouteMatrix; each element mapped back to its place_id."""
         place_ids = list(place_index)
         departure_time = datetime.now(timezone.utc)
@@ -428,7 +427,7 @@ class AmenitySearch:
                 for batch in batches
             )
         )
-        transit_by_place: dict[str, TransitLeg | Absence] = {}
+        transit_by_place: dict[str, TransitLeg | None] = {}
         for partial in results:
             transit_by_place.update(partial)
         return transit_by_place
@@ -439,7 +438,7 @@ class AmenitySearch:
         place_index: dict[str, GeoPoint],
         origin: GeoPoint,
         departure_time: datetime,
-    ) -> dict[str, TransitLeg | Absence]:
+    ) -> dict[str, TransitLeg | None]:
         """One matrix batch (≤ cap destinations); map each element back to its place_id."""
         destinations = [
             (place_index[place_id].latitude, place_index[place_id].longitude)
@@ -458,7 +457,7 @@ class AmenitySearch:
                     stage="retrieve_transit",
                 ) from exc
 
-        result: dict[str, TransitLeg | Absence] = {}
+        result: dict[str, TransitLeg | None] = {}
         for element in elements:
             if not 0 <= element.destination_index < len(batch_ids):
                 continue
@@ -470,10 +469,10 @@ class AmenitySearch:
                     used_fallback=_element_used_fallback(element),
                 )
             else:
-                result[place_id] = Absence(reason="no_route")
-        # A place whose element never arrived is recorded absent rather than dropped.
+                result[place_id] = None
+        # A place whose element never arrived is recorded null rather than dropped.
         for place_id in batch_ids:
-            result.setdefault(place_id, Absence(reason="no_route"))
+            result.setdefault(place_id, None)
         logger.info(
             json.dumps(
                 {
@@ -490,21 +489,23 @@ class AmenitySearch:
         self,
         place_ids: list[str],
         routing: dict[str, dict[str, RouteLeg]],
-        transit: dict[str, TransitLeg | Absence],
+        transit: dict[str, TransitLeg | None],
     ) -> dict[str, EnrichmentBundle]:
-        """M1.2.c: merge routing + transit into one frozen bundle per unique place_id."""
+        """M1.2.c: merge routing + transit into one frozen bundle per unique place_id.
+
+        A mode with no leg, or a place with no transit result, is stored as None; the reason for
+        absence is not recorded (M1.3 derives it from the record's depth).
+        """
         bundles: dict[str, EnrichmentBundle] = {}
         for place_id in place_ids:
             place_routing = routing.get(place_id, {})
-            mode_map: dict[str, RouteLeg | Absence] = {}
-            for mode in ROUTING_MODES:
-                leg = place_routing.get(mode)
-                mode_map[mode] = leg if leg is not None else Absence(reason="not_returned")
-            transit_value = transit.get(place_id, Absence(reason="no_route"))
+            mode_map: dict[str, RouteLeg | None] = {
+                mode: place_routing.get(mode) for mode in ROUTING_MODES
+            }
             bundles[place_id] = EnrichmentBundle(
                 place_id=place_id,
                 routing=mode_map,
-                transit=transit_value,
+                transit=transit.get(place_id),
             )
         return bundles
 

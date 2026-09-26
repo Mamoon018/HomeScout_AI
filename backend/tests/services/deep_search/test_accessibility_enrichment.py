@@ -10,7 +10,6 @@ from src.exceptions.routes import RoutesTimeoutError
 from src.services.deep_search.amenity_search import AmenitySearch
 from src.services.deep_search.feature_schemas.schemas import (
     ROUTING_MODES,
-    Absence,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
@@ -149,8 +148,8 @@ async def test_routing_matched_by_place_id() -> None:
     assert set(routing["p1"]) == set(ROUTING_MODES)
 
 
-async def test_missing_mode_becomes_absence_in_bundle() -> None:
-    # p2 only appears in the walk result, so drive/cycle are "not_returned" for it.
+async def test_missing_mode_becomes_none_in_bundle() -> None:
+    # p2 only appears in the walk result, so drive/cycle are None (no leg) for it.
     per_mode = {
         "walk": _routing_response({"p1": (100, 120), "p2": (200, 240)}),
         "drive": _routing_response({"p1": (150, 60)}),
@@ -168,8 +167,8 @@ async def test_missing_mode_becomes_absence_in_bundle() -> None:
     bundles = search.assemble_enrichment_bundles(list(index), routing, {})
 
     assert bundles["p2"].routing["walk"] == RouteLeg(distance_m=200, duration_s=240)
-    assert bundles["p2"].routing["drive"] == Absence(reason="not_returned")
-    assert bundles["p2"].routing["cycle"] == Absence(reason="not_returned")
+    assert bundles["p2"].routing["drive"] is None
+    assert bundles["p2"].routing["cycle"] is None
 
 
 async def test_routing_failure_raises_typed() -> None:
@@ -222,7 +221,7 @@ async def test_transit_no_route_and_fallback() -> None:
     transit = await search.retrieve_transit(index, GeoPoint(1.0, 2.0))
 
     assert transit["p1"] == TransitLeg(distance_m=500, duration_s=600, used_fallback=False)
-    assert transit["p2"] == Absence(reason="no_route")
+    assert transit["p2"] is None
     assert transit["p3"] == TransitLeg(distance_m=800, duration_s=900, used_fallback=True)
 
 
