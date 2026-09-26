@@ -2242,14 +2242,14 @@ Predefined‑metric catalog unchanged from the last table (reachability removed;
 
 #### Mechanism goal (ordered): (1) discover the canonical places per category → (2) enrich them with routing + transit → (3) deterministically attach and emit one typed record per amenity per category.
 
-R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_specs.
+R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_metric_plans.
 
 ### Component M1.1 — Place Discovery 
 
 Goal of Component (ordered):
 
-(Trigger: per CategorySpec.)
-Issue a Nearby Search (New) bounded by locationRestriction (circle: center state.origin, radius state.radius km → meters), includedPrimaryTypes = [mapped type], maxResultCount = 3, field mask = the basic_profile + operating_details targets + places.id. No routingParameters, no transit.
+(Trigger: per CategoryMetricPlan.)
+Issue a Nearby Search (New) bounded by locationRestriction (circle: center state.origin, radius state.radius km → meters), includedPrimaryTypes = [mapped type], maxResultCount = 10, field mask = the basic_profile + operating_details targets + places.id. No routingParameters, no transit.
 Freeze the returned places as the canonical set for that category, keyed by place.id.
 
 Problem It Aims to Solve: Establishes the candidate amenities and the place.id identity every later step joins on; freezing the set makes enrichment and attachment deterministic.
@@ -2263,7 +2263,7 @@ Mandatory Sub‑Tasks Independent of Approaches Taken: field mask = exactly basi
 
 Search endpoint: Nearby Search (New) — and Nearby remains the path even on a weak/empty result (no Text‑Search fallback).
 Type‑mapping granularity: one primaryType per node.
-Candidate volume: maxResultCount = 3, kept configurable for future tuning.
+Candidate volume: maxResultCount = 10, kept configurable for future tuning.
 Radius: default 2 km, hard locationRestriction, km→m conversion at call time.
 
 ##### Sub-component M1.1.a — Nearby Search Request Builder
@@ -2276,7 +2276,7 @@ Finalized Approach: A builder function that composes the request object field by
 Critical Decision Choices:
 
 Generic: field-mask construction, and request-object input validation before send (confirm origin, radius, and taxonomy_node are present and well formed).
-Context-specific: the field mask carries only the basic_profile and operating_details targets plus places.id (no routingParameters, no transit, per the locked M1.1 scope). includedPrimaryTypes is set to [taxonomy_node] used directly. locationRestriction is a circle centered on state.origin with radius converted from km to meters (default 2 km). maxResultCount is set to 3 and kept as a configurable value.
+Context-specific: the field mask carries only the basic_profile and operating_details targets plus places.id (no routingParameters, no transit, per the locked M1.1 scope). includedPrimaryTypes is set to [taxonomy_node] used directly. locationRestriction is a circle centered on state.origin with radius converted from km to meters (default 2 km). maxResultCount is set to 10 and kept as a configurable value.
 
 ##### Sub-component M1.1.b — Search Execution and Failure Handling
 
@@ -2312,91 +2312,148 @@ Context-specific: the dedup key is place_id and dedup runs within a category onl
 
 
 
+### Component M1.2 — Accessibility Enrichment
 
+Goal of Component: Enrich the frozen canonical places from M1.1 with walk, drive, and cycle routing plus transit travel, producing one typed EnrichmentBundle per unique place_id.
 
+Problem It Aims to Solve: M1.1 discovery excludes routing and transit by design. Those values come from two different sources (Places routingParameters for walk/drive/cycle, the Routes API for transit), so a separate step must fetch them for the fixed place set without altering which places are in it.
 
+Inputs: the frozen canonical places per category (state.discovered_places) and state.origin. Output: one EnrichmentBundle per unique place_id, consumed by M1.3.
 
+Finalized Approach (component level):
+(1) Form the deduplicated union of place_ids across all categories, since routing and transit from the fixed origin do not vary by category.
+(2) Retrieve walk, drive, and cycle routing by re-issuing each category's Nearby search per mode with routingParameters (M1.2.a).
+(3) Retrieve transit distance and duration for the unique place set via computeRouteMatrix with travelMode TRANSIT (M1.2.b).
+(4) Assemble one typed, frozen EnrichmentBundle per unique place_id (M1.2.c).
 
+Scope boundary: the frozen set is not rediscovered or replaced. Units stay raw (meters, seconds); conversion to km and minutes happens in M1.3. Step-level transit details (stops, line, vehicle, headsign, stop count) are not fetched. Attachment onto the final record is M1.3, not here.
 
-
-
-
-### Component M1.2 — Accessibility Enrichment (Agent 2)
-
-Goal of Component (ordered):
-(Trigger: after M1.1; input = the frozen canonical places.) Walk/drive/cycle: for each of the three modes, re‑issue the Nearby search with routingParameters (origin = state.origin, travelMode = <mode>) and read routingSummaries.legs.distanceMeters / .duration, tagging each by place.id.
-Transit: call Routes API computeRoutes per canonical place with origin = state.origin, destination = place.location, travelMode: TRANSIT, departureTime = now (N1), field mask routes.legs.steps.transitDetails + routes.legs.duration + routes.legs.distanceMeters; tag by place.id.
-Return routing + transit results keyed by place.id; do not alter, drop, or rediscover places.
-
-#### Problem It Aims to Solve: routingSummaries need routingParameters (excluded from discovery by design) and transit lives on a different API; both must decorate the frozen set without changing it.
-
-#### Finalized Approach: Places API routingParameters for walk/drive/cycle; Routes API computeRoutes (per place) for transit — see the confirmation callout; every result tagged with place.id.
-
-Mandatory Sub‑Tasks Independent of Approaches Taken: one routing search per non‑transit mode (a routingParameters block carries a single travelMode); set routingParameters.origin = state.origin; transit uses origin = state.origin, destination = place (D‑C2.5); key every result by place.id; mark a mode/transit route absent when the API returns none — never fabricate.
+R1 alignment: the R1 predefined transit metric is re-scoped from transit_details to transit travel distance and duration, matching the walk/drive/cycle distance and duration pattern, with its target pointing at Routes API computeRouteMatrix, travelMode TRANSIT. This is an R1-side schemas.py change carried alongside this component.
 
 #### Critical Decision Choices:
 
-Transit time anchor: departureTime = now (N1).
-Transit scope: transitDetails plus transit duration/distance (N2).
-Call shape: transit via computeRoutes per place (matrix can't return transitDetails; at maxResultCount = 3 per‑place cost is negligible).
-Route‑absent handling: represent as absent, don't fabricate.
-Origin/destination: transit origin = user origin; destinations = canonical places.
+1. Enrichment is keyed by the deduplicated union of place_ids across categories (each place assembled once).
+2. Transit uses computeRouteMatrix (batched, distance and duration only), not computeRoutes; transit details are deferred.
+3. Retry, timeout, and concurrency follow the Nearby discovery call (2s then 3s retry, 15s timeout, semaphore-bounded).
 
-Residual implementation note (for M1.2): because routingSummaries only come back attached to a Nearby search's own results, walk/drive/cycle enrichment re‑issues the discovery search per mode and attaches by place_id; a canonical place absent from a mode's re‑search gets that mode marked absent. This is stable at maxResultCount = 3 with the identical query; if it ever proves fragile, computeRouteMatrix is the drop‑in robust alternative for those three modes (it can't be used for transit, per the callout).
+##### Sub-component M1.2.a — Per-Mode Routing Retrieval (walk, drive, cycle)
+
+Goal of Component: For each of the three non-transit modes, obtain routingSummaries.legs.distanceMeters and routingSummaries.legs.duration for the canonical places, tagged by place_id.
+
+Problem it Aims to Solve: routingSummaries are returned only when a Places search is issued with routingParameters, and M1.1 discovery excluded them. The values must be obtained for the frozen set and matched back to it.
+
+Finalized Approach: Re-issue the category's Nearby search once per mode (walk, drive, cycle) with routingParameters, run the three mode calls concurrently under a bounded-parallel limit, and attach each result to the canonical set by place_id.
+
+Critical Decision Choices:
+
+1. Concurrency, retry, and timeout follow the Nearby discovery call: bounded by the shared semaphore, with the same 2s then 3s retry and 15s per-attempt timeout.
+routingParameters.origin is set to state.origin, and each request carries one travelMode, so the three modes are three calls.
+2. The routing re-search uses a minimal field mask of places.id plus routingSummaries only, because the profile fields already live on the canonical CanonicalPlace.
+3. Results are matched to the canonical set by place_id. A canonical place absent from a given mode's result has that mode recorded as null (values are not fabricated).
+4. Routing re-searches run per category (routingSummaries are returned only with a category search). A place_id that appears in more than one category is routed into a single bundle at assembly, where the first result is kept and the identical duplicate is dropped.
+
+##### Sub-component M1.2.b — Transit Retrieval via computeRouteMatrix
+
+Goal of Component: For the deduplicated union of canonical places, obtain transit distance and duration from state.origin in a single matrix response per batch, tagged by place_id.
+
+Problem it Aims to Solve: Transit is served by a different endpoint. Issuing one computeRoutes call per place is more calls than needed when only travel distance and duration are wanted; a matrix returns all destinations for one origin in a single response.
+
+Finalized Approach: Issue computeRouteMatrix with state.origin as the single origin and the unique places' locations as destinations, returning transit distance and duration for all requested places in one response. TRANSIT limits a request to 100 origin-by-destination elements, so with one origin up to 100 destinations are allowed per request. When the destination count exceeds 100, the places are split into batches of at most 100 destinations and issued as separate matrix requests.
+
+Critical Decision Choices:
+
+1. Retry and timeout are handled the same way as the Nearby search. When multiple matrix batches are required, batch-level requests run concurrently under a bounded-parallel limit.
+2. The implementation keeps a destinationIndex to place_id mapping so each matrix element attaches to the correct frozen canonical place from M1.1.
+3. Origin is state.origin and destinations are the unique places' locations (per D-C2.5). travelMode is TRANSIT and departureTime is the current run time (N1).
+4. The field mask requests originIndex, destinationIndex, status, condition, distanceMeters, duration, and fallbackInfo. Step-level transitDetails are not requested (matrix does not return them, and transit details are not required now).
+5. Destinations are passed as coordinates (the places' locations), not Place IDs or addresses, so the binding limit is the 100-element transit cap rather than the stricter 50-element cap that applies to Place ID or address waypoints.
+6. A place whose matrix element reports no route (a not-found status or a non-routable condition) is recorded as transit absent.
+7. When fallbackInfo is present, the returned distance and duration are kept and the leg is marked used_fallback = true rather than discarded.
+Unit conversion is deferred to M1.3.
+
+##### Sub-component M1.2.c — Enrichment Bundle Assembly
+
+Goal of Component: Combine the per-mode routing results and the transit result for each unique place into one typed record keyed by place_id, with a null leg where no value was returned.
+
+Problem it Aims to Solve: Routing and transit arrive from separate calls in separate shapes. M1.3 needs one predictable per-place structure to join against, and absence must be distinguishable from a real value at the type level.
+
+Finalized Approach: A typed, frozen EnrichmentBundle dataclass per unique place_id. Its routing field is a map from mode to either a typed RouteLeg or None; its transit field is a typed TransitLeg or None. The structure itself is the contract M1.3 joins against: shapes are fixed, and because a missing leg is None (a nullable value) rather than a dict shaped like a real leg, a type checker still forces callers to narrow the Optional before reading fields. The reason for absence is not stored — M1.3 derives it from the record's depth (see M1.3).
+
+Shape of the contract:
+
+| Type | Fields | Meaning |
+|---|---|---|
+| EnrichmentBundle (frozen) | place_id: str · routing: dict[mode, RouteLeg \| None] · transit: TransitLeg \| None | one per unique place_id |
+| RouteLeg (frozen) | distance_m: int · duration_s: int | raw units, per non-transit mode |
+| TransitLeg (frozen) | distance_m: int · duration_s: int · used_fallback: bool | raw units; used_fallback set when fallbackInfo was present |
+
+Critical Decision Choices:
+
+1. The bundle is keyed by the deduplicated union of place_ids across categories. Routing and transit for a place_id do not depend on category (the origin is fixed and the place location is fixed), so each place is assembled once.
+2. Every mode key (walk, drive, cycle) is present in routing, with None where that mode had no result. transit is a TransitLeg or None.
+3. A missing leg is None, not a leg-shaped dict, so a reader must narrow the Optional before reading distance_m or duration_s.
+4. The EnrichmentBundle stays in memory and is consumed by M1.3 in the same process, so no JSON encoder is added here. Serialization happens only at M1.3, where a leg becomes converted values (km, minutes) on the AmenityRecord, used_fallback is carried through, and a None leg becomes a null value on the record (no _absent set is written; request-status is derived from depth).
+
+-
 
 ### Component M1.3 — Deterministic Result Attachment & Output Contract
 
 #### Goal of Component (ordered):
 
-(Trigger: after M1.2.) Join routing + transit onto each canonical place by place.id, programmatically — no agent reasoning (D4.3).
+(Trigger: after M1.2.) Join routing + transit onto each canonical place by place.id, programmatically — no agent reasoning (D4.3). Enrichment is keyed by the deduplicated union of place_id (no category); for each (category_id, place_id) in discovered_places, attach the single enrichment[place_id] bundle.
 Normalize units (distances → km, durations → minutes) and assemble one AmenityRecord per amenity per category (D7).
-Write to state.amenity_records; flag any metric the API didn't return in _absent.
+Write to state.amenity_records. A field the API did not return is a typed null; the reason (not requested at this depth vs. requested-but-not-returned) is derived on read from the record's depth, not stored per field.
 
 #### Problem It Aims to Solve: Results arrive from three call families in different shapes; downstream needs one predictable, versioned contract (D8).
 
 #### Finalized Approach: deterministic join by place.id into a typed AmenityRecord.
 
-Mandatory Sub‑Tasks Independent of Approaches Taken: join strictly by place.id; per‑category record (no cross‑category merge, D7); attach units (km / minutes); set a presence flag per metric.
+Mandatory Sub‑Tasks Independent of Approaches Taken: join strictly by place.id; per‑category record (no cross‑category merge, D7); attach units (km / minutes); carry depth on the record so absence is derivable on read.
 
 #### Critical Decision Choices:
 
 Record identity: keyed by (category_id, place_id).
-Absent‑value representation: null value + _absent set.
+Absent‑value representation: typed nullable value columns — a field with no value is null; no per‑field reason and no _absent set are stored. The distinction is derived on read from the record's depth against the depth's requested dimensions (FIXED_DIMENSIONS_BY_DEPTH / PREDEFINED_METRICS_BY_DEPTH):
+- basic‑tier fields (name, category, address, website, place_id, coordinates, google_maps_uri) are requested at every depth → a null always means requested but not returned.
+- operating‑tier fields (opening_hours, contact_phone, rating, review_volume, price_level, reviews) are requested only when depth ∈ {operating_details, specific_attributes}. At basic_profile a null means not requested at this depth; otherwise requested but not returned.
+- routing and transit run for every category regardless of depth → a null always means requested but not returned (no route).
 Contract versioning: version tag on the record shape for downstream stability.
 
 #### Output contract — AmenityRecord (one per amenity per category):
 
 | Field | Type | Content |
 |---|---|---|
-| contract_version | str | schema version tag |
-| category_id | int | from CategorySpec |
-| taxonomy_node | str | from CategorySpec |
+| contract_version | str | schema version tag (module constant) |
+| category_id | int | from CategoryMetricPlan |
+| taxonomy_node | str | from CategoryMetricPlan |
+| depth | DepthLevel | from CategoryMetricPlan — enables derive-on-read of absence |
 | place_id | str | places.id — identity/join key |
-| name | str | places.displayName |
+| name | str | places.displayName.text |
 | category | str | places.primaryType |
 | address | str | places.formattedAddress |
 | website | str \| null | places.websiteUri |
-| coordinates | {lat,lng} | places.location |
+| google_maps_uri | str \| null | places.googleMapsUri |
+| coordinates | {latitude,longitude} | places.location |
 | opening_hours | obj \| null | places.regularOpeningHours |
 | contact_phone | str \| null | places.internationalPhoneNumber |
 | rating | float \| null | places.rating |
 | review_volume | int \| null | places.userRatingCount |
 | price_level | enum \| null | places.priceLevel |
-| routing | map&lt;{walk,drive,cycle} → {distance_km:float\|null, duration_min:float\|null}&gt; | from per-mode routingSummaries |
-| transit | {distance_km:float\|null, duration_min:float\|null, details:obj\|null} \| null | computeRoutes legs duration/distance + transitDetails |
-| _absent | set[str] | metric labels the API didn't return (consumed later by C4.1) |
+| reviews | list \| null | places.reviews |
+| routing | map&lt;{walk,drive,cycle} → ({distance_km:float, duration_min:float} \| null)&gt; | per-mode routingSummaries: RouteLeg converted to km/min, or null when that mode returned no leg |
+| transit | {distance_km:float, duration_min:float, used_fallback:bool} \| null | computeRouteMatrix distance/duration converted to km/min plus used_fallback, or null when no route was returned |
 
 #### AmenitySearchState: 
 
-origin, radius, category_specs (inputs); discovered_places, enrichment (transient), amenity_records (final output).
+origin, radius, category_metric_plans (inputs); discovered_places, enrichment (transient), amenity_records (final output).
 
 | State field | Before M1 | After M1.1 | After M1.2 | After M1.3 |
 |---|---|---|---|---|
 | origin | set | set | set | set |
 | radius | set | set | set | set |
-| category_specs | set | set | set | set |
+| category_metric_plans | set | set | set | set |
 | discovered_places | ∅ | populated (frozen, per category) | unchanged | unchanged |
-| enrichment | ∅ | ∅ | populated (routing + transit by place_id) | discarded |
+| enrichment | ∅ | ∅ | populated (routing + transit by place_id) | retained (not consumed downstream) |
 | amenity_records | ∅ | ∅ | ∅ | populated — M1 output |
 
 ### Finalized assumptions: 

@@ -53,7 +53,8 @@ _BASIC_PROFILE_DIMENSIONS: tuple[str, ...] = (
     "coordinates",
     "travel distance per mode (walk, drive, cycle)",
     "travel duration per mode (walk, drive, cycle)",
-    "transit_details",
+    "transit travel distance",
+    "transit travel duration",
     "google_maps_uri",
 )
 _OPERATING_DETAILS_DIMENSIONS: tuple[str, ...] = _BASIC_PROFILE_DIMENSIONS + (
@@ -632,10 +633,11 @@ class PredefinedMetric:
 # Google Maps target for each fixed dimension, keyed by the dimension label. Most targets are
 # Places searchNearby field-mask tokens (see SEARCH_NEARBY_FIELD_MASK in
 # src/clients/google_places.py). Travel distance/duration for walk/drive/cycle come from
-# `routingSummaries` in that same searchNearby response (one call per mode). Transit is a
-# separate predefined metric (`transit_details`) fetched from the Routes API with
-# travelMode TRANSIT; bus, subway, and train are allowed in that same call (not one call
-# per transit mode). Predefined metrics are fetch-only; derived metrics are not in this
+# `routingSummaries` in that same searchNearby response (one call per mode). Transit is two
+# separate predefined metrics (`transit travel distance`, `transit travel duration`) fetched
+# from the Routes API computeRouteMatrix with travelMode TRANSIT; bus, subway, and train are
+# allowed in that same call (not one call per transit mode). Predefined metrics are fetch-only;
+# derived metrics are not in this
 # catalog. Tool stays "google_maps" for all of these. The label is the exact string used
 # in FIXED_DIMENSIONS_BY_DEPTH so the two lists cannot drift.
 _BASIC_PROFILE_TARGETS: dict[str, str] = {
@@ -653,8 +655,13 @@ _BASIC_PROFILE_TARGETS: dict[str, str] = {
         "routingSummaries.legs.duration via searchNearby for walk/drive/cycle "
         "(one call per mode)"
     ),
-    "transit_details": (
-        "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+    "transit travel distance": (
+        "Routes API computeRouteMatrix distanceMeters, travelMode TRANSIT "
+        "(bus, subway, train allowed in the same call)"
+    ),
+    "transit travel duration": (
+        "Routes API computeRouteMatrix duration, travelMode TRANSIT "
+        "(bus, subway, train allowed in the same call)"
     ),
     "google_maps_uri": "places.googleMapsUri",
 }
@@ -811,16 +818,65 @@ class CanonicalPlace:
     place: dict
 
 
+# ---------------------------------------------------------------------------------
+# Responsibility 2 — Mechanism 1, Component M1.2 (Accessibility Enrichment) contracts.
+# ---------------------------------------------------------------------------------
+
+# The three non-transit modes M1.2.a re-searches, in fixed order. Each maps to a Places
+# TravelMode at the client boundary (walk→WALK, drive→DRIVE, cycle→BICYCLE).
+TravelModeName = Literal["walk", "drive", "cycle"]
+ROUTING_MODES: tuple[TravelModeName, ...] = ("walk", "drive", "cycle")
+
+# computeRouteMatrix with one origin allows up to 100 origin-by-destination elements for
+# TRANSIT, so destinations are split into batches of at most this many. Configurable later.
+TRANSIT_MATRIX_MAX_DESTINATIONS = 100
+
+
+@dataclass(frozen=True)
+class RouteLeg:
+    """One non-transit mode leg for a place, in raw units (M1.3 converts to km/minutes)."""
+
+    distance_m: int
+    duration_s: int
+
+
+@dataclass(frozen=True)
+class TransitLeg:
+    """One transit leg for a place, in raw units. `used_fallback` set when fallbackInfo was present."""
+
+    distance_m: int
+    duration_s: int
+    used_fallback: bool
+
+
+@dataclass(frozen=True)
+class EnrichmentBundle:
+    """One place's accessibility, keyed by the deduplicated union of place_ids across categories.
+
+    `routing` carries every mode in ROUTING_MODES, each a RouteLeg or None when that mode returned
+    no leg. `transit` is a TransitLeg or None when no route was returned. A None leg is a nullable
+    value the caller must narrow before reading distance_m/duration_s; the reason for absence is
+    not stored here — M1.3 derives it from the record's depth. Units stay raw; conversion happens
+    in M1.3.
+    """
+
+    place_id: str
+    routing: dict[str, RouteLeg | None]
+    transit: TransitLeg | None
+
+
 @dataclass
 class AmenitySearchState:
-    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`.
+    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
 
     `discovered_places` is keyed category_id then place_id, so dedup is within a category
-    only (a place matching two categories is one record per category). `radius_km` defaults
-    to DEFAULT_RADIUS_KM.
+    only (a place matching two categories is one record per category). `enrichment` is keyed by
+    the deduplicated union of place_ids across categories (routing/transit from a fixed origin do
+    not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM.
     """
 
     origin: GeoPoint
     radius_km: float
     category_metric_plans: list[CategoryMetricPlan]
     discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
+    enrichment: dict[str, EnrichmentBundle] = field(default_factory=dict)
