@@ -2417,23 +2417,24 @@ Absent‑value representation: typed nullable value columns — a field with no 
 - basic‑tier fields (name, category, address, website, place_id, coordinates, google_maps_uri) are requested at every depth → a null always means requested but not returned.
 - operating‑tier fields (opening_hours, contact_phone, rating, review_volume, price_level, reviews) are requested only when depth ∈ {operating_details, specific_attributes}. At basic_profile a null means not requested at this depth; otherwise requested but not returned.
 - routing and transit run for every category regardless of depth → a null always means requested but not returned (no route).
-Contract versioning: version tag on the record shape for downstream stability.
+Contract versioning: version tag at the envelope level, not on each record. amenity_records is treated as an envelope (AmenityRecordSet) carrying one contract_version plus the nested records, so the version is carried once for the whole object handed downstream.
 
 #### Output contract — AmenityRecord (one per amenity per category):
 
+The record carries no contract_version; the version is stamped once on the envelope (see AmenityRecordSet below). Every profile field is nullable (null on missing, no fabricated default); the reason is derived on read from depth.
+
 | Field | Type | Content |
 |---|---|---|
-| contract_version | str | schema version tag (module constant) |
 | category_id | int | from CategoryMetricPlan |
 | taxonomy_node | str | from CategoryMetricPlan |
 | depth | DepthLevel | from CategoryMetricPlan — enables derive-on-read of absence |
 | place_id | str | places.id — identity/join key |
-| name | str | places.displayName.text |
-| category | str | places.primaryType |
-| address | str | places.formattedAddress |
+| name | str \| null | places.displayName.text |
+| category | str \| null | places.primaryType |
+| address | str \| null | places.formattedAddress |
 | website | str \| null | places.websiteUri |
 | google_maps_uri | str \| null | places.googleMapsUri |
-| coordinates | {latitude,longitude} | places.location |
+| coordinates | {latitude,longitude} \| null | places.location |
 | opening_hours | obj \| null | places.regularOpeningHours |
 | contact_phone | str \| null | places.internationalPhoneNumber |
 | rating | float \| null | places.rating |
@@ -2447,6 +2448,8 @@ Contract versioning: version tag on the record shape for downstream stability.
 
 origin, radius, category_metric_plans (inputs); discovered_places, enrichment (transient), amenity_records (final output).
 
+amenity_records is the versioned envelope AmenityRecordSet: `contract_version: str` plus `records: dict[category_id][place_id] → AmenityRecord` (mirroring discovered_places keying). The version is stamped once here, never per record.
+
 | State field | Before M1 | After M1.1 | After M1.2 | After M1.3 |
 |---|---|---|---|---|
 | origin | set | set | set | set |
@@ -2454,7 +2457,47 @@ origin, radius, category_metric_plans (inputs); discovered_places, enrichment (t
 | category_metric_plans | set | set | set | set |
 | discovered_places | ∅ | populated (frozen, per category) | unchanged | unchanged |
 | enrichment | ∅ | ∅ | populated (routing + transit by place_id) | retained (not consumed downstream) |
-| amenity_records | ∅ | ∅ | ∅ | populated — M1 output |
+| amenity_records | ∅ | ∅ | ∅ | populated — AmenityRecordSet envelope, M1 output |
+
+##### Sub-component M1.3.a — Canonical Profile Projection
+
+Goal of Component: Read one CanonicalPlace.place dict frozen by M1.1 and produce the profile portion of the record (name, category, address, website, google_maps_uri, coordinates, opening_hours, contact_phone, rating, review_volume, price_level, reviews), each typed and set to null when its source key is absent.
+
+Problem it Aims to Solve: M1.1 stores the place as Place.to_dict(place), a nested dict whose keys are proto snake_case names and whose optional fields are missing when the API did not return them. The record contract needs a flat, fixed set of typed columns with explicit nulls. Without one projection step, every reader re-walks the nested dict and re-handles the missing keys.
+
+Finalized Approach: Direct key-path access. Read each column with chained .get calls (for example place.get("display_name", {}).get("text")), assigning null on any missing segment.
+
+Critical Decision Choices:
+- Null handling for every optional field (a missing key becomes null, not a default or an empty object). The shape extracted for nested fields (name is the text member of display_name; coordinates is the latitude and longitude pair of location).
+- The dict keys are proto snake_case (display_name, formatted_address, google_maps_uri, user_rating_count, international_phone_number, regular_opening_hours, primary_type, reviews), not the camelCase field-mask tokens named in the contract table. Nested objects the contract carries as opaque (opening_hours, reviews) are projected as returned with no reshaping. No unit conversion happens here (routing and transit belong to M1.3.b).
+
+##### Sub-component M1.3.b — Accessibility Unit Conversion
+
+Goal of Component: Read one place's EnrichmentBundle and produce the record's accessibility portion: a routing map from each mode (walk, drive, cycle) to either converted km and minutes or null, and a transit object of converted km, minutes, and used_fallback or null.
+
+Problem it Aims to Solve: M1.2 stores legs in raw units (RouteLeg and TransitLeg carry distance_m as integer meters and duration_s as integer seconds), and a mode or transit with no result is None. The record contract requires km and minutes as floats, with null where the leg was None. The conversion and the None-to-null mapping happen once, in one place.
+
+Finalized Approach: Dedicated converters. One function maps a RouteLeg or None to {distance_km, duration_min} or null, another maps a TransitLeg or None to {distance_km, duration_min, used_fallback} or null, iterating ROUTING_MODES to build the routing map.
+
+Critical Decision Choices:
+- The conversion factors (km is meters divided by 1000, minutes is seconds divided by 60). The numeric type and rounding of the converted values (float, kept to 2 decimal places).
+- Reuse the existing _METERS_PER_KM constant from the M1.2 module rather than re-declaring it. Every mode in ROUTING_MODES is present in the routing map with null where the bundle held None (the fixed mode set is preserved, matching M1.2.c). used_fallback is copied straight through from the TransitLeg and has no equivalent on non-transit modes. A None leg becomes null with no reason attached (the locked derive-on-read rule owns the reason).
+
+##### Sub-component M1.3.c — Record Assembly, Join, and State Write
+
+Goal of Component: Build one frozen AmenityRecord per (category_id, place_id) in state.discovered_places by joining the projected profile (M1.3.a), the converted accessibility for that place_id (M1.3.b over state.enrichment), and the plan-derived fields (taxonomy_node and depth from the matching CategoryMetricPlan), then write the records into state.amenity_records as a single versioned envelope.
+
+Problem it Aims to Solve: The record's pieces come from three sources keyed differently: discovered_places is keyed category_id then place_id, enrichment is keyed by the deduplicated union of place_id with no category, and the plan list is keyed by category_id. Downstream needs one predictable, versioned collection of records per amenity per category. The target types (AmenityRecord, its envelope) and the state slot (amenity_records) do not exist yet and are prerequisites of this step.
+
+Finalized Approach: Pre-indexed merge. Build lookup indexes first (place_id to converted accessibility from M1.3.b, category_id to CategoryMetricPlan), then iterate the (category_id, place_id) pairs from discovered_places and assemble each record from the indexes plus the projected profile from M1.3.a.
+
+Critical Decision Choices:
+- Locked (not reopened): record identity is (category_id, place_id); one record per amenity per category with no cross-category merge; the AmenityRecord field set and its typed nullable columns; enrichment attached per place_id (the single bundle joined onto each category occurrence).
+- Define the frozen AmenityRecord dataclass and the storage type of state.amenity_records.
+- Version stamping is at the object (envelope) level, not on each record. state.amenity_records holds an envelope dataclass (AmenityRecordSet) carrying one contract_version plus the records. AmenityRecord itself carries no contract_version. The version value is a module constant (AMENITY_RECORD_CONTRACT_VERSION) used to stamp the envelope once.
+- Collection type: the envelope's records field is a nested dict[category_id][place_id] → AmenityRecord, mirroring discovered_places.
+- A place_id present in discovered_places but absent from enrichment (for example a place M1.2 dropped for a missing location) yields an all-null routing map and null transit, not a skipped record.
+- depth and taxonomy_node are read from the matching CategoryMetricPlan by category_id, not re-derived from source. Enrichment is retained on the state after the write, not cleared.
 
 ### Finalized assumptions: 
 radius input in km (default 2 km) → meters for APIs; all output distances km, durations minutes; transit departureTime = now; LLM reasoning used only for taxonomy→primaryType mapping (search parameterization, enrichment calls, and attachment are deterministic); type mapping cached per taxonomy_node.

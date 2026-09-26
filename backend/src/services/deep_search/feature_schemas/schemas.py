@@ -865,6 +865,69 @@ class EnrichmentBundle:
     transit: TransitLeg | None
 
 
+# ---------------------------------------------------------------------------------
+# Responsibility 2 — Mechanism 1, Component M1.3 (Deterministic Result Attachment) contracts.
+# ---------------------------------------------------------------------------------
+
+# Version tag for the AmenityRecordSet shape. Stamped once on the envelope, never per record.
+AMENITY_RECORD_CONTRACT_VERSION = "1.0"
+
+
+@dataclass(frozen=True)
+class RouteView:
+    """One non-transit mode leg converted to output units (km, minutes)."""
+
+    distance_km: float
+    duration_min: float
+
+
+@dataclass(frozen=True)
+class TransitView:
+    """One transit leg converted to output units; `used_fallback` carried through from M1.2."""
+
+    distance_km: float
+    duration_min: float
+    used_fallback: bool
+
+
+@dataclass(frozen=True)
+class AmenityRecord:
+    """One amenity per category: the M1.3 join of profile + accessibility, keyed (category_id, place_id).
+
+    Every profile field is nullable: a missing value is None (M1.1/M1.2 returned nothing for it),
+    and the reason (not requested at this depth vs. requested-but-not-returned) is derived on read
+    from `depth`, not stored per field. `routing` carries every ROUTING_MODES key, each a RouteView
+    or None; `transit` is a TransitView or None. No contract_version here — it lives on the envelope.
+    """
+
+    category_id: int
+    taxonomy_node: str
+    depth: DepthLevel
+    place_id: str
+    name: str | None
+    category: str | None
+    address: str | None
+    website: str | None
+    google_maps_uri: str | None
+    coordinates: GeoPoint | None
+    opening_hours: dict | None
+    contact_phone: str | None
+    rating: float | None
+    review_volume: int | None
+    price_level: str | None
+    reviews: list | None
+    routing: dict[str, RouteView | None]
+    transit: TransitView | None
+
+
+@dataclass(frozen=True)
+class AmenityRecordSet:
+    """The versioned M1.3 envelope: one contract_version plus the records, keyed category_id then place_id."""
+
+    contract_version: str
+    records: dict[int, dict[str, AmenityRecord]]
+
+
 @dataclass
 class AmenitySearchState:
     """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
@@ -872,7 +935,8 @@ class AmenitySearchState:
     `discovered_places` is keyed category_id then place_id, so dedup is within a category
     only (a place matching two categories is one record per category). `enrichment` is keyed by
     the deduplicated union of place_ids across categories (routing/transit from a fixed origin do
-    not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM.
+    not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM. `amenity_records` is the M1.3
+    output envelope, None until M1.3 runs.
     """
 
     origin: GeoPoint
@@ -880,3 +944,4 @@ class AmenitySearchState:
     category_metric_plans: list[CategoryMetricPlan]
     discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     enrichment: dict[str, EnrichmentBundle] = field(default_factory=dict)
+    amenity_records: AmenityRecordSet | None = None

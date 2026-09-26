@@ -19,15 +19,19 @@ from src.core.logging import PLACES_LOGGER_NAME
 from src.exceptions.deep_search import (
     PlaceDiscoveryCallError,
     PlaceDiscoveryRequestError,
+    ResultAssemblyError,
     RoutingRetrievalError,
     TransitRetrievalError,
 )
 from src.exceptions.places import PlacesClientError
 from src.exceptions.routes import RoutesClientError
 from src.services.deep_search.feature_schemas.schemas import (
+    AMENITY_RECORD_CONTRACT_VERSION,
     DISCOVERY_MAX_RESULTS,
     ROUTING_MODES,
     TRANSIT_MATRIX_MAX_DESTINATIONS,
+    AmenityRecord,
+    AmenityRecordSet,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
@@ -35,7 +39,9 @@ from src.services.deep_search.feature_schemas.schemas import (
     EnrichmentBundle,
     GeoPoint,
     RouteLeg,
+    RouteView,
     TransitLeg,
+    TransitView,
     TravelModeName,
 )
 
@@ -51,6 +57,10 @@ DISCOVERY_REQUEST_EVENT = "discovery.request_built"
 DISCOVERY_CATEGORY_EVENT = "discovery.category_completed"
 ENRICHMENT_MODE_EVENT = "enrichment.mode_completed"
 ENRICHMENT_TRANSIT_EVENT = "enrichment.transit_batch_completed"
+ATTACHMENT_COMPLETED_EVENT = "attachment.completed"
+
+_SECONDS_PER_MINUTE = 60.0
+_OUTPUT_DECIMALS = 2
 
 
 def _duration_seconds(duration: object) -> int:
@@ -59,6 +69,16 @@ def _duration_seconds(duration: object) -> int:
     if callable(total):
         return int(total())
     return int(getattr(duration, "seconds", 0))
+
+
+def _km(distance_m: int) -> float:
+    """Convert raw meters to km, rounded to the output precision."""
+    return round(distance_m / _METERS_PER_KM, _OUTPUT_DECIMALS)
+
+
+def _minutes(duration_s: int) -> float:
+    """Convert raw seconds to minutes, rounded to the output precision."""
+    return round(duration_s / _SECONDS_PER_MINUTE, _OUTPUT_DECIMALS)
 
 
 def _timestamp() -> str:
@@ -508,6 +528,138 @@ class AmenitySearch:
                 transit=transit.get(place_id),
             )
         return bundles
+
+    # -----------------------------------------------------------------------------
+    # Mechanism 1, Component M1.3 — Deterministic Result Attachment.
+    # -----------------------------------------------------------------------------
+
+    def run_result_attachment(self, state: AmenitySearchState) -> AmenitySearchState:
+        """M1.3 workflow: join enrichment onto each discovered place, write the versioned envelope.
+
+        Pure in-memory transform with no I/O, so it runs inline and is not async. `enrichment` is
+        retained on the state after the write.
+        """
+        record_set = self.assemble_amenity_records(state)
+        state.amenity_records = record_set
+        logger.info(
+            json.dumps(
+                {
+                    "event": ATTACHMENT_COMPLETED_EVENT,
+                    "timestamp": _timestamp(),
+                    "contract_version": record_set.contract_version,
+                    "category_count": len(record_set.records),
+                    "record_counts": {
+                        str(category_id): len(records)
+                        for category_id, records in record_set.records.items()
+                    },
+                }
+            )
+        )
+        return state
+
+    def project_place_profile(self, place: dict) -> dict:
+        """M1.3.a: project the raw place dict into the record's profile fields, null on missing.
+
+        Keys are the proto snake_case names from Place.to_dict; a missing key becomes None. `name`
+        is the text of display_name; `coordinates` is a GeoPoint from location or None.
+        """
+        display_name = place.get("display_name") or {}
+        location = place.get("location") or {}
+        latitude = location.get("latitude")
+        longitude = location.get("longitude")
+        coordinates = (
+            GeoPoint(latitude=latitude, longitude=longitude)
+            if latitude is not None and longitude is not None
+            else None
+        )
+        return {
+            "name": display_name.get("text"),
+            "category": place.get("primary_type"),
+            "address": place.get("formatted_address"),
+            "website": place.get("website_uri"),
+            "google_maps_uri": place.get("google_maps_uri"),
+            "coordinates": coordinates,
+            "opening_hours": place.get("regular_opening_hours"),
+            "contact_phone": place.get("international_phone_number"),
+            "rating": place.get("rating"),
+            "review_volume": place.get("user_rating_count"),
+            "price_level": place.get("price_level"),
+            "reviews": place.get("reviews"),
+        }
+
+    def convert_route_leg(self, leg: RouteLeg | None) -> RouteView | None:
+        """M1.3.b: convert one non-transit leg to km/minutes, or None when absent."""
+        if leg is None:
+            return None
+        return RouteView(distance_km=_km(leg.distance_m), duration_min=_minutes(leg.duration_s))
+
+    def convert_transit_leg(self, leg: TransitLeg | None) -> TransitView | None:
+        """M1.3.b: convert the transit leg to km/minutes with used_fallback, or None when absent."""
+        if leg is None:
+            return None
+        return TransitView(
+            distance_km=_km(leg.distance_m),
+            duration_min=_minutes(leg.duration_s),
+            used_fallback=leg.used_fallback,
+        )
+
+    def convert_accessibility(
+        self,
+        bundle: EnrichmentBundle | None,
+    ) -> tuple[dict[str, RouteView | None], TransitView | None]:
+        """M1.3.b: build the per-mode routing map and transit view for one place.
+
+        Every ROUTING_MODES key is present; a place with no bundle yields an all-None routing map
+        and None transit.
+        """
+        routing_map: dict[str, RouteView | None] = {}
+        for mode in ROUTING_MODES:
+            leg = bundle.routing.get(mode) if bundle is not None else None
+            routing_map[mode] = self.convert_route_leg(leg)
+        transit_view = self.convert_transit_leg(bundle.transit if bundle is not None else None)
+        return routing_map, transit_view
+
+    def assemble_amenity_records(self, state: AmenitySearchState) -> AmenityRecordSet:
+        """M1.3.c: pre-indexed merge of profile + accessibility + plan into the versioned envelope.
+
+        Builds the place_id → accessibility index and the category_id → plan index once, then joins
+        one AmenityRecord per (category_id, place_id). A place absent from enrichment yields an
+        all-None routing map and None transit rather than a skipped record.
+        """
+        accessibility_index = {
+            place_id: self.convert_accessibility(bundle)
+            for place_id, bundle in state.enrichment.items()
+        }
+        plan_index = {plan.category_id: plan for plan in state.category_metric_plans}
+
+        records: dict[int, dict[str, AmenityRecord]] = {}
+        for category_id, canonical in state.discovered_places.items():
+            plan = plan_index.get(category_id)
+            if plan is None:
+                raise ResultAssemblyError(
+                    f"discovered category {category_id} has no matching CategoryMetricPlan",
+                    stage="assemble_amenity_records",
+                )
+            category_records: dict[str, AmenityRecord] = {}
+            for place_id, canonical_place in canonical.items():
+                profile = self.project_place_profile(canonical_place.place)
+                routing_map, transit_view = accessibility_index.get(
+                    place_id, ({mode: None for mode in ROUTING_MODES}, None)
+                )
+                category_records[place_id] = AmenityRecord(
+                    category_id=category_id,
+                    taxonomy_node=plan.taxonomy_node,
+                    depth=plan.depth,
+                    place_id=place_id,
+                    routing=routing_map,
+                    transit=transit_view,
+                    **profile,
+                )
+            records[category_id] = category_records
+        return AmenityRecordSet(
+            contract_version=AMENITY_RECORD_CONTRACT_VERSION,
+            records=records,
+        )
 
     async def aclose(self) -> None:
         """Close the async Places and Routes transports after a run."""
