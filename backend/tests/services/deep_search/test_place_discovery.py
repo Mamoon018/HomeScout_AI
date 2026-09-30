@@ -61,8 +61,20 @@ class _FakePlacesClient:
         pass
 
 
+class _FakeRoutesClient:
+    """Async stand-in for GoogleRoutesAsyncClient; M1.1 tests do not exercise it."""
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _search(places_client, **kwargs) -> AmenitySearch:
+    """Build an AmenitySearch with a routes client the M1.1 tests do not use."""
+    return AmenitySearch(places_client, _FakeRoutesClient(), **kwargs)
+
+
 def test_field_mask_excludes_routing_and_transit() -> None:
-    search = AmenitySearch(_FakePlacesClient())
+    search = _search(_FakePlacesClient())
     request = search.build_discovery_request(_plan(depth="operating_details"), GeoPoint(1.0, 2.0), 2.0)
 
     assert "places.displayName" in request.field_mask
@@ -76,7 +88,7 @@ def test_field_mask_excludes_routing_and_transit() -> None:
 
 
 def test_basic_profile_mask_has_no_operating_fields() -> None:
-    search = AmenitySearch(_FakePlacesClient())
+    search = _search(_FakePlacesClient())
     request = search.build_discovery_request(_plan(depth="basic_profile"), GeoPoint(1.0, 2.0), 2.0)
 
     assert "places.id" in request.field_mask
@@ -85,7 +97,7 @@ def test_basic_profile_mask_has_no_operating_fields() -> None:
 
 
 def test_build_rejects_bad_inputs() -> None:
-    search = AmenitySearch(_FakePlacesClient())
+    search = _search(_FakePlacesClient())
     with pytest.raises(PlaceDiscoveryRequestError):
         search.build_discovery_request(_plan(), GeoPoint(math.nan, 2.0), 2.0)
     with pytest.raises(PlaceDiscoveryRequestError):
@@ -96,7 +108,7 @@ def test_build_rejects_bad_inputs() -> None:
 
 @pytest.mark.asyncio
 async def test_dedup_within_category() -> None:
-    search = AmenitySearch(_FakePlacesClient(_response(["p1", "p1", "p2"])))
+    search = _search(_FakePlacesClient(_response(["p1", "p1", "p2"])))
     request = search.build_discovery_request(_plan(), GeoPoint(1.0, 2.0), 2.0)
     response = await search.execute_discovery(request)
     canonical = search.assemble_canonical_places(response)
@@ -114,7 +126,7 @@ async def test_call_failure_raises_typed() -> None:
         async def aclose(self) -> None:
             pass
 
-    search = AmenitySearch(_Boom())
+    search = _search(_Boom())
     request = search.build_discovery_request(_plan(), GeoPoint(1.0, 2.0), 2.0)
     with pytest.raises(PlaceDiscoveryCallError) as info:
         await search.execute_discovery(request)
@@ -124,7 +136,7 @@ async def test_call_failure_raises_typed() -> None:
 @pytest.mark.asyncio
 async def test_concurrency_bounded() -> None:
     fake = _FakePlacesClient()
-    search = AmenitySearch(fake, max_concurrency=3)
+    search = _search(fake, places_concurrency=3)
     plans = [_plan(category_id=index) for index in range(10)]
     state = AmenitySearchState(
         origin=GeoPoint(1.0, 2.0),
