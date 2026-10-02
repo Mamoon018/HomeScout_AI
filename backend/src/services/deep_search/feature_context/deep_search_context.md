@@ -89,7 +89,7 @@ Structure the additional information in a way that it can be merged into already
 Now, based on the complete information which includes baseline metrics, user specific metrics, factual information at right depth, we need to generate the traceable judgement for each category of amenity.
 
 
-## Responsibilities of the feature:
+## Responsibility - 1 of the feature:
 
 1. User's Requirement interpretation (Responsibility-1 of the feature)
 
@@ -153,7 +153,7 @@ This responsibility must first parse the customer's stated requirements and inst
 Filter check (problem relevance): every clause traces back to producing an accurate, appropriately prioritized, sufficiently deep specification per category, since anything wrong or missing here propagates uncorrected into search, retrieval, and the final judgment. Nothing here performs search or retrieval, which belongs to a later responsibility.
 
 
-##### Implementation (Workflow/Process flow of the responsibility) Mechanisms of the User's Requirement Interpretation:
+##### Implementation (Workflow/Process flow of the responsibility) Mechanisms of the User's Requirement Interpretation (responsibility - 1):
 Process Flow — "User's Requirement Interpretation" Responsibility
 
 Scope reminder: everything below stops at producing a per-category specification (reason, priority, depth, metrics). Nothing here searches, retrieves, or scores an actual amenity — that starts in the next responsibility, which consumes this one's output as its only input.
@@ -1366,8 +1366,8 @@ Three levels exist. All three are defined in the prompt. All three are assignabl
 | Level | Question it answers | Contents | Tools | Contract-gated? |
 |---|---|---|---|---|
 | `basic_profile` | Is it here, and can I reach it — at what cost? | Identity (name, category, address, `place_id`, coords) + accessibility metrics: travel distance and duration per mode (walk / drive / cycle), `transit_details` (Routes API, travelMode TRANSIT; bus, subway, and train allowed in the same call). | Google Maps: Places (identity and walk/drive/cycle `routingSummaries`) + Routes API (`transit_details`). Fully Maps-resolvable. | No — these are fixed, known-resolvable dimensions. |
-| `operating_details` | Is it any good, and how does it run? | `basic_profile` + operational dimensions (hours, contact/website, rating, review volume, price level) + an LLM-defined, per-category quality set. The quality set is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric must pass the metric contract. | Maps (hours, rating, ratings count, `price_level`, attributes) + parallel web search (reputation synthesis). | Yes — every LLM-proposed quality metric goes through the contract. The fixed Maps operational dimensions do not. |
-| `specific_attributes` | Does it fit my particular situation? | User-specific metrics beyond the above — attributes the user emphasized, or that persona / inferred reasoning shows they would need. | Parallel web search + firecrawl/diffbot on targeted pages (official site, schedule, menu, pricing). | Yes — every metric goes through the contract. |
+| `operating_details` | Is it any good, and how does it run? | `basic_profile` + operational dimensions (hours, contact/website, rating, review volume, price level) + an LLM-defined, per-category quality set. The quality set is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric must pass the metric contract. | Maps (hours, rating, ratings count, `price_level`) for the fixed dimensions only; parallel web search and firecrawl for the LLM-defined quality set. | Yes — every LLM-proposed quality metric goes through the contract. The fixed Maps operational dimensions do not. |
+| `specific_attributes` | Does it fit my particular situation? | User-specific metrics beyond the above — attributes the user emphasized, or that persona / inferred reasoning shows they would need. | Parallel web search + firecrawl on targeted pages (official site, schedule, menu, pricing). | Yes — every metric goes through the contract. |
 
 Assigned `depth` type: `Literal["basic_profile", "operating_details", "specific_attributes"]`.
 
@@ -1388,7 +1388,7 @@ Nothing drops below its own floor. No trigger → stay at the floor.
 
 1. Start at the origin floor. Explicit → `operating_details`. Inferred → `basic_profile`.
 2. Escalate on an explicit trigger only — a named attribute or a persona / inferred criterion the current level cannot answer (see Acceptance test). For inferred categories, the same trigger also chooses which higher level (`operating_details` vs `specific_attributes`) from the attribute's nature. No trigger → stay at the floor. That is what prevents both over-fetching and under-fetching.
-3. The metric contract caps every later fetch at the two dynamic levels: Mechanism 6 may propose freely, but only contract-passing metrics resolve, so expensive tools (firecrawl/diffbot) fire only on things known to be retrievable. This component does not run that gate.
+3. The metric contract caps every later fetch at the two dynamic levels: Mechanism 6 may propose freely, but only contract-passing metrics resolve, so expensive tools (firecrawl) fire only on things known to be retrievable. This component does not run that gate.
 
 #### Acceptance test (applied identically to every level)
 
@@ -1407,7 +1407,7 @@ This component does not emit metrics. The contract is inlined in the depth instr
 | `label` | Human-readable metric name. |
 | `question` | The exact decision question it answers **for this user** — tied, directly or indirectly, to their instruction or a persona fact. Direct = they asked for it. Indirect = a persona / inferred fact implies they would weigh it. Forces relevance. |
 | `value_type` | One of: `number+unit` \| `boolean` \| `enum[fixed set]` \| `date/time`. Free-form prose as a **final** value is disallowed — the value must be comparable / interpretable. |
-| `resolution_source` | Concrete tool + target: which Maps field, or the shape of the web-search query, or which page type firecrawl/diffbot hits. |
+| `resolution_source` | Concrete tool + target: the shape of the web-search query, or which page type firecrawl hits. Maps is not used for an LLM-defined metric; its values are the fixed dimensions. |
 | `verification` | What evidence confirms the value (e.g. "stated on official site", "≥3 independent reviews corroborate", "listed in Maps attributes"). |
 | `null_policy` | What to emit if unresolved — must be `null` / `"unknown"`, never guessed. |
 
@@ -1739,13 +1739,13 @@ A **band** is the depth level a metric belongs to: `operating_details` or `speci
 | `operating_details` | `operating_details` | ≥1 (reported, not enforced) | 4 |
 | `specific_attributes` | `operating_details` and `specific_attributes` | ≥1 of each (reported, not enforced) | 4 per band |
 
-The band tag lets code check that no metric sits above its category's depth, and that each band uses only its allowed tools. The cap keeps each category's list short and later fetch cost bounded.
+The band tag lets code check that no metric sits above its category's depth. Both bands use the same tool set: `parallel_web_search` and `firecrawl`. Google Maps is never a tool for an LLM-defined metric, because every value Maps can supply is already a code-owned pre-defined metric (fixed dimension) fetched without a metric. The wire schema enforces this by offering only those two tools. The cap keeps each category's list short and later fetch cost bounded.
 
 #### How metrics are defined per band
 
 | Band | Question it answers | Tie to the user (goes in `question`) | Allowed tools |
 |---|---|---|---|
-| `operating_details` | Is it any good, and how does it run — beyond the fixed dimensions? | The category itself is a valid tie: the customer explicitly asked for it (explicit), or that entry's `reasoning` supports it (inferred). The `question` states which. | `google_maps` (attributes not already fixed), `parallel_web_search` |
+| `operating_details` | Is it any good, and how does it run — beyond the fixed dimensions? | The category itself is a valid tie: the customer explicitly asked for it (explicit), or that entry's `reasoning` supports it (inferred). The `question` states which. | `parallel_web_search`, `firecrawl` |
 | `specific_attributes` | Does it fit my particular situation? | Must point at the trigger that raised the depth: a named characteristic, a payload statement, a persona fact, or the inferred entry's `reasoning`. | `parallel_web_search`, `firecrawl` |
 
 Decision test, applied to every metric: once resolved, would this value change how the customer weights or ranks this category? If not, the metric is not proposed. A metric must not restate a fixed dimension.
@@ -1761,7 +1761,7 @@ The six fields come from Mechanism 5. This component types them and adds `band`:
 | `value_type` | `Literal["number_with_unit", "boolean", "enum", "date_time"]` | Maps to `number+unit`, `boolean`, `enum[fixed set]`, `date/time`. Free-form prose is not a value type. |
 | `unit` | `str \| None` | Required when `value_type = number_with_unit`; `None` otherwise. |
 | `enum_values` | `list[str]` | ≥2 distinct members when `value_type = enum`; empty otherwise. |
-| `resolution_source` | `{tool: Literal["google_maps", "parallel_web_search", "firecrawl"], target: str}` | Concrete tool and target: the Maps field, the shape of the search query, or the page type firecrawl fetches. |
+| `resolution_source` | `{tool: Literal["parallel_web_search", "firecrawl"], target: str}` | Concrete tool and target: the shape of the search query, or the page type firecrawl fetches. `google_maps` is not a value of this field; it exists only on pre-defined metrics (stored `ResolutionSource`). |
 | `verification` | `str` | What evidence confirms the value. |
 | `null_policy` | `Literal["null", "unknown"]` | What to emit if unresolved. Never a guess. |
 | `band` | `Literal["operating_details", "specific_attributes"]` | The band the metric belongs to. |
@@ -1781,7 +1781,7 @@ Contract rules (per metric, in order):
 | K1 Text completeness | `label`, `question`, `verification`, `resolution_source.target` are non-empty after trimming. | Drop |
 | K2 Value-type parameters | `number_with_unit` → `unit` set and `enum_values` empty. `enum` → ≥2 distinct non-empty `enum_values` and `unit` unset. `boolean` / `date_time` → `unit` unset and `enum_values` empty. | Drop |
 | K3 Band within depth | `band = specific_attributes` only when the category's `depth = specific_attributes`. | Drop |
-| K4 Tool fits band | `firecrawl` only with `band = specific_attributes`. | Drop |
+| K4 (retired) | Formerly "`firecrawl` only with `band = specific_attributes`". Removed: both tools are allowed in either band, and `google_maps` cannot occur because the schema's closed `tool` set excludes it. The K-numbers of the other rules are kept so existing references stay valid. | — |
 | K5 No duplicate | Same `label` (case-insensitive, trimmed) already kept for this category. | Drop the later one |
 | K6 Cap | More than 4 survivors in one band for one category. | Drop the extras after the 4th, in model order |
 
@@ -1903,7 +1903,7 @@ Reuses `self._providers` and `_call_providers` with a new schema name (`metric_d
 - Minimum per band is a reported shortfall, not enforced. Cap is 4 per band per category.
 - `CategoryMetricSet` holds only `category_id`, `taxonomy_node`, `metrics`. `metrics = None` means "not eligible (basic_profile)"; `[]` means "eligible but nothing survived". This meaning of `None` is my assumption.
 - `value_type` uses four token values; `resolution_source` is `{tool, target}`.
-- `google_maps` is allowed for `operating_details`-band metrics only; `firecrawl` for `specific_attributes`-band only; `parallel_web_search` for both.
+- `parallel_web_search` and `firecrawl` are both allowed in either band. `google_maps` is not a tool for an LLM-defined metric: everything Maps can supply is a pre-defined metric, so the wire `tool` set excludes it (decision RC2/D3).
 - The fixed-dimension constant lives beside `DepthLevel` in the schema module (location is an implementation choice).
 - Empty strings are a code-side drop (K1), not a schema rejection, so one blank field does not discard every category's metrics.
 
@@ -1911,7 +1911,7 @@ Reuses `self._providers` and `_call_providers` with a new schema name (`metric_d
 
 - G1. `RequirementInterpretationState` has no `category_metrics`; no `MetricSpec`, `CategoryMetricSet`, wire models, schema name, instruction module, or typed errors exist.
 - G2. `interpret()` ends at `run_per_category_depth_calibration`; it does not call this component.
-- G3. The Mechanism 5 spec table and `depth_assignment_instruction.py` still list "contact/website" under `operating_details` and name "firecrawl/diffbot". This spec moves website to `basic_profile` and uses firecrawl only. Mechanism 5 text is not edited here and will disagree until synced.
+- G3. The Mechanism 5 spec table still lists "contact/website" under `operating_details` and names "firecrawl/diffbot". This spec moves website to `basic_profile` and uses firecrawl only. The tool wording in the Mechanism 5 prompt (`depth_assignment_instruction.py`) and in the Mechanism 5 tables above was synced to the RC2/D3 decision (no Maps tool for LLM-defined metrics; firecrawl allowed in either band); the website/contact wording is still to be synced.
 - G4. Nothing here guarantees non-empty bands after drops. Only a logged shortfall exists.
 - G5. The Mechanisms list at lines 168–193 numbers Depth Assignment as 7 and Metric Definition as 8, while the headings say 5 and 6. Out of scope here; not edited.
 - G6. Semantic concreteness of `resolution_source` / `verification` is prompt-enforced only.
@@ -1924,7 +1924,7 @@ Locked constraints carried into this breakdown. They are fixed at the component 
 - One constrained LLM call when at least one category has `depth ≠ basic_profile`; otherwise skip the call, write `metrics = None` sets, and do not fail.
 - No predefined per-category metric catalog. The model defines the two dynamic bands each run; examples in the prompt are illustrative.
 - Schema miss or id-set mismatch rejects the whole body. A single metric failing a contract rule is dropped and logged.
-- `band` never exceeds the category's assigned depth. `firecrawl` only for the `specific_attributes` band.
+- `band` never exceeds the category's assigned depth. `tool` is `parallel_web_search` or `firecrawl` in either band; never `google_maps`.
 - Fixed dimensions are a code constant looked up by `depth`; they are not model output and not stored on the state.
 - Results are written to a separate `state.category_metrics` list of `CategoryMetricSet`, keyed by `category_id`. Category objects are not modified.
 - Reuse `self._providers` and `_call_providers`. Typed provider error vs typed validation error, each with `stage`.
@@ -1957,7 +1957,7 @@ Finalized Approach:
 
 Critical Decision Choices:
 * Locked at component level: the metrics live in a separate `state.category_metrics` list of `CategoryMetricSet(category_id, taxonomy_node, metrics)`. `ResolvedCategory` and `InferredCategory` are not changed. There is no facts list.
-* Locked: closed value sets are `value_type` (`number_with_unit`, `boolean`, `enum`, `date_time`), `null_policy` (`null`, `unknown`), `tool` (`google_maps`, `parallel_web_search`, `firecrawl`), and `band` (`operating_details`, `specific_attributes`).
+* Locked: closed value sets are `value_type` (`number_with_unit`, `boolean`, `enum`, `date_time`), `null_policy` (`null`, `unknown`), `tool` (`parallel_web_search`, `firecrawl`; `MetricResolutionTool`, no `google_maps`, which stays only on the stored pre-defined `ResolutionSource`), and `band` (`operating_details`, `specific_attributes`). The stored `MetricSpec.resolution_source` is a separate `MetricResolutionSource` dataclass with the same two-value tool type.
 * `taxonomy_node` is not in the wire body. Code copies it by `category_id`. The model never emits it.
 * Which constraints the schema carries. Research result: Groq strict mode supports `type`, `properties`, `required`, `additionalProperties: false`, `enum`, `items`, `$ref`, and `anyOf`. It does not support `minLength`, `maxLength`, `minItems`, `maxItems`, or `if/then/else`. The OpenAI structured-outputs page fetched for this plan did not list its unsupported keywords. The schema therefore carries only required keys, closed objects, types, and closed enums. Empty-text, list-size, and cross-field rules are code checks in sub-component 4.
 * `unit` is `str | None`. Strict mode needs the null case as `anyOf`. Confirm that `_apply_strict_object_rules` keeps every property required and leaves the null branch intact.
@@ -1987,7 +1987,7 @@ Critical Decision Choices:
 * Tie rule per band. For `operating_details`, the category's own request (explicit) or `reasoning` (inferred) is a valid tie and the `question` states which. For `specific_attributes`, the `question` must point at the trigger that raised the depth.
 * Decision test in the text: a resolved value must be able to change how the customer weights or ranks the category.
 * Worked examples cover different taxonomy groups, show an `operating_details` metric and a `specific_attributes` metric, and include the `cozy` rejection with its `ambiance` reformulation. They are not reused as the live sample-runner seed.
-* Tool text states the band limits: `google_maps` and `parallel_web_search` for `operating_details`, `parallel_web_search` and `firecrawl` for `specific_attributes`. `firecrawl` fetches page content. `parallel_web_search` fetches web search results.
+* Tool text states one tool set for both bands: `parallel_web_search` and `firecrawl`. Google Maps is stated as not nameable, because every Maps value is already a fixed dimension. `firecrawl` fetches page content. `parallel_web_search` fetches web search results.
 * Leftover-flag rule: a metric that addresses a leftover phrase states the single reading chosen in its `question`.
 * Caps are stated as a rule (at most 4 per band per category). Code enforces them in sub-component 4.
 * The fixed-dimension list is rendered from the constant in sub-component 1.
@@ -2025,15 +2025,16 @@ Goal of Component:
 From an accepted body, apply the contract rules K1 to K6 to each metric and drop the ones that fail (Operation 4). Report shortfalls (Operation 5). Write one `CategoryMetricSet` per category to `state.category_metrics` (Operation 6). When no category is eligible, skip Operations 1 to 5 and write `None` sets. Sequence `interpret()` so this component runs immediately after Mechanism 5.
 
 Problem It Aims to Solve:
-A body can pass the schema and still hold a metric that breaks a rule the schema does not check: a blank text field, a `number_with_unit` metric with no `unit`, a `band` above the category's depth, `firecrawl` on an `operating_details` metric, a repeated label, or a fifth metric in one band. Without a filter these reach retrieval. Without the write step no later stage can read the result. Without the skip branch a request with only `basic_profile` categories still calls the model. Without an `interpret()` call the component never runs.
+A body can pass the schema and still hold a metric that breaks a rule the schema does not check: a blank text field, a `number_with_unit` metric with no `unit`, a `band` above the category's depth, a repeated label, or a fifth metric in one band. Without a filter these reach retrieval. Without the write step no later stage can read the result. Without the skip branch a request with only `basic_profile` categories still calls the model. Without an `interpret()` call the component never runs.
 
 Finalized Approach:
 1. One filter function. `apply_metric_contract(state, body)` walks each category and each metric, applies K1 to K6 in fixed order, and returns the surviving metrics per `category_id` plus a list of rejection records. A separate `write_category_metrics` builds the `CategoryMetricSet` list from the survivors.
 
 Critical Decision Choices:
 * Locked: a metric that fails a rule is dropped and logged. Nothing is repaired, rewritten, or clamped. A rule failure never raises.
-* Locked: rules are K1 (text completeness), K2 (value-type parameters), K3 (band within depth), K4 (tool fits band), K5 (no duplicate label), K6 (cap of 4 per band). Order is K1 to K6. K5 and K6 count only metrics that passed the earlier rules.
-* K1 and K6 are code checks because the provider schema does not carry `minLength` or `maxItems` (see sub-component 1). K2 and K4 are code checks because strict mode does not carry conditional rules. K3 needs the category's `depth` from state, which the schema does not know. K5 compares metrics with each other.
+* Locked: rules are K1 (text completeness), K2 (value-type parameters), K3 (band within depth), K4 (retired, see below), K5 (no duplicate label), K6 (cap of 4 per band). Order is K1 to K6 with K4 skipped. K5 and K6 count only metrics that passed the earlier rules.
+* K4 (tool fits band) is retired. Both `parallel_web_search` and `firecrawl` are valid in either band, and `google_maps` cannot reach code because the closed `tool` set in the schema excludes it (a model that emits it fails layer 1 and the whole body is rejected). The other rule numbers are kept unchanged.
+* K1 and K6 are code checks because the provider schema does not carry `minLength` or `maxItems` (see sub-component 1). K2 is a code check because strict mode does not carry conditional rules. K3 needs the category's `depth` from state, which the schema does not know. K5 compares metrics with each other.
 * K3 reads `depth` by `category_id` from the explicit and inferred lists.
 * Rejection log record: `event: metric_definition.metric_rejected`, `category_id`, `label`, `rule`. Rejected metrics are not stored on state.
 * Shortfall report: a `metric_definition.category_underspecified` event names each eligible category with zero surviving `operating_details`-band metrics, or with `depth = specific_attributes` and zero surviving `specific_attributes`-band metrics. It is not a failure.
@@ -2060,7 +2061,7 @@ Finalized Approach:
 Critical Decision Choices:
 * Locked: no live provider call in these checks. A live sample runner is a separate later artifact.
 * Fixture set. No categories (no call, `category_metrics` stays `[]`). All `basic_profile` (no call, `None` sets). Schema miss: a missing field. Schema miss: a value outside a closed set. Missing id. Extra id. Duplicate id. Provider failure across the chain raises the provider error. Valid mixed batch: explicit `operating_details`, explicit `specific_attributes`, inferred `basic_profile`, inferred `operating_details`.
-* Per-rule fixtures, each showing the bad metric dropped and its neighbor kept: K1 blank text, K2 missing `unit`, K2 enum with one value, K3 `specific_attributes` band on an `operating_details` category, K4 `firecrawl` on an `operating_details` metric, K5 repeated label, K6 fifth metric in one band.
+* Per-rule fixtures, each showing the bad metric dropped and its neighbor kept: K1 blank text, K2 missing `unit`, K2 enum with one value, K3 `specific_attributes` band on an `operating_details` category, K5 repeated label, K6 fifth metric in one band. Two further fixtures: `firecrawl` on an `operating_details` metric is kept, and `google_maps` as a metric tool rejects the whole body at the schema layer.
 * Shortfall fixture: an eligible category left with an empty band produces the `category_underspecified` log record and a `[]` list, with no error.
 * Write-shape assertions: `taxonomy_node` copied correctly for an explicit and an inferred category, `None` for `basic_profile`, `[]` for an eligible category with nothing surviving, explicit entries before inferred.
 * Unchanged-state assertions: `ResolvedCategory`, `InferredCategory`, `payload`, `persona_facts`, `extracted`, `user_responses`, `ambiguity_flags`, and `category_resolution_passes` are equal before and after.
@@ -2197,12 +2198,6 @@ Run a separate Routes API call path over the results from step 1 with `travelMod
 
 3. Parse the extracted data:
 Parse the fetched values into the target shape for each amenity. Derived metrics are out of the predefined catalog and are not decided here.
-
-4. Filter out amenities that don't genuinely belong to the category:
-Drop places that surfaced in the search but aren't real members of the category, like a park returned under "daycare." This is a correctness check, kept separate from and run before the narrowing in step 5.
-
-5. Narrow the correct pool to a non‑redundant, representative set:
-Reduce over‑represented amenity types to a representative subset so the customer isn't handed every instance of a common type. Base the selection on the data completeness of each candidate.
 
 6. Discover a website for any amenity missing one:
 For narrowed amenities with no website from Google, use web search to find the official site. This gives step 7 a page to scrape when the basic profile didn't include one.
@@ -2392,7 +2387,7 @@ Critical Decision Choices:
 1. The bundle is keyed by the deduplicated union of place_ids across categories. Routing and transit for a place_id do not depend on category (the origin is fixed and the place location is fixed), so each place is assembled once.
 2. Every mode key (walk, drive, cycle) is present in routing, with None where that mode had no result. transit is a TransitLeg or None.
 3. A missing leg is None, not a leg-shaped dict, so a reader must narrow the Optional before reading distance_m or duration_s.
-4. The EnrichmentBundle stays in memory and is consumed by M1.3 in the same process, so no JSON encoder is added here. Serialization happens only at M1.3, where a leg becomes converted values (km, minutes) on the AmenityRecord, used_fallback is carried through, and a None leg becomes a null value on the record (no _absent set is written; request-status is derived from depth).
+4. The EnrichmentBundle stays in memory and is consumed by M1.3 in the same process, so no JSON encoder is added here. Serialization happens only at M1.3, where a leg becomes converted values (km, minutes) on the PredefinedMetricsRecord, used_fallback is carried through, and a None leg becomes a null value on the record (no _absent set is written; request-status is derived from depth).
 
 -
 
@@ -2401,12 +2396,12 @@ Critical Decision Choices:
 #### Goal of Component (ordered):
 
 (Trigger: after M1.2.) Join routing + transit onto each canonical place by place.id, programmatically — no agent reasoning (D4.3). Enrichment is keyed by the deduplicated union of place_id (no category); for each (category_id, place_id) in discovered_places, attach the single enrichment[place_id] bundle.
-Normalize units (distances → km, durations → minutes) and assemble one AmenityRecord per amenity per category (D7).
-Write to state.amenity_records. A field the API did not return is a typed null; the reason (not requested at this depth vs. requested-but-not-returned) is derived on read from the record's depth, not stored per field.
+Normalize units (distances → km, durations → minutes) and assemble one PredefinedMetricsRecord per amenity per category (D7).
+Write to state.predefined_records, a plain nested dict with no envelope and no contract_version. The versioned combined object (AmenityMetricsSet) is built later, once, by C3.2.5. A field the API did not return is a typed null; the reason (not requested at this depth vs. requested-but-not-returned) is derived on read from the record's depth, not stored per field.
 
 #### Problem It Aims to Solve: Results arrive from three call families in different shapes; downstream needs one predictable, versioned contract (D8).
 
-#### Finalized Approach: deterministic join by place.id into a typed AmenityRecord.
+#### Finalized Approach: deterministic join by place.id into a typed PredefinedMetricsRecord.
 
 Mandatory Sub‑Tasks Independent of Approaches Taken: join strictly by place.id; per‑category record (no cross‑category merge, D7); attach units (km / minutes); carry depth on the record so absence is derivable on read.
 
@@ -2417,11 +2412,11 @@ Absent‑value representation: typed nullable value columns — a field with no 
 - basic‑tier fields (name, category, address, website, place_id, coordinates, google_maps_uri) are requested at every depth → a null always means requested but not returned.
 - operating‑tier fields (opening_hours, contact_phone, rating, review_volume, price_level, reviews) are requested only when depth ∈ {operating_details, specific_attributes}. At basic_profile a null means not requested at this depth; otherwise requested but not returned.
 - routing and transit run for every category regardless of depth → a null always means requested but not returned (no route).
-Contract versioning: version tag at the envelope level, not on each record. amenity_records is treated as an envelope (AmenityRecordSet) carrying one contract_version plus the nested records, so the version is carried once for the whole object handed downstream.
+Contract versioning: M1.3 stamps no version. The predefined records are an intermediate object (state.predefined_records, a plain nested dict). The single versioned object is the combined AmenityMetricsSet that C3.2.5 of Mechanism 3 builds from the predefined and specific records, so the version is carried once for the whole object handed downstream.
 
-#### Output contract — AmenityRecord (one per amenity per category):
+#### Output contract — PredefinedMetricsRecord (one per amenity per category; renamed from AmenityRecord):
 
-The record carries no contract_version; the version is stamped once on the envelope (see AmenityRecordSet below). Every profile field is nullable (null on missing, no fabricated default); the reason is derived on read from depth.
+The record carries no contract_version; the version is stamped once on the combined AmenityMetricsSet (see Mechanism 3, C3.2.5). Every profile field is nullable (null on missing, no fabricated default); the reason is derived on read from depth.
 
 | Field | Type | Content |
 |---|---|---|
@@ -2446,9 +2441,9 @@ The record carries no contract_version; the version is stamped once on the envel
 
 #### AmenitySearchState: 
 
-origin, radius, category_metric_plans (inputs); discovered_places, enrichment (transient), amenity_records (final output).
+origin, radius, category_metric_plans (inputs); discovered_places, enrichment (transient); predefined_records (M1 output, intermediate); specific_records (Mechanism 3 output, intermediate); amenity_records (final combined output).
 
-amenity_records is the versioned envelope AmenityRecordSet: `contract_version: str` plus `records: dict[category_id][place_id] → AmenityRecord` (mirroring discovered_places keying). The version is stamped once here, never per record.
+predefined_records is a plain `dict[category_id][place_id] → PredefinedMetricsRecord` (mirroring discovered_places keying) with no envelope and no version. `AmenityRecordSet` no longer exists. `amenity_records` now holds the combined, versioned `AmenityMetricsSet` that Mechanism 3 C3.2.5 writes (`None` until then).
 
 | State field | Before M1 | After M1.1 | After M1.2 | After M1.3 |
 |---|---|---|---|---|
@@ -2457,7 +2452,9 @@ amenity_records is the versioned envelope AmenityRecordSet: `contract_version: s
 | category_metric_plans | set | set | set | set |
 | discovered_places | ∅ | populated (frozen, per category) | unchanged | unchanged |
 | enrichment | ∅ | ∅ | populated (routing + transit by place_id) | retained (not consumed downstream) |
-| amenity_records | ∅ | ∅ | ∅ | populated — AmenityRecordSet envelope, M1 output |
+| predefined_records | ∅ | ∅ | ∅ | populated — plain nested dict of PredefinedMetricsRecord, M1 output |
+| specific_records | ∅ | ∅ | ∅ | ∅ (written by Mechanism 3 C3.2.5) |
+| amenity_records | ∅ | ∅ | ∅ | ∅ (written by Mechanism 3 C3.2.5) |
 
 ##### Sub-component M1.3.a — Canonical Profile Projection
 
@@ -2485,17 +2482,17 @@ Critical Decision Choices:
 
 ##### Sub-component M1.3.c — Record Assembly, Join, and State Write
 
-Goal of Component: Build one frozen AmenityRecord per (category_id, place_id) in state.discovered_places by joining the projected profile (M1.3.a), the converted accessibility for that place_id (M1.3.b over state.enrichment), and the plan-derived fields (taxonomy_node and depth from the matching CategoryMetricPlan), then write the records into state.amenity_records as a single versioned envelope.
+Goal of Component: Build one frozen PredefinedMetricsRecord per (category_id, place_id) in state.discovered_places by joining the projected profile (M1.3.a), the converted accessibility for that place_id (M1.3.b over state.enrichment), and the plan-derived fields (taxonomy_node and depth from the matching CategoryMetricPlan), then write the records into state.predefined_records as a plain nested dict.
 
-Problem it Aims to Solve: The record's pieces come from three sources keyed differently: discovered_places is keyed category_id then place_id, enrichment is keyed by the deduplicated union of place_id with no category, and the plan list is keyed by category_id. Downstream needs one predictable, versioned collection of records per amenity per category. The target types (AmenityRecord, its envelope) and the state slot (amenity_records) do not exist yet and are prerequisites of this step.
+Problem it Aims to Solve: The record's pieces come from three sources keyed differently: discovered_places is keyed category_id then place_id, enrichment is keyed by the deduplicated union of place_id with no category, and the plan list is keyed by category_id. Downstream needs one predictable collection of predefined-metric records per amenity per category. The target type (PredefinedMetricsRecord) and the state slot (predefined_records) do not exist yet and are prerequisites of this step. Version stamping is not done here: the single versioned object is the combined AmenityMetricsSet that Mechanism 3 C3.2.5 builds.
 
 Finalized Approach: Pre-indexed merge. Build lookup indexes first (place_id to converted accessibility from M1.3.b, category_id to CategoryMetricPlan), then iterate the (category_id, place_id) pairs from discovered_places and assemble each record from the indexes plus the projected profile from M1.3.a.
 
 Critical Decision Choices:
-- Locked (not reopened): record identity is (category_id, place_id); one record per amenity per category with no cross-category merge; the AmenityRecord field set and its typed nullable columns; enrichment attached per place_id (the single bundle joined onto each category occurrence).
-- Define the frozen AmenityRecord dataclass and the storage type of state.amenity_records.
-- Version stamping is at the object (envelope) level, not on each record. state.amenity_records holds an envelope dataclass (AmenityRecordSet) carrying one contract_version plus the records. AmenityRecord itself carries no contract_version. The version value is a module constant (AMENITY_RECORD_CONTRACT_VERSION) used to stamp the envelope once.
-- Collection type: the envelope's records field is a nested dict[category_id][place_id] → AmenityRecord, mirroring discovered_places.
+- Locked (not reopened): record identity is (category_id, place_id); one record per amenity per category with no cross-category merge; the PredefinedMetricsRecord field set and its typed nullable columns; enrichment attached per place_id (the single bundle joined onto each category occurrence).
+- Define the frozen PredefinedMetricsRecord dataclass and the storage type of state.predefined_records.
+- No version stamping and no envelope at M1.3. `AmenityRecordSet` and its constant are removed. PredefinedMetricsRecord carries no contract_version. The single version (module constant AMENITY_METRICS_CONTRACT_VERSION, value "1.0") stamps the combined AmenityMetricsSet that Mechanism 3 C3.2.5 builds.
+- Collection type: state.predefined_records is a plain nested dict[category_id][place_id] → PredefinedMetricsRecord, mirroring discovered_places.
 - A place_id present in discovered_places but absent from enrichment (for example a place M1.2 dropped for a missing location) yields an all-null routing map and null transit, not a skipped record.
 - depth and taxonomy_node are read from the matching CategoryMetricPlan by category_id, not re-derived from source. Enrichment is retained on the state after the write, not cleared.
 
@@ -2505,6 +2502,314 @@ radius input in km (default 2 km) → meters for APIs; all output distances km, 
 ---
 
 
+# Final R2 Mechanism 3: LLM-driven tool resolution (component level)
+
+
+## Component C3.1: Multi-Source Evidence Acquisition (LLM-Driven Tool Loop)
+
+### Component Name
+
+`Run the LLM-Driven Web Search and Site Crawl Loop Over MCP Tools`
+
+### Goal of Component
+
+(Trigger: after M1.3 has written `state.predefined_records`. Runs once per amenity, i.e. per `(category_id, place_id)` whose category has at least one `specific_metrics` entry. RC7: all M1 records are eligible.)
+
+Once this component is complete, every eligible amenity has an evidence conversation that holds the web-search results for all of its LLM-defined metrics and, for the metrics the LLM judged unresolved, the crawl results of the amenity's own website. The LLM decides when to call each tool, and the application executes every call through the MCP client. Ordered operations:
+
+1. **Plan the work item.** For each `(category_id, place_id)` in `state.discovered_places` (the source of places for every category), find the category's `CategoryMetricPlan`. The work item takes `category_id`, `taxonomy_node`, `depth` and `specific_metrics` from that plan, and `place_id` from the `discovered_places` key. Skip the amenity if `specific_metrics` is empty.
+2. **Resolve the website URL first, in code (RC8).** Use Google's `website`. If it is `None`, run one discovery `web_search` and accept only a confirmed official site. A URL is never invented, so an unconfirmed result means "none".
+3. **Phase 1: `web_search` for all metrics (D1 steps 1–2).**
+   - Tools exposed to the LLM: `web_search` only.
+   - The LLM receives the metric list and searches for information on all metrics. It may emit several tool calls in one turn, and the application runs them concurrently.
+   - Query rules in the instruction: concise, related keyword queries of 3–6 words each, at least one query per call, 2–3 diverse queries recommended, search operators allowed.
+4. **Triage (D1 step 3).** The LLM closes phase 1 with a strict-schema triage: per metric, `sufficient` or `unresolved`.
+5. **Phase 2: site crawl for unresolved metrics only (D1 step 4, D4).**
+   - Runs only if at least one metric is `unresolved` and a URL exists. Otherwise it is skipped.
+   - Tools exposed to the LLM: `firecrawl_crawl` only. We know the website but not the page, so the crawl discovers the site's pages and content.
+   - The application clamps the page limit and depth and keeps the crawl on the website's host. The MCP gateway starts the asynchronous job, polls it, and returns the pages to the LLM.
+6. **Hand the conversation to C3.2.** It holds the tool results, each with a `retrieved_at` stamp.
+
+### Problem It Aims to Solve
+
+LLM-defined metrics (`specific_metrics`) have no structured source. Their values must be built from free text: the open web first, then the amenity's own site. Three gaps exist today:
+
+- R2 has no tool client of any kind for Parallel or Firecrawl. Calls must reach both services through MCP, which returns generic content blocks and needs a stateful session.
+- A hard-coded call sequence cannot adapt to what a search returns. Some metrics are answered by the first search, and only the rest justify the cost of crawling a site. The LLM must decide which is which.
+- Letting an LLM call tools makes cost, latency and failure handling unpredictable unless the application bounds the loop. Tool spend compounds across up to 10 amenities per category and several categories in one run.
+
+Without this component, C3.2 has nothing to read except Google's five reviews.
+
+### Finalized Approach
+
+Each approach on its own delivers the whole Goal: LLM-decided tool calls, executed against the two MCP servers, with the phase order web search, then triage, then crawl.
+
+1. **Native function-calling loop, application executes MCP calls (chosen).**
+   - The shared `StructuredLLMCaller` sends the MCP tool schemas as function tools. When the LLM returns tool calls, the application runs them through the MCP client and feeds the results back, one round at a time.
+   - The application exposes only the tools valid for the current phase.
+   - It works with the OpenAI-then-Groq chain that D6 shares, because both accept OpenAI-style tool calls.
+
+### Mandatory Sub-Tasks Independent of Approaches Taken
+
+These apply whichever approach is selected:
+
+1. **URL resolution before the loop (RC8).** Google's `website`, otherwise one discovery search with deterministic acceptance rules (no aggregator or listing hosts, name match, phone or address agreement where available). Precision over recall.
+2. **MCP gateway.** One place that owns session lifetime (opened and closed in one async scope), the connect-time `tools/list` capability check, retry only on transient failures, per-call timeouts, and parsing of tool results into typed excerpts and pages.
+3. **Phase gating.** The application decides which tool is exposed in each phase. `firecrawl_crawl` is never exposed in phase 1, and `web_search` is not exposed in phase 2.
+4. **Argument clamps.** Crawl page limit, depth and host are set by the application. The LLM cannot widen them.
+5. **Metric attribution.** Each exposed `web_search` tool carries an application-added `metric_label` argument, stripped before the MCP call. Evidence is attributed per metric, so coverage of all metrics can be checked.
+6. **Crawl cache.** At most one crawl per normalized URL per run. A concurrent request for a URL already in flight awaits the same job. The result is shared across metrics and across categories.
+7. **Currency stamps.** Every tool result carries `retrieved_at`, and searches are instructed to prefer recent sources.
+8. **Bounded loop.** Caps on tool rounds per phase and tool calls per amenity, so the worst-case call count is bounded by construction.
+9. **Tool-failure handling (D5).** A failed or empty tool call is returned to the LLM as a tool result and the loop continues. A metric left without evidence ends as null with a reason in C3.2. The run continues.
+
+### Critical Decision Choices
+
+### Generally mandatory decisions
+
+- **Tool-call driver.** The LLM decides whether and when to call each tool (D1). The application decides which tools are exposed per phase, and executes every call.
+- **MCP transport and servers (D2).** Hosted Streamable HTTP with bearer keys from `Settings`: Parallel Search MCP (`web_search` only, `web_fetch` unused) and Firecrawl MCP (`firecrawl_crawl`). No local `npx` stdio subprocess.
+- **Error-handling strategy (D5).** Per-item degradation, and the run continues. Only a gateway-level failure (cannot connect, expected tool missing) raises a typed error.
+- **Concurrency and timeouts.** Semaphores for search and crawl. Retry 2 s then 3 s on transient failures only. Per-call timeouts (search shorter than crawl). Starting values are configurable and not measured, and Firecrawl plan limits must be confirmed.
+- **Volume caps.** Rounds per phase, calls per amenity, crawl page limit and depth, and character caps per result. Values are configurable module constants.
+- **Secret handling.** Keys come from `Settings`, never from code, and are never logged.
+
+### Problem-context-specific decisions
+
+- **What "sufficient" means at triage.** The triage is an LLM judgment against each metric's `verification` text. It decides whether the crawl runs, so it is a structured field the application can read, not free prose.
+- **Crawl only for unresolved metrics.** Firecrawl is not run for metrics the web search already settled. This lowers cost and departs from the earlier "both sources mandatory" wording.
+- **Why crawl and not scrape (D4).** The website is known but the page is not. Crawl discovers the pages, and the LLM then finds the evidence. The price is an asynchronous job that the gateway must poll.
+- **Missing website.** Phase 2 is skipped and the metrics rely on web evidence alone. No URL is guessed.
+- **Conversation replay across provider fallback.** If OpenAI fails mid-conversation, Groq must be given the message history. This works only if tool-call messages are compatible, which needs an open verification.
+- **Untrusted content.** Search excerpts and crawled pages are untrusted text. They sit in tool-result messages, and the instruction says instructions found inside them are ignored.
+- **Google reviews.** The `reviews` already on the `PredefinedMetricsRecord` are supplementary context only. They never count as a web or crawl source.
+
+---
+
+## Component C3.2: LLM Cross-Check & Verification Resolution
+
+### Component Name `Resolve Each Metric From the Conversation and Write It Into the Amenity Record`
+
+### Goal of Component
+
+(Trigger: operations 1–5 run per amenity, as soon as C3.1 finishes it. Operation 6 is run-level: it runs once, after every amenity pipeline has finished.)
+
+Once this component is complete, every eligible amenity has one `SpecificMetricsRecord` with one typed result per LLM-defined metric (either a schema-valid value with verbatim provenance, or an explicit null with a reason), and the run holds one combined, versioned `AmenityMetricsSet` that pairs each place's predefined and specific records. Ordered operations:
+
+1. **Resolution turn.** The same conversation continues with no tools, using a strict JSON schema. Per metric it returns `web_value`, `scrape_value`, `relation`, `final_value`, `basis`, `verification_met` and verbatim `evidence` quotes.
+2. **Apply the contradiction rule (D7).** If a scrape value exists, it wins, even when it contradicts the web value. The web value is used only when the scrape gave nothing for that metric.
+3. **Apply the verification gate.** `verification_met = false` forces `unresolved`.
+4. **Run the code guards, in order.** Conformance to `value_type`, `unit` and `enum_values`. Then the verification gate. Then the provenance check: every quote must be a substring of the supplied tool results and must cite a supplied URL. Nothing is repaired.
+5. **Build one `ResolvedMetric` per metric** and one `SpecificMetricsRecord` for the amenity (see the output contract below). The amenity's pipeline returns the record and writes nothing to shared state.
+6. **Combine, once per run (run-level).** The `gather` waits until every amenity pipeline has finished. Then C3.2.5 runs once. It stores all returned `SpecificMetricsRecord`s in `state.specific_records`, pairs each with its `PredefinedMetricsRecord` from `state.predefined_records` by `(category_id, place_id)`, and writes the versioned `AmenityMetricsSet` to `state.amenity_records`. A place whose category has no `specific_metrics` gets `specific = None`.
+
+### Problem It Aims to Solve
+
+The web search and the crawl will partly agree, partly conflict and partly be missing. Four gaps must close:
+
+- The final value must follow one explicit rule, not whichever source arrived last. Today that rule is "scrape overrides".
+- The value must be valid for its `value_type`, unit and enum. A static output schema cannot carry per-metric enums, so code must check them.
+- A model can assert a value the evidence does not contain, and pages may contain instructions. The output must be checked against the tool results.
+- M3 currently has no output contract or home, and its metrics come from different sources than the predefined ones. The boundary with M4's `null_policy` is undefined. This component defines the specific-metrics record, the combined object, and states that C3.2 never applies `null_policy`.
+
+### Three Common Approaches
+
+Each approach on its own turns the evidence into committed, checked, record-ready values.
+
+1. **Final structured turn in the same conversation (chosen).**
+   - The model already holds every search result and crawled page in context.
+   - One call per amenity covers all metrics, and the page text is not resent.
+   - It fits the shared `StructuredLLMCaller`.
+
+### Mandatory Sub-Tasks Independent of Approaches Taken
+
+1. Pass each metric's `verification`, `value_type`, `unit` and `enum_values` into the call.
+2. Encode the contradiction rule (scrape overrides) and the "web value used when scrape is silent" fallback in the instruction.
+3. Return provenance for every resolved value: source kind, URL, verbatim quote.
+4. Constrain the output with a strict JSON schema (all keys required, closed objects, closed enums, no `minLength`/`minItems`), then validate again in code.
+5. Validate label coverage: the returned labels must match the submitted labels exactly. A missing, extra or duplicate label rejects the body for that amenity.
+6. Conform values in code. Never repair: an invalid value becomes `unresolved`.
+7. Failure handling (D5, D6). A provider-chain or body failure for one amenity gives `value = None` with `status = unresolved` and a reason such as `resolution_call_failed` or `resolution_body_invalid`. The run continues. `MetricResolutionProviderError` is raised only if the chain fails for every attempted amenity.
+8. When no evidence exists for an amenity (no search results, no crawl), skip the call and mark every metric `unresolved(no_evidence)`.
+
+### Critical Decision Choices
+
+### Generally mandatory decisions
+
+- **Call shape.** One call per amenity, one strict schema.
+- **Provider chain (D6).** The shared `StructuredLLMCaller` using `LLM_PROVIDER_ORDER` (OpenAI primary, Groq fallback). Fallback happens on provider errors and truncation only, never for a returned invalid body.
+- **Structured output.** `final_value` is `string | null`. Type and enum conformance are code checks.
+- **Output location (RC9, revised).** Predefined and specific metrics come from different sources, so they are stored as two separate record types and combined at the end.
+  - `PredefinedMetricsRecord` (renamed `AmenityRecord`, fields unchanged) is the M1.3 output, kept in `state.predefined_records`.
+  - `SpecificMetricsRecord` (new) is the M3 output, one per eligible amenity, kept in `state.specific_records`.
+  - `AmenityMetricsRecord` pairs the two for one place: `predefined` and `specific` (`None` when not applicable).
+  - `AmenityMetricsSet` is the combined, versioned object (`contract_version` "1.0" plus the records). It is written to `state.amenity_records`, which is `None` until C3.2.5 runs. `AmenityRecordSet` is removed.
+- **Run-level combine.** C3.2.5 runs once, after the `gather` has waited for every pipeline. Pipelines return their records and write no shared state.
+- **Identity is derived, not re-derived.** `category_id`, `taxonomy_node` and `depth` on a `SpecificMetricsRecord` come from the same `CategoryMetricPlan` that supplies them to the `PredefinedMetricsRecord`. `place_id` is the `discovered_places` key (the plan has no `place_id`, and `discovered_places` is the source of places for every category, the same source M1.3 uses for the predefined record). Because both records derive identity from the same source, the combine step pairs by key lookup and adds no separate consistency validation.
+- **Not applicable versus attempted.** A category with no `specific_metrics` has no work item and no `SpecificMetricsRecord`, so its combined record has `specific = None`. A failed amenity still gets a `SpecificMetricsRecord` with every metric `unresolved`. If there are no work items at all, C3.2.5 still builds the set with every `specific = None`.
+- **Null-policy boundary.** C3.2 emits `resolved` or `unresolved(reason)`, and `value` is `None` when unresolved. C4.1 alone maps that to `null` or `"unknown"` using each metric's `null_policy`.
+- **Typed errors.** A `MetricResolutionError` family (provider, validation), plus an MCP error family from C3.1, each carrying a `stage`.
+
+### Problem-context-specific decisions
+
+- **Scrape always overrides (D7).** A stale page can beat fresher web evidence. Accepted by decision. The web value is used only when the crawl produced nothing for that metric.
+- **Verification still gates.** "Scrape overrides" decides which value wins. It does not commit a value that fails the metric's `verification` rule. This interaction is stated in the spec so the two rules do not read as contradictory.
+- **Trust signal.** No numeric self-confidence. `support` is `both_sources` or `single_source`, plus the quotes.
+- **Currency.** `as_of` is the latest `retrieved_at` among the tool results behind the value.
+- **Provenance strictness.** A resolved value with no surviving verified quote becomes `unresolved(quote_unverified)`.
+- **Google reviews.** They may be cited as supporting text but never count as the second source in `support`.
+
+### Output Contract
+
+`SpecificMetricsRecord` (frozen), one per eligible amenity, identity `(category_id, place_id)`. It has the same identity fields as `PredefinedMetricsRecord`, so it can be brought into `amenity_records`:
+
+- `category_id`: int. From the `CategoryMetricPlan`.
+- `taxonomy_node`: str. From the `CategoryMetricPlan`.
+- `depth`: `DepthLevel`. From the `CategoryMetricPlan`.
+- `place_id`: str. The `discovered_places` key.
+- `specific_metrics`: `dict[label, ResolvedMetric]`. One entry per LLM-defined metric of the category.
+
+It carries no `contract_version`.
+
+`AmenityMetricsRecord` (frozen), one per `(category_id, place_id)`:
+
+- `predefined`: `PredefinedMetricsRecord`. Always present.
+- `specific`: `SpecificMetricsRecord` or None. None means not applicable (the category has no `specific_metrics`).
+
+`AmenityMetricsSet` (frozen), the only versioned object, written to `state.amenity_records`:
+
+- `contract_version`: str. Module constant `AMENITY_METRICS_CONTRACT_VERSION`, value `"1.0"`.
+- `records`: `dict[category_id][place_id] → AmenityMetricsRecord`, mirroring `discovered_places` keying.
+
+`ResolvedMetric` (frozen), stored in `SpecificMetricsRecord.specific_metrics` keyed by `label`:
+
+- `label`: str. The metric identity, unique within its category.
+- `status`: `resolved` or `unresolved`.
+- `value`: float, bool, str or None. The conformed value. It is None when unresolved.
+- `unit`: str or None. The spec's unit for `number_with_unit`.
+- `support`: `both_sources`, `single_source` or None. None when unresolved.
+- `evidence`: tuple of `source` (`web`, `scrape`, `google_reviews`), `url`, `quote`, `retrieved_at`.
+- `as_of`: str or None. Latest `retrieved_at` behind the value.
+- `unresolved_reason`: `no_evidence`, `verification_unmet`, `type_violation`, `enum_violation`, `quote_unverified`, `resolution_call_failed`, `resolution_body_invalid`, or None.
+
+A category with no `specific_metrics` (for example a `basic_profile` category) has no `SpecificMetricsRecord`. Its `AmenityMetricsRecord.specific` is None, which means not applicable. An empty or all-`unresolved` `specific_metrics` mapping means the amenity was attempted.
+
+---
+
+### Decisions applied (traceability)
+
+- D1: LLM-driven tool calling, phase order web search, triage, crawl. C3.1 operations 3–5.
+- D2: Hosted Streamable HTTP MCP with bearer keys. C3.1 decisions.
+- D3: `google_maps` cannot appear in `specific_metrics`. No Google lane in M3.
+- D4: Search evidence per metric plus one shared site crawl. C3.1 operation 5 and crawl cache.
+- D5: Null and continue. Both components.
+- D6: Shared `StructuredLLMCaller` owned by the composition root. Prerequisites and C3.2.
+- D7: Scrape overrides. C3.2 operation 2.
+- RC7: All M1 records. C3.1 goal.
+- RC8: URL first, then the loop and concurrent calls. C3.1 operation 2.
+- RC9 (revised): Two record types, `PredefinedMetricsRecord` and `SpecificMetricsRecord`, combined once by C3.2.5 into one versioned `AmenityMetricsSet`. `AmenityRecordSet` is removed. C3.2 goal, operations 5–6 and output decisions.
+- RC10: Both sources specified for every LLM-defined metric. Prerequisites.
+
+**Cross-mechanism changes from the output-object split**
+
+- M1.3 text: updated in this file. M1.3 writes `state.predefined_records` as a plain nested dict with no envelope and no version.
+- Code (not changed yet):
+  - `schemas.py`: rename `AmenityRecord` to `PredefinedMetricsRecord`, remove `AmenityRecordSet`, add `SpecificMetricsRecord`, `AmenityMetricsRecord` and `AmenityMetricsSet`, and rename the constant to `AMENITY_METRICS_CONTRACT_VERSION` (value "1.0").
+  - `AmenitySearchState`: add `predefined_records` and `specific_records`, and retype `amenity_records` to `AmenityMetricsSet | None`.
+  - `amenity_search.py`: `assemble_amenity_records` returns the plain dict and `run_result_attachment` writes `predefined_records`. The `contract_version` is dropped from the M1.3 log event.
+  - Tests that read `AmenityRecordSet`.
+- M4 C4.1: its "inline enforcement at C3.2" wording no longer matches, and it reads `AmenityMetricsSet`.
+- M4 C4.2: the pairing of predefined and specific metrics per amenity is already done by C3.2.5. C4.2 consumes `AmenityMetricsSet` and builds the display structure, and its "merge each amenity's predefined + specific metrics" goal needs rewording. It carries `support`, `evidence` and `as_of` from `ResolvedMetric`.
+
+
+## R2 Mechanism 3: sub-components of C3.1 and C3.2
+
+### Scope and inputs
+
+This plan decomposes the two components in [r2_mechanism_3_final_a4b603ba.plan.md](c:/Users/Hp/.cursor/plans/r2_mechanism_3_final_a4b603ba.plan.md). Each sub-component has Component Name, Goal of Component, Problem It Aims to Solve, Three Common Approaches, and Critical Decision Choices (generally mandatory decisions, then decisions specific to this problem).
+
+Selected approach per parent (from the component plan):
+- **C3.1:** native function-calling loop. The shared `StructuredLLMCaller` sends tool schemas to the LLM, and the application executes each returned tool call through the MCP client.
+- **C3.2:** final structured turn in the same conversation, with no tools.
+
+Locked decisions carried in and not reopened:
+- D1: the LLM decides when to call tools. Order is `web_search` for all metrics, then triage, then `firecrawl_crawl` for unresolved metrics.
+- D2: hosted Streamable HTTP MCP servers with bearer keys.
+- D4: one shared crawl per site.
+- D5: a failed item gets null and the run continues.
+- D6: one shared `StructuredLLMCaller`, owned by the composition root.
+- D7: scrape overrides web on contradiction.
+- RC7: M3 runs on all M1 records.
+- RC8: URL first, then the loop.
+- RC9 (revised): output is a separate `SpecificMetricsRecord` per amenity. C3.2.5 combines these with the `PredefinedMetricsRecord`s into one versioned `AmenityMetricsSet` (1.0). `AmenityRecord` is renamed `PredefinedMetricsRecord` and `AmenityRecordSet` is removed.
+- RC10: both tools are the specified sources of every LLM-defined metric.
+- Firecrawl tool is `firecrawl_crawl`.
+
+Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema change that gives every LLM-defined metric both sources (RC10).
+
+### Research that shapes the sub-components
+
+- **Parallel Search MCP.** `web_search` takes `objective` (string), `search_queries` (3 to 6 word queries, at least one, 2 to 3 recommended, operators allowed) and an optional `session_id` (up to 100 characters, reused within a conversation). A bearer key goes in the `Authorization` header.
+- **Firecrawl MCP.** `firecrawl_crawl` takes `url`, `limit`, `maxDiscoveryDepth` and `allowExternalLinks`.
+  - The current server README says the tool polls internally and returns final data. Older versions returned a job id, which is polled with `firecrawl_check_crawl_status`.
+  - Crawl responses can be very large and overflow the model's context. The README says to limit depth and page count.
+  - The keyless hosted endpoint exposes only 3 tools. An API key is needed for the crawl tool.
+- **MCP Python SDK.** The session pattern is `streamable_http_client(url, http_client=...)` with `ClientSession`, `list_tools()`, and `call_tool(name, args)`.
+  - A tool that fails returns `is_error` in the result and does not raise.
+  - Auth headers are supplied through a caller-owned `httpx` client.
+- **Tool-calling loop.** OpenAI chat completions and Groq use the same message cycle.
+  - The assistant message carries `tool_calls`.
+  - The application returns one `role: tool` message per `tool_call_id`.
+  - The loop ends when no `tool_calls` come back.
+  - `parallel_tool_calls` defaults to true.
+  - Groq does not support `strict` on function tools.
+- **Current code.**
+  - `StructuredLLMProvider.generate_structured` builds a fixed system and user message pair. There is no message history and no tool path.
+  - `AmenitySearch.__init__` takes the Places and Routes clients and a required keyword-only `tool_gateway: ToolGateway` (added in C3.1.1); `aclose()` also closes the gateway, and `create_amenity_search` builds it via `create_mcp_tool_gateway(settings)`. The gateway opens no session at construction. In the M1.3-only test and sample contexts the gateway is injected as `None`.
+  - The provider chain fallback is private to R1.
+
+
+
+## C3.1.1 Sub-component `Build the MCP Tool Gateway for Parallel and Firecrawl`
+
+### Goal of Component
+
+The application can call `web_search` on the Parallel server and `firecrawl_crawl` on the Firecrawl server through two typed async operations, `search_web(objective, search_queries)` and `crawl_site(url, limit, depth)`. Each operation returns typed results or a typed failure. Sessions open and close in one async scope. The connect step verifies that the expected tools and argument names exist.
+
+### Problem It Aims to Solve
+
+- R2 has no MCP client. The repo has no `mcp` dependency and no server keys.
+- An MCP call returns generic content blocks, not typed data.
+- A session is stateful and must be opened and closed in the same async task.
+- A server can rename or remove a tool. Without a check at connect, the failure appears in the middle of a run.
+
+### Finalized Approach
+
+**High-level `Client` wrapper.** One `Client(transport)` per server, where the transport is built with `streamable_http_client(url, http_client=...)`. The wrapper owns the session, the handshake and the context management, and offers convenience methods for tools. The `httpx` client that carries the `Authorization` header is still created and owned by the gateway.
+
+**Cross-mechanism note (C3.1.1 build).** Checked against the real SDK (`mcp==2.2.0`, with `mcp-types==2.2.0`): `mcp.Client` is one-shot and not re-enterable (re-entering raises `RuntimeError`), and it holds an anyio task group, so it must be entered and exited on the same task. The gateway therefore runs one owner task per server (`_ServerSession`); `open()` and `aclose()` may be called from different tasks of the caller, but the context enter/exit always happen on the owner task. The caller-owned HTTP client is `httpx2.AsyncClient` (mcp 2.x depends on `httpx2`, not `httpx`). `verify_capabilities` lists tools with `cache_mode="bypass"` and reads `Tool.input_schema["properties"]` for the argument-name check; the in-process `MCPServer` serves the offline fixtures with no network. The in-process test confirmed that a timed-out call leaves the session fully usable for the next call, so there is no reconnect path (see the corrected session decision below).
+
+### Critical Decision Choices
+
+Generally mandatory decisions:
+- **Session scope.** Sessions open at the start of `run_llm_metric_resolution` and close at its end, in the same task. They are not opened in a constructor. `aclose()` closes a leaked session, as the existing Google clients do.
+- **Authentication.** Bearer keys come from `Settings` (`PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`). Keys are never logged.
+- **Retry and timeouts.** Retry 2 s then 3 s, on transient failures only (timeout, transport error, rate limit). Per-call timeouts are set per server.
+- **Error typing.** A result with `is_error` becomes a typed tool failure. A connection or protocol failure raises an MCP error family with `stage`.
+- **Test seam.** The gateway is a `Protocol` injected into `AmenitySearch`, so a fake stands in for tests.
+
+Problem-context-specific decisions:
+- **Capability check.** `tools/list` must contain `web_search` (arguments `objective`, `search_queries`) on the Parallel server and `firecrawl_crawl` (arguments `url`, `limit`, `maxDiscoveryDepth`, `allowExternalLinks`) on the Firecrawl server. A miss raises `McpToolUnavailableError` before any amenity work. The keyless Firecrawl endpoint does not list the crawl tool, so the check also detects a missing key.
+- **Crawl result shape.** The gateway handles both known shapes: final data returned after internal polling, and a job id that is polled with `firecrawl_check_crawl_status`. Open verification: record one real `tools/call` response from each server and fix the parser to it.
+- **Crawl read timeout.** The crawl call uses a longer timeout than search, since a crawl job can run for many seconds. When it times out, the gateway reads the job with `firecrawl_check_crawl_status` and does not start the crawl again. This needs the crawl job id, so the parser must capture it (see crawl result shape).
+- **Concurrent calls on one Client.** One `Client` per server, shared across amenity pipelines inside the single event loop. It is never shared across threads or loops. Concurrency is capped by the per-server semaphore, sized to the vendor's rate limit. Every call is wrapped in an explicit timeout. **(Corrected in the C3.1.1 build — the earlier "replaced by reconnecting" is dropped.)** The gateway never replaces or reconnects a session or `Client`: a timeout is our side giving up on one wait, and the open session stays in use for the next call; the in-process test and V2a/V2b judge this, and a real failure sends the shared-`Client` approach back for review, as locked. A timed-out crawl is re-read with `firecrawl_check_crawl_status` using the same job id on the same `Client`, and the crawl is not re-issued.
+- **Rate limits.** One semaphore per server, sized to the vendor's rate limit (see the decision above). Firecrawl limits depend on the plan and must be confirmed before raising the default.
+- **Verification of the shared Client, split per server.** If a test shows an issue, this approach is reviewed.
+  - **V2a, Parallel client.** Run about ten concurrent `web_search` calls on one `Client`. Confirm each result matches its own request, and that one call hitting a timeout does not fail the others.
+  - **V2b, Firecrawl client.** Start a slow `firecrawl_crawl` on one `Client`. While it runs, call `firecrawl_check_crawl_status` (or another fast Firecrawl tool the server lists) and start a second crawl. Confirm three things:
+    - The fast call returns while the first crawl is still running.
+    - The crawls do not interfere with each other's results.
+    - After forcing a timeout on one crawl, the other in-flight calls still succeed and the session is still usable.
 
 
 
@@ -2526,83 +2831,9 @@ radius input in km (default 2 km) → meters for APIs; all output distances km, 
 
 
 
-### These Mechanisms of responsibility - 2 show what needs to be done but they are not yet finalized:
-M2 — Correctness Filtering & Representative Narrowing
-Component C2.1 — Category‑Correctness Filter
 
-Goal of Component: Drop candidates that aren't genuine members of the category, leaving a pool where every member truly belongs.
-
-Problem It Aims to Solve: Search inherently returns adjacent/mislabeled places (park under "daycare"); shipping these is the single failure the responsibility exists to prevent. Correctness ≠ volume, so it's separate and runs before the expensive M3.
-
-Three Common Approaches:
-
-Rule‑based on Google types (primaryType/types must intersect the taxonomy node's allowed set) + name heuristics.
-LLM classifier judging member/non‑member from profile + category intent.
-Hybrid: type rules as a fast gate, LLM only for ambiguous cases.
-
-Mandatory Sub‑Tasks Independent of Approaches Taken: derive the per‑category allowed‑type set from taxonomy_node; record a drop reason for traceability.
-
-Critical Decision Choices:
-
-Generally mandatory: precision‑vs‑recall threshold; deterministic vs LLM; drop logging.
-Problem‑context‑specific: strictness given C1.1 already type‑restricted (avoid double‑dropping valid ones); LLM‑filter cost vs value (runs before deep search, so it saves more than it costs); broad‑type categories (grocery vs convenience).
-Component C2.2 — Representative Narrowing
-
-Goal of Component: Reduce an over‑represented category to a bounded, representative subset so deep search runs on a manageable set.
-
-Problem It Aims to Solve: Density is uneven and M3 is the expensive stage, so narrowing before it is the main cost lever; Non‑Redundant Set is a customer want.
-
-Three Common Approaches:
-
-Rank + top‑N by data completeness and proximity/reachability.
-Diversity sampling across sub‑areas/attributes.
-Threshold + cap: keep all within an accessibility threshold, capped at N.
-
-Mandatory Sub‑Tasks Independent of Approaches Taken: define N (or cap policy) per category; deterministic tie‑break.
-
-Critical Decision Choices:
-
-Generally mandatory: N per category; ranking signal; determinism.
-Problem‑context‑specific: narrow on completeness/proximity only (characteristic values don't exist yet) — the open decision; a possible second light narrowing after M3; how N scales with the category's depth.
-M3 — LLM‑Defined Metric Resolution
-Component C3.1 — Multi‑Source Evidence Acquisition
-
-Goal of Component: For each narrowed amenity and each specific_metrics entry, assemble the raw evidence: ensure a URL (discover via web search if Google gave none), run web search for the metric's target, and scrape the official site with Firecrawl.
-
-Problem It Aims to Solve: LLM‑defined metrics have no structured source and must be built from free text; the rule is to use both web search and Firecrawl so the value can be cross‑checked; a missing website must be discovered first.
-
-Three Common Approaches:
-
-Query‑per‑metric: targeted Parallel search per metric + one reused Firecrawl scrape.
-Batched‑per‑amenity: one broad web search + one Firecrawl schema‑extraction pass for all metrics.
-Agent‑style: Firecrawl /agent given the metric list + URLs.
-
-Mandatory Sub‑Tasks Independent of Approaches Taken: URL resolution when websiteUri is absent; run both web search and Firecrawl (both mandated); cache the scrape so it isn't re‑fetched per metric. Search and scrape are mandatory parallel work, not alternatives.
-
-Critical Decision Choices:
-
-Generally mandatory: web‑search provider; Firecrawl format (markdown vs schema‑guided JSON); scrape depth (page vs crawl).
-Problem‑context‑specific: query construction from each metric's question/target; how many reviews/pages to pull to satisfy verification (e.g., ≥5 reviews); freshness for currency; per‑amenity cost cap.
-Component C3.2 — LLM Cross‑Check & Verification Resolution
-
-Goal of Component: Turn the evidence into one committed, schema‑valid value per specific metric by cross‑checking web vs scrape, applying the metric's verification rule, and conforming to value_type/enum_values.
-
-Problem It Aims to Solve: The two sources will partly agree or conflict; the value must be decided by verification, not last‑source‑wins, and must be enum/type‑valid. This is where trustworthiness is produced.
-
-Three Common Approaches:
-
-One constrained LLM call per amenity (all metrics + evidence + rules → structured output).
-Per‑metric constrained calls (isolated context).
-Two‑stage: extraction then reconciliation/verification.
-
-Mandatory Sub‑Tasks Independent of Approaches Taken: pass verification + enum_values into the call; encode "web trusted unless the scrape contradicts it, and still read the scrape for more/precise detail"; return provenance; constrain output to the schema.
-
-Critical Decision Choices:
-
-Generally mandatory: one call vs per‑metric; provider + fallback (OpenAI primary / Groq fallback, matching R1); structured‑output enforcement.
-Problem‑context‑specific: the contradiction‑resolution policy; confidence/provenance for the fact/assessment boundary; how "evidence insufficient for the threshold" maps toward null_policy (hand‑off to C4.1); currency weighting.
-M4 — Output: Null Policy & Structured Assembly
-Component C4.1 — Null‑Policy & Completeness Enforcement
+## M4 — Output: Null Policy & Structured Assembly
+### Component C4.1 — Null‑Policy & Completeness Enforcement
 
 Goal of Component: For every metric (predefined and specific), commit either a complete value (unit/scale/working link) or an explicit null per its null_policy, so a genuine absence is distinct from a wrong value.
 

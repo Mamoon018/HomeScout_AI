@@ -20,7 +20,7 @@ Locked decisions (from the Mechanism 6 spec in `deep_search_context.md`):
 - Schema miss or id-set mismatch rejects the whole body. A metric that fails K1 to K6 is dropped and logged. Code never repairs a metric.
 - Metrics live in a separate `state.category_metrics` list. `ResolvedCategory` and `InferredCategory` are unchanged. No facts list.
 - Fixed dimensions are a code constant by depth. They are not model output and are not stored on the state.
-- Tools: `google_maps`, `parallel_web_search`, `firecrawl`. Diffbot is not used.
+- Tools for an LLM-defined metric: `parallel_web_search` and `firecrawl`, in either band. `google_maps` is not offered to the model (its values are the code-owned pre-defined metrics). Diffbot is not used.
 - Caps: at most 4 metrics per band per category. Minimum per band is a logged shortfall, not a failure.
 - Schema name `metric_definition_schema`. Stage name `execute_metric_definition`.
 - Sample runner seeds post-Mechanism-5 state and does not re-call Mechanisms 1 to 5.
@@ -117,14 +117,16 @@ All in `feature_schemas/schemas.py` except the error types in `exceptions/deep_s
 | --- | --- | --- | --- | --- |
 | `MetricValueType` | value type alias | `number_with_unit`, `boolean`, `enum`, `date_time` | type alias | wire + store |
 | `NullPolicy` | unresolved-value alias | `null`, `unknown` | type alias | wire + store |
-| `ResolutionTool` | tool alias | `google_maps`, `parallel_web_search`, `firecrawl` | type alias | wire + store |
+| `ResolutionTool` | tool alias | `google_maps`, `parallel_web_search`, `firecrawl` | type alias | pre-defined metrics only |
+| `MetricResolutionTool` | LLM-defined metric tool alias | `parallel_web_search`, `firecrawl` (no `google_maps`, either band) | type alias | wire + store |
 | `MetricBand` | band alias | `operating_details`, `specific_attributes` | type alias | wire + store |
-| `ResolutionSourceEntry` | wire tool and target | `tool: ResolutionTool` · `target: str` | wire model | execute, apply |
+| `ResolutionSourceEntry` | wire tool and target | `tool: MetricResolutionTool` · `target: str` | wire model | execute, apply |
 | `MetricEntry` | one wire metric | `label`, `question`, `verification`: `str` · `value_type: MetricValueType` · `unit: str \| None` · `enum_values: list[str]` · `resolution_source: ResolutionSourceEntry` · `null_policy: NullPolicy` · `band: MetricBand` | wire model | execute, apply |
 | `CategoryMetricsEntry` | wire metrics per category | `category_id: int` (echoed) · `metrics: list[MetricEntry]` (may be empty) | wire model | execute, apply |
 | `MetricDefinitionResult` | batched wire body | `categories: list[CategoryMetricsEntry]` | wire model | execute, apply |
-| `ResolutionSource` | stored tool and target | `tool: ResolutionTool` · `target: str` | dataclass | apply, write |
-| `MetricSpec` | one stored metric | same fields as `MetricEntry`, with `resolution_source: ResolutionSource`, text trimmed | dataclass | apply, write |
+| `ResolutionSource` | stored tool and target of a pre-defined metric | `tool: ResolutionTool` · `target: str` | dataclass | schemas |
+| `MetricResolutionSource` | stored tool and target of an LLM-defined metric | `tool: MetricResolutionTool` · `target: str` | dataclass | apply, write |
+| `MetricSpec` | one stored metric | same fields as `MetricEntry`, with `resolution_source: MetricResolutionSource`, text trimmed | dataclass | apply, write |
 | `CategoryMetricSet` | metrics for one category | `category_id: int` · `taxonomy_node: str` (copied by code) · `metrics: list[MetricSpec] \| None` | **mutable list on state** | write, later stages |
 | `RequirementInterpretationState` *(extended)* | mutable workflow state | existing fields plus `category_metrics: list[CategoryMetricSet]` (default `[]`) | **mutable** | M5 to M6 to later |
 | `FIXED_DIMENSIONS_BY_DEPTH` | fixed dimensions by depth | `DepthLevel` to `tuple[str, ...]`, cumulative | constant | instruction, later stages |
@@ -182,7 +184,7 @@ injected provider chain.
 | `_ordered_categories` | `requirement_interpretation.py` | `(state) -> list[ResolvedCategory \| InferredCategory]` | explicit entries then inferred, list order |
 | `_is_metric_eligible` | `requirement_interpretation.py` | `(category) -> bool` | true when depth is operating_details or specific_attributes |
 | `_render_metric_definition_user_content` | `requirement_interpretation.py` | `(state) -> str` | JSON of payload, persona, eligible rows, leftover flags |
-| `_metric_rule_failure` | `requirement_interpretation.py` | `(entry: MetricEntry, depth: DepthLevel) -> str \| None` | first failed rule of K1 to K4, else `None` |
+| `_metric_rule_failure` | `requirement_interpretation.py` | `(entry: MetricEntry, depth: DepthLevel) -> str \| None` | first failed rule of K1 to K3, else `None` (K4 retired) |
 | `_to_metric_spec` | `requirement_interpretation.py` | `(entry: MetricEntry) -> MetricSpec` | wire metric to stored metric, text trimmed |
 | `_call_providers`, `_depth_id_coverage_miss`, `_timestamp` *(reused)* | `requirement_interpretation.py` | unchanged | provider loop, id check, log time |
 
@@ -245,7 +247,7 @@ RequirementInterpretationState{ payload, extracted, resolved, inferred_categorie
 **`build_metric_definition_instruction`**
 
 - **Purpose:** make one call return contract-passing metrics per eligible category, within each category's depth.
-- **What it does:** concatenate task statement; band rule and tool limits (`google_maps`, `parallel_web_search` for `operating_details`; `parallel_web_search`, `firecrawl` for `specific_attributes`); the typed contract fields and the `cozy` rejection with its `ambiance` reformulation; the fixed-dimension list rendered from `FIXED_DIMENSIONS_BY_DEPTH["specific_attributes"]` as "do not propose these"; the tie rule per band; the decision test; the leftover-flag rule; the cap from `MAX_METRICS_PER_BAND`; negative rules; the closed schema; worked pairs on nodes the sample runner will not reuse: (1) explicit `operating_details`, no trigger; (2) explicit `specific_attributes` with a named attribute, both bands; (3) inferred `operating_details`; (4) mixed batch with a leftover flag read into one metric's `question`.
+- **What it does:** concatenate task statement; band rule and one tool set for both bands (`parallel_web_search`, `firecrawl`; Google Maps not nameable); the typed contract fields and the `cozy` rejection with its `ambiance` reformulation; the fixed-dimension list rendered from `FIXED_DIMENSIONS_BY_DEPTH["specific_attributes"]` as "do not propose these"; the tie rule per band; the decision test; the leftover-flag rule; the cap from `MAX_METRICS_PER_BAND`; negative rules; the closed schema; worked pairs on nodes the sample runner will not reuse: (1) explicit `operating_details`, no trigger; (2) explicit `specific_attributes` with a named attribute, both bands; (3) inferred `operating_details`; (4) mixed batch with a leftover flag read into one metric's `question`.
 - **Inputs:** `json_schema` · **Outputs:** `str` · **Failure:** none.
 
 **`execute_metric_definition`**
@@ -257,7 +259,7 @@ RequirementInterpretationState{ payload, extracted, resolved, inferred_categorie
 **`apply_metric_contract`**
 
 - **Purpose:** keep only metrics that pass K1 to K6, without repairing any.
-- **What it does:** map `category_id` to `depth`; for each returned category and each metric in order, take the first failure from `_metric_rule_failure` (K1 blank text, K2 value-type parameters, K3 band above depth, K4 `firecrawl` on the `operating_details` band), then K5 duplicate label, then K6 band cap; log and record each rejection; convert survivors with `_to_metric_spec`.
+- **What it does:** map `category_id` to `depth`; for each returned category and each metric in order, take the first failure from `_metric_rule_failure` (K1 blank text, K2 value-type parameters, K3 band above depth; K4 is retired), then K5 duplicate label, then K6 band cap; log and record each rejection; convert survivors with `_to_metric_spec`.
 - **Inputs:** `state`, `body` · **Outputs:** survivors by id (every submitted id present, possibly `[]`) and rejection records · **Failure:** none.
 
 **`report_metric_shortfalls`**
@@ -341,7 +343,8 @@ with `caplog`.
 | K1 blank text | bad metric dropped, neighbor kept; rejection record has rule |
 | K2 missing `unit`; enum with one value | each dropped, neighbor kept |
 | K3 `specific_attributes` band on an `operating_details` category | dropped |
-| K4 `firecrawl` on an `operating_details` metric | dropped |
+| `firecrawl` on an `operating_details` metric (K4 retired) | kept |
+| `google_maps` as an LLM-defined metric tool | whole body rejected at the schema layer |
 | K5 repeated label (case-insensitive) | later one dropped |
 | K6 fifth metric in one band | fifth dropped, first four kept in order |
 | shortfall | eligible category left empty: `category_underspecified` logged, `metrics == []`, no error |

@@ -42,6 +42,28 @@ class Settings(BaseSettings):
         validation_alias="LLM_PROVIDER_ORDER",
     )
 
+    # R2 Mechanism 3 C3.1.1 — MCP tool gateway (Parallel web_search, Firecrawl crawl).
+    # Keys are optional: a keyless Parallel works at a lower anonymous limit, and a keyless
+    # Firecrawl is detected by the gateway's capability check (its crawl tool is absent). Leaving
+    # both unset keeps every existing M1 run and test working, since the gateway opens nothing at
+    # construction time.
+    parallel_api_key: str | None = Field(
+        default=None,
+        validation_alias="PARALLEL_API_KEY",
+    )
+    firecrawl_api_key: str | None = Field(
+        default=None,
+        validation_alias="FIRECRAWL_API_KEY",
+    )
+    parallel_mcp_url: str = Field(
+        default="https://search.parallel.ai/mcp",
+        validation_alias="PARALLEL_MCP_URL",
+    )
+    firecrawl_mcp_url: str = Field(
+        default="https://mcp.firecrawl.dev/v2/mcp",
+        validation_alias="FIRECRAWL_MCP_URL",
+    )
+
     @property
     def supabase_jwt_issuer(self) -> str:
         return f"{self.supabase_url.rstrip('/')}/auth/v1"

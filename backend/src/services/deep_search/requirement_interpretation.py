@@ -89,10 +89,10 @@ from src.services.deep_search.feature_schemas.schemas import (
     InferredCategoryEntry,
     MetricDefinitionResult,
     MetricEntry,
+    MetricResolutionSource,
     MetricSpec,
     PayloadRecord,
     RequirementInterpretationState,
-    ResolutionSource,
     ResolvedCategory,
     ResolvedRequirements,
     TaxonomyMappingResult,
@@ -1483,7 +1483,7 @@ class UserRequirementsInterpretation:
         state: RequirementInterpretationState,
         body: MetricDefinitionResult,
     ) -> tuple[dict[int, list[MetricSpec]], list[dict]]:
-        """Drop each metric that fails K1 to K6; return survivors by id and the rejections."""
+        """Drop each metric that fails K1 to K6 (K4 retired); return survivors and rejections."""
         depth_by_id = {
             category.category_id: category.depth for category in _ordered_categories(state)
         }
@@ -2082,7 +2082,11 @@ def _render_metric_definition_user_content(state: RequirementInterpretationState
 
 
 def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
-    """First failed rule of K1 to K4 for one metric, or None when it passes them."""
+    """First failed rule of K1 to K3 for one metric, or None when it passes them.
+
+    K4 (tool fits band) is retired: an LLM-defined metric may use `parallel_web_search` or
+    `firecrawl` in either band, and `google_maps` is not in the wire tool set at all.
+    """
     texts = (
         entry.label,
         entry.question,
@@ -2105,8 +2109,6 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
 
     if entry.band == "specific_attributes" and depth != "specific_attributes":
         return "band_above_depth"
-    if entry.resolution_source.tool == "firecrawl" and entry.band != "specific_attributes":
-        return "tool_not_allowed_for_band"
     return None
 
 
@@ -2118,7 +2120,7 @@ def _to_metric_spec(entry: MetricEntry) -> MetricSpec:
         value_type=entry.value_type,
         unit=entry.unit.strip() if entry.unit and entry.unit.strip() else None,
         enum_values=[member.strip() for member in entry.enum_values],
-        resolution_source=ResolutionSource(
+        resolution_source=MetricResolutionSource(
             tool=entry.resolution_source.tool,
             target=entry.resolution_source.target.strip(),
         ),

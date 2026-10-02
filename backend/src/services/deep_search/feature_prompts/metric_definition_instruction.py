@@ -27,18 +27,22 @@ basic_profile is fixed and is never sent to you.
 
 operating_details band: Is it any good, and how does it run, beyond the fixed dimensions?
 A category-appropriate quality set (a restaurant, a gym, and a school are judged on
-different things). Allowed tools: google_maps (a Maps attribute that is not already a fixed
-dimension) and parallel_web_search (reputation and service facts).
+different things).
 
 specific_attributes band: Does it fit this customer's particular situation? Metrics for the
 attributes the customer named, or that a persona fact or the inferred reasoning shows they
-would need. Allowed tools: parallel_web_search and firecrawl (fetches the content of a
-specific page such as the official site, a schedule, a menu, or a price list).
+would need.
+
+Allowed tools, in either band: parallel_web_search (reputation and service facts from web
+search results) and firecrawl (fetches the content of a specific page such as the official
+site, a schedule, a menu, or a price list). Google Maps is not a tool you may name. Every
+value Google Maps can supply is already a fixed dimension fetched without a metric, so any
+metric you define is resolved from the web or from a fetched page.
 
 Bands are cumulative. A category with depth operating_details receives operating_details
 metrics only. A category with depth specific_attributes may receive operating_details
 metrics and specific_attributes metrics. Never emit a band above the category's assigned
-depth. firecrawl is only for the specific_attributes band."""
+depth."""
 
 METRIC_CONTRACT = """\
 METRIC CONTRACT
@@ -55,9 +59,9 @@ never fetched.
 - unit: required when value_type is number_with_unit. null otherwise.
 - enum_values: at least two distinct members when value_type is enum. An empty list
   otherwise.
-- resolution_source: {tool, target}. tool is google_maps, parallel_web_search, or firecrawl.
-  target names something concrete: the Maps field, the shape of the search query, or the
-  page type to fetch.
+- resolution_source: {tool, target}. tool is parallel_web_search or firecrawl.
+  target names something concrete: the shape of the search query or the page type to
+  fetch.
 - verification: the evidence that confirms the value, for example "stated on the official
   site" or "dominant sentiment across at least 5 reviews".
 - null_policy: null or unknown. What to emit when the value cannot be resolved. Never a guess.
@@ -102,7 +106,7 @@ DO NOT
 - Do not assign or change depth. Every category already has one.
 - Do not propose any fixed dimension. Those are fetched without metrics.
 - Do not emit a band above the category's assigned depth.
-- Do not emit firecrawl for an operating_details metric.
+- Do not name Google Maps as a tool. Only parallel_web_search and firecrawl are allowed.
 - Do not emit free-form prose as a value type, a guessed null_policy, or an empty text field.
 - Do not repeat a label within one category.
 - Do not invent, drop, remap, or duplicate a category_id. Echo every submitted category_id

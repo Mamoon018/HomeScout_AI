@@ -26,8 +26,8 @@ from src.services.deep_search.feature_schemas.schemas import (
 
 
 def _search() -> AmenitySearch:
-    # M1.3 methods never touch the clients, so None is a safe stand-in.
-    return AmenitySearch(places_client=None, routes_client=None)
+    # M1.3 methods never touch the clients or the gateway, so None is a safe stand-in.
+    return AmenitySearch(places_client=None, routes_client=None, tool_gateway=None)
 
 
 def _plan(category_id: int, node: str, depth: str) -> CategoryMetricPlan:
