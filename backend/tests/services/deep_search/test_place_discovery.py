@@ -69,7 +69,8 @@ class _FakeRoutesClient:
 
 
 def _search(places_client, **kwargs) -> AmenitySearch:
-    """Build an AmenitySearch with a routes client the M1.1 tests do not use."""
+    """Build an AmenitySearch with a routes client and gateway the M1.1 tests do not use."""
+    kwargs.setdefault("tool_gateway", None)
     return AmenitySearch(places_client, _FakeRoutesClient(), **kwargs)
 
 

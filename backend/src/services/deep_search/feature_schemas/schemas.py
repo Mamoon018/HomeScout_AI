@@ -34,6 +34,10 @@ METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"
 MetricValueType = Literal["number_with_unit", "boolean", "enum", "date_time"]
 NullPolicy = Literal["null", "unknown"]
 ResolutionTool = Literal["google_maps", "parallel_web_search", "firecrawl"]
+# Tools an LLM-defined metric may name. `google_maps` is excluded: every value Google Maps can
+# supply is a code-owned pre-defined metric, so a model-defined metric is always a web-search or
+# page-fetch fact, in either band. Used by the wire schema and the stored MetricSpec.
+MetricResolutionTool = Literal["parallel_web_search", "firecrawl"]
 # The two dynamic depth bands the model defines metrics for; basic_profile is fixed.
 MetricBand = Literal["operating_details", "specific_attributes"]
 # The bands a pre-defined (code-owned, Google-Maps-resolved) metric belongs to. Includes
@@ -430,16 +434,16 @@ class ResolutionSourceEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tool: ResolutionTool = Field(
+    tool: MetricResolutionTool = Field(
         description=(
-            "The tool a later stage uses: 'google_maps' for a Maps field, "
-            "'parallel_web_search' for a web search, 'firecrawl' for a fetched page."
+            "The tool a later stage uses: 'parallel_web_search' for a web search, "
+            "'firecrawl' for a fetched page."
         )
     )
     target: str = Field(
         description=(
-            "The concrete target: the Maps field, the shape of the search query, or the "
-            "page type to fetch. Must name something specific."
+            "The concrete target: the shape of the search query or the page type to "
+            "fetch. Must name something specific."
         )
     )
 
@@ -610,9 +614,17 @@ class InferredCategory:
 
 @dataclass
 class ResolutionSource:
-    """Stored tool and target of one metric."""
+    """Stored tool and target of one pre-defined (code-owned) metric."""
 
     tool: ResolutionTool
+    target: str
+
+
+@dataclass
+class MetricResolutionSource:
+    """Stored tool and target of one LLM-defined metric (never `google_maps`)."""
+
+    tool: MetricResolutionTool
     target: str
 
 
@@ -719,7 +731,7 @@ class MetricSpec:
     value_type: MetricValueType
     unit: str | None
     enum_values: list[str]
-    resolution_source: ResolutionSource
+    resolution_source: MetricResolutionSource
     verification: str
     null_policy: NullPolicy
     band: MetricBand
@@ -743,8 +755,9 @@ class CategoryMetricPlan:
     """Compiled metric picture for one category, keyed by category_id.
 
     Holds the pre-defined metrics (code-owned, resolved from Google Maps) and the LLM-defined
-    metrics (resolved from Parallel web search and Firecrawl) side by side but separate, so a
-    later retrieval stage fetches each subset through its own tools. `specific_metrics` is the
+    metrics (resolved from Parallel web search and Firecrawl, in either band; never Google
+    Maps) side by side but separate, so a later retrieval stage fetches each subset through
+    its own tools. `specific_metrics` is the
     surviving set from the matching CategoryMetricSet, and is an empty list for a basic_profile
     category. `depth` is carried so retrieval does not look the category back up.
     """

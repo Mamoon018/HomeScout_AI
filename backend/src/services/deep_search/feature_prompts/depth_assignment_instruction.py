@@ -33,8 +33,8 @@ Contents: basic_profile plus operational dimensions (hours, contact phone, ratin
 review volume, price level) plus an LLM-defined, per-category quality set. The quality set
 is category-appropriate (restaurant vs gym vs school differ). Each proposed quality metric
 must pass the metric contract below.
-Tools later stages may use: Maps (hours, rating, ratings count, price_level, attributes)
-plus parallel web search (reputation synthesis).
+Tools later stages may use: Maps (hours, rating, ratings count, price_level) for the fixed
+dimensions, plus parallel web search and firecrawl for the LLM-defined quality set.
 Contract-gated: yes for every LLM-proposed quality metric. The fixed Maps operational
 dimensions are not contract-gated.
 
@@ -109,8 +109,8 @@ contract; they are fixed and Maps-resolvable.
   Indirect = a persona / inferred fact implies they would weigh it.
 - value_type: one of number+unit | boolean | enum[fixed set] | date/time. Free-form prose
   as a final value is disallowed.
-- resolution_source: concrete tool + target: which Maps field, or the shape of the
-  web-search query, or which page type firecrawl/diffbot hits.
+- resolution_source: concrete tool + target: the shape of the web-search query, or which
+  page type firecrawl hits. Maps is not used for an LLM-defined metric.
 - verification: what evidence confirms the value.
 - null_policy: what to emit if unresolved — must be null / "unknown", never guessed.
 

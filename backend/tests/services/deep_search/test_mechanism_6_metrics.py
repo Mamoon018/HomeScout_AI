@@ -356,6 +356,7 @@ async def test_missing_field_rejects_whole_body_without_writing() -> None:
         {"value_type": "prose"},
         {"null_policy": "guess"},
         {"resolution_source": {"tool": "diffbot", "target": "any page"}},
+        {"resolution_source": {"tool": "google_maps", "target": "places.rating"}},
     ],
 )
 async def test_value_outside_a_closed_set_rejects_whole_body(override: dict) -> None:
@@ -425,7 +426,7 @@ async def test_no_provider_answers_raises_provider_error() -> None:
     [
         (_metric("Blank question", question="   "), "text_completeness"),
         (
-            _metric("Blank target", resolution_source={"tool": "google_maps", "target": " "}),
+            _metric("Blank target", resolution_source={"tool": "parallel_web_search", "target": " "}),
             "text_completeness",
         ),
         (
@@ -437,12 +438,8 @@ async def test_no_provider_answers_raises_provider_error() -> None:
             _metric("Boolean with unit", value_type="boolean", unit="x", enum_values=[]),
             "value_type_parameters",
         ),
-        (
-            _metric("Fetched page for quality", resolution_source={"tool": "firecrawl", "target": "reviews page"}),
-            "tool_not_allowed_for_band",
-        ),
     ],
-    ids=["K1_question", "K1_target", "K2_no_unit", "K2_one_enum_value", "K2_boolean_unit", "K4_firecrawl"],
+    ids=["K1_question", "K1_target", "K2_no_unit", "K2_one_enum_value", "K2_boolean_unit"],
 )
 async def test_failing_metric_is_dropped_and_neighbor_is_kept(bad: dict, rule: str) -> None:
     good = _metric("Neighbor")
@@ -459,6 +456,26 @@ async def test_failing_metric_is_dropped_and_neighbor_is_kept(bad: dict, rule: s
 
     assert [m.label for m in survivors[0]] == ["Neighbor", "Dedicated platform present"]
     assert rejections == [{"category_id": 0, "label": bad["label"], "rule": rule}]
+
+
+async def test_firecrawl_is_allowed_in_the_operating_details_band() -> None:
+    fetched = _metric(
+        "Menu price range",
+        resolution_source={"tool": "firecrawl", "target": "menu page on the official site"},
+    )
+    provider = FakeStructuredProvider(bodies=[_body(_entry(0, _metric(), fetched), _entry(1, _metric()))])
+    state = _state_after_mechanism_5(inferred_categories=[])
+    interpretation = _interpretation(provider)
+
+    body = await interpretation.execute_metric_definition(
+        state, interpretation.build_metric_definition_instruction(metric_definition_json_schema())
+    )
+    survivors, rejections = interpretation.apply_metric_contract(state, body)
+
+    assert rejections == []
+    assert [m.label for m in survivors[0]] == ["Service speed", "Menu price range"]
+    assert survivors[0][1].band == "operating_details"
+    assert survivors[0][1].resolution_source.tool == "firecrawl"
 
 
 async def test_specific_band_on_operating_details_category_is_dropped() -> None:
@@ -597,6 +614,16 @@ def test_instruction_lists_fixed_dimensions_cap_and_tools() -> None:
     assert f"At most {MAX_METRICS_PER_BAND} metrics per band" in instruction
     assert "firecrawl" in instruction and "parallel_web_search" in instruction
     assert "diffbot" not in instruction.lower()
+    assert "tool is parallel_web_search or firecrawl" in instruction
+    assert "tool is google_maps" not in instruction
+    assert "firecrawl is only for the specific_attributes band" not in instruction
+
+
+def test_wire_schema_offers_only_web_search_and_firecrawl_as_tools() -> None:
+    schema = metric_definition_json_schema()
+
+    tool = schema["$defs"]["ResolutionSourceEntry"]["properties"]["tool"]
+    assert set(tool["enum"]) == {"parallel_web_search", "firecrawl"}
 
 
 # Sub-component 6 / 7: pre-defined catalog and per-category metric compilation.

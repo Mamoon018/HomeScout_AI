@@ -121,6 +121,8 @@ class _FakeRoutesClient:
 
 
 def _search(places_client, routes_client, **kwargs) -> AmenitySearch:
+    # M1.2 tests do not exercise the Mechanism 3 gateway, so inject None.
+    kwargs.setdefault("tool_gateway", None)
     return AmenitySearch(places_client, routes_client, **kwargs)
 
 
