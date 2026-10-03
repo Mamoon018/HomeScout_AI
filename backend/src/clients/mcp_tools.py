@@ -277,10 +277,18 @@ class _ServerSession:
         return self._client
 
     async def stop(self) -> None:
-        """Release the owner task and await it. Idempotent."""
-        if self._task is None:
+        """Release the owner task and await it. Idempotent.
+
+        A ready session is parked on `_stop` and closes gracefully. A task that never reached
+        readiness (still connecting, or failing) is not waiting on `_stop`, so it is cancelled to
+        unwind the half-open connect promptly instead of blocking on the HTTP client's timeout.
+        """
+        task = self._task
+        if task is None:
             return
         self._stop.set()
+        if self._client is None and not task.done():
+            task.cancel()
         await self._await_task()
 
     async def _await_task(self) -> None:
@@ -316,9 +324,14 @@ class McpToolGateway:
         self._crawl_sem = asyncio.Semaphore(crawl_concurrency)
 
     async def open(self) -> None:
-        """Start both sessions together, then verify both catalogs. Cleans up on any failure."""
-        await self._start_sessions()
+        """Start both sessions together, then verify both catalogs.
+
+        Any non-local exit — a start failure, a verify failure, or a cancellation of the caller
+        mid-open — tears both sessions down before leaving, so a partially-opened gateway never
+        leaks an owner task or its client.
+        """
         try:
+            await self._start_sessions()
             await self.verify_capabilities()
         except BaseException:
             await self.aclose()
@@ -330,8 +343,7 @@ class McpToolGateway:
         )
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
-            # One side may have started; stop both so a failed open leaves no running task.
-            await self.aclose()
+            # Cleanup is centralized in `open`; here we only translate the failure.
             first = errors[0]
             if isinstance(first, McpConnectionError):
                 raise first
@@ -400,6 +412,10 @@ class McpToolGateway:
         self, objective: str, search_queries: Sequence[str]
     ) -> WebSearchResult | ToolFailure:
         """Run `web_search` with transient retry and parse the excerpts."""
+        if not objective.strip():
+            raise ValueError("search objective must be a non-empty string")
+        if not any(query.strip() for query in search_queries):
+            raise ValueError("search_queries must contain at least one non-empty query")
         client = self._parallel.client()
         retrieved_at = _timestamp()
         arguments = {"objective": objective, "search_queries": list(search_queries)}
@@ -655,8 +671,10 @@ def _parse_search_result(
     if isinstance(data, dict):
         hits = _first_key(data, _HIT_LIST_KEYS)
         if hits is None:
-            # A dict with no recognised hit list is read as an empty search, not a failure.
-            hits = []
+            # De-mask: a dict with no recognised hit-list key is an unreadable shape, not an empty
+            # search. Failing honestly surfaces a real shape mismatch instead of returning a
+            # confident empty result (the hit-list key names are an open verification item).
+            raise _UnparseableResult("search body had no recognised hit-list key")
     elif isinstance(data, list):
         hits = data
     else:
@@ -742,7 +760,13 @@ def _parse_crawl_status(
     job_id: str,
     retrieved_at: str,
 ) -> CrawlResult | None:
-    """Read a status response: a `CrawlResult` when complete, else None to keep polling."""
+    """Read a status response: a `CrawlResult` when complete, None while running.
+
+    De-mask: a body that is neither a recognised running state nor a recognised terminal state, and
+    carries no pages, is an unreadable shape — surfaced as `_UnparseableResult` rather than polled on
+    until the deadline (which would mislabel a shape mismatch as a timeout). The status vocabularies
+    are an open verification item, so an unlisted word fails loudly here on first contact.
+    """
     data = _decode_body(result)
     pages = _extract_pages(data)
     status = _status_of(data)
@@ -750,10 +774,12 @@ def _parse_crawl_status(
         return None
     if status in _CRAWL_DONE_STATUSES:
         return CrawlResult(url, job_id, tuple(pages), retrieved_at)
-    # No explicit status: accept pages if the server returned them, otherwise keep polling.
+    # Some servers return pages without a terminal status word; accept them.
     if pages:
         return CrawlResult(url, job_id, tuple(pages), retrieved_at)
-    return None
+    raise _UnparseableResult(
+        f"crawl status body had an unrecognised status {status!r} and no pages"
+    )
 
 
 def _log_attempt(tool: str, attempt: int, failure: ToolFailure) -> None:

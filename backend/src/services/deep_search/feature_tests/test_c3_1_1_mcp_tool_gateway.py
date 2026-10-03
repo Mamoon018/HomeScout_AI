@@ -541,3 +541,97 @@ def test_classify_failure_maps_transport_and_rate_limited_exceptions() -> None: 
 
     assert _classify_failure(ConnectionError("link down")) == "transport"
     assert _classify_failure(RateLimited("slow down")) == "rate_limited"
+
+
+# ============================================================= Drift-remediation behaviors (D1–D4)
+# Lock in the four C3.1.1 drift fixes: parser de-masks (search + crawl status), open() cleanup on
+# cancellation, and search input validation.
+
+
+async def test_unrecognised_search_object_returns_toolfailure_unparseable() -> None:  # D1
+    # A JSON object with no recognised hit-list key is an unreadable shape, NOT an empty search
+    # (contrast T6, where `{"results": []}` is a valid empty result).
+    gateway = _gateway(_parallel_server(_static({"unexpected": 1})), _firecrawl_server())
+    await gateway.open()
+    result = await gateway.search_web("o", ["q"])
+    await gateway.aclose()
+
+    assert isinstance(result, ToolFailure)  # not WebSearchResult(excerpts=())
+    assert result.kind == "unparseable"
+
+
+async def test_unrecognised_crawl_status_returns_unparseable_without_polling(no_wait) -> None:  # D2
+    status_calls = {"n": 0}
+
+    async def status_handler(_id):
+        status_calls["n"] += 1
+        return {"state": "weird"}  # neither a known running nor terminal status, and no pages
+
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(crawl_handler=_static({"id": "job-x"}), status_handler=status_handler),
+    )
+    await gateway.open()
+    result = await gateway.crawl_site("https://x.test", limit=3, depth=1)
+    await gateway.aclose()
+
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unparseable"
+    assert status_calls["n"] == 1  # de-masked on the first read; not polled to the deadline
+    assert no_wait == []  # and no poll backoff was ever slept (contrast T17's poll-to-timeout)
+
+
+async def test_open_cancelled_mid_connect_leaves_no_task_and_does_not_hang() -> None:  # D3
+    blocker = asyncio.Event()  # never set → firecrawl stays mid-connect
+    parallel = _parallel_server()
+
+    def factory(config: McpServerConfig):
+        @asynccontextmanager
+        async def cm():
+            if config.name == "firecrawl":
+                await blocker.wait()  # block inside connect, before readiness is published
+                yield None  # unreachable
+            else:
+                async with Client(parallel) as client:
+                    yield client
+
+        return cm()
+
+    gateway = McpToolGateway(
+        McpServerConfig("parallel", "http://parallel", None, 5.0),
+        McpServerConfig("firecrawl", "http://firecrawl", None, 5.0),
+        client_factory=factory,
+    )
+
+    before = {t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-session")}
+    open_task = asyncio.ensure_future(gateway.open())
+    for _ in range(5):  # let parallel become ready and firecrawl's owner task reach the block
+        await asyncio.sleep(0)
+    open_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(open_task, timeout=1.0)  # completes quickly → no hang
+    await asyncio.sleep(0)  # let teardown settle
+    after = {t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-session")}
+    assert after == before  # both owner tasks were torn down, none leaked
+
+
+async def test_search_rejects_empty_objective_and_queries_before_any_call() -> None:  # D4
+    called = {"n": 0}
+
+    async def handler(objective, _queries):
+        called["n"] += 1
+        return _DEFAULT_SEARCH_BODY
+
+    gateway = _gateway(_parallel_server(handler), _firecrawl_server())
+    await gateway.open()
+    try:
+        with pytest.raises(ValueError):
+            await gateway.search_web("", ["q"])
+        with pytest.raises(ValueError):
+            await gateway.search_web("   ", ["q"])
+        with pytest.raises(ValueError):
+            await gateway.search_web("o", ["", "  "])
+    finally:
+        await gateway.aclose()
+
+    assert called["n"] == 0  # rejected before any call is spent (mirrors T13)
