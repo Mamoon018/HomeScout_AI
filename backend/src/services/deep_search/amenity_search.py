@@ -62,6 +62,7 @@ DISCOVERY_CATEGORY_EVENT = "discovery.category_completed"
 ENRICHMENT_MODE_EVENT = "enrichment.mode_completed"
 ENRICHMENT_TRANSIT_EVENT = "enrichment.transit_batch_completed"
 ATTACHMENT_COMPLETED_EVENT = "attachment.completed"
+ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT = "attachment.accessibility_degraded"
 
 _SECONDS_PER_MINUTE = 60.0
 _OUTPUT_DECIMALS = 2
@@ -652,9 +653,27 @@ class AmenitySearch:
             category_records: dict[str, AmenityRecord] = {}
             for place_id, canonical_place in canonical.items():
                 profile = self.project_place_profile(canonical_place.place)
-                routing_map, transit_view = accessibility_index.get(
-                    place_id, ({mode: None for mode in ROUTING_MODES}, None)
-                )
+                if place_id in accessibility_index:
+                    routing_map, transit_view = accessibility_index[place_id]
+                else:
+                    # Silent drift: this place was discovered in M1.1 but never enriched in M1.2
+                    # (e.g. dropped there for a missing location). It survives as a record with an
+                    # all-null routing map and null transit rather than being skipped, so the join
+                    # is total. That degrade raises nothing, so this WARN is the only evidence the
+                    # record carries empty accessibility — and why a downstream null came from here.
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT,
+                                "timestamp": _timestamp(),
+                                "category_id": category_id,
+                                "place_id": place_id,
+                                "reason": "missing_enrichment",
+                            }
+                        )
+                    )
+                    routing_map = {mode: None for mode in ROUTING_MODES}
+                    transit_view = None
                 category_records[place_id] = AmenityRecord(
                     category_id=category_id,
                     taxonomy_node=plan.taxonomy_node,
