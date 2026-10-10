@@ -7,10 +7,11 @@ are not re-invoked, then calls the M1.3 stage methods in sequence rather than on
 every intermediate object can be printed. The completion event is read back off PLACES_LOGGER_NAME
 with a collecting handler, the same technique the discovery and enrichment runners use.
 
-The seed exercises each branch: a place with a full profile and full routing/transit; a place
-missing optional fields (null projection); a `basic_profile` category (operating fields not
-requested); a place present in `discovered_places` but absent from `enrichment` (all-null
-accessibility); a routing mode set to None; transit set to None.
+The seed exercises each branch: a place with a full profile (full-1) deliberately left
+unenriched so the silent-drift WARN fires; a place missing optional fields (null
+projection); a `basic_profile` category (operating fields not requested); a place present
+in `discovered_places` but absent from `enrichment` (all-null accessibility); a routing
+mode set to None; transit set to None.
 
 From `backend/` (no API key or network needed):
     python -m src.services.deep_search.feature_sample_runs.result_attachment_sample_run
@@ -23,6 +24,7 @@ import sys
 from src.core.logging import PLACES_LOGGER_NAME, configure_logging
 from src.exceptions.deep_search import ResultAttachmentError
 from src.services.deep_search.amenity_search import (
+    ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT,
     ATTACHMENT_COMPLETED_EVENT,
     AmenitySearch,
 )
@@ -104,16 +106,9 @@ def _build_sample_state() -> AmenitySearchState:
         },
     }
     # Union of place_ids across categories. no-enrich-4 is deliberately absent.
+    # Option 2 probe: full-1 is also omitted so the silent-drift WARN fires on a
+    # place that would otherwise have a full accessibility profile.
     enrichment = {
-        "full-1": EnrichmentBundle(
-            place_id="full-1",
-            routing={
-                "walk": RouteLeg(distance_m=300, duration_s=240),
-                "drive": RouteLeg(distance_m=1200, duration_s=300),
-                "cycle": RouteLeg(distance_m=800, duration_s=360),
-            },
-            transit=TransitLeg(distance_m=1500, duration_s=600, used_fallback=False),
-        ),
         "partial-2": EnrichmentBundle(
             place_id="partial-2",
             routing={
@@ -299,6 +294,12 @@ def run_sample_result_attachment() -> AmenitySearchState:
 
     _section("COMPLETION EVENT and RETAINED ENRICHMENT")
     print("completion events: " + json.dumps(collector.events(ATTACHMENT_COMPLETED_EVENT)))
+    # The silent-drift WARN the service emits for a discovered place that was never enriched;
+    # here it fires for no-enrich-4, whose record carries the all-null accessibility above.
+    print(
+        "accessibility-degraded events (discovered but not enriched): "
+        + json.dumps(collector.events(ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT))
+    )
     print(f"state.enrichment still has {len(state.enrichment)} entries (retained, not cleared).")
     return state
 

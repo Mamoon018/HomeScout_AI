@@ -14,6 +14,10 @@ from src.clients.google_routes import (
     GoogleRoutesAsyncClient,
     create_routes_async_client,
 )
+from src.clients.llm_provider import (
+    StructuredLLMCaller,
+    create_structured_llm_caller,
+)
 from src.clients.mcp_tools import (
     ToolGateway,
     create_mcp_tool_gateway,
@@ -62,6 +66,7 @@ DISCOVERY_CATEGORY_EVENT = "discovery.category_completed"
 ENRICHMENT_MODE_EVENT = "enrichment.mode_completed"
 ENRICHMENT_TRANSIT_EVENT = "enrichment.transit_batch_completed"
 ATTACHMENT_COMPLETED_EVENT = "attachment.completed"
+ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT = "attachment.accessibility_degraded"
 
 _SECONDS_PER_MINUTE = 60.0
 _OUTPUT_DECIMALS = 2
@@ -106,6 +111,8 @@ class AmenitySearch:
         routes_client: GoogleRoutesAsyncClient,
         *,
         tool_gateway: ToolGateway,
+        llm_caller: StructuredLLMCaller | None = None,
+        owns_caller: bool = True,
         places_concurrency: int = DEFAULT_DISCOVERY_CONCURRENCY,
         routes_concurrency: int = DEFAULT_ROUTES_CONCURRENCY,
     ) -> None:
@@ -115,6 +122,12 @@ class AmenitySearch:
         # service never sees MCP types. M1 workflows never touch it; `run_llm_metric_resolution`
         # (built later) will `open()` it first and `aclose()` it last.
         self._tool_gateway = tool_gateway
+        # Mechanism 3 (C3.1.2) injects the shared LLM caller here for the tool-turn metric
+        # resolution. It is None only in the M1-only contexts that make no LLM call. When the
+        # DeepSearch feature injects a shared caller, `owns_caller` is False and the feature
+        # closes it; standalone construction owns and closes its own.
+        self._llm_caller = llm_caller
+        self._owns_caller = owns_caller
         # Places (discovery + routing re-search) and Routes (transit) hit two services with
         # independent rate limits and run concurrently in M1.2, so each has its own bound.
         # Independent calls overlap their I/O waits; each semaphore caps how many are in flight.
@@ -652,9 +665,27 @@ class AmenitySearch:
             category_records: dict[str, AmenityRecord] = {}
             for place_id, canonical_place in canonical.items():
                 profile = self.project_place_profile(canonical_place.place)
-                routing_map, transit_view = accessibility_index.get(
-                    place_id, ({mode: None for mode in ROUTING_MODES}, None)
-                )
+                if place_id in accessibility_index:
+                    routing_map, transit_view = accessibility_index[place_id]
+                else:
+                    # Silent drift: this place was discovered in M1.1 but never enriched in M1.2
+                    # (e.g. dropped there for a missing location). It survives as a record with an
+                    # all-null routing map and null transit rather than being skipped, so the join
+                    # is total. That degrade raises nothing, so this WARN is the only evidence the
+                    # record carries empty accessibility — and why a downstream null came from here.
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": ATTACHMENT_ACCESSIBILITY_DEGRADED_EVENT,
+                                "timestamp": _timestamp(),
+                                "category_id": category_id,
+                                "place_id": place_id,
+                                "reason": "missing_enrichment",
+                            }
+                        )
+                    )
+                    routing_map = {mode: None for mode in ROUTING_MODES}
+                    transit_view = None
                 category_records[place_id] = AmenityRecord(
                     category_id=category_id,
                     taxonomy_node=plan.taxonomy_node,
@@ -671,13 +702,17 @@ class AmenitySearch:
         )
 
     async def aclose(self) -> None:
-        """Close the async Places and Routes transports, and the MCP gateway, after a run."""
+        """Close the async Places and Routes transports, the MCP gateway, and the caller."""
         await self._places_client.aclose()
         await self._routes_client.aclose()
         # The gateway closes any leaked session even if `run_llm_metric_resolution` already did. It
         # is None only in the M1.3-only contexts that never build or open it.
         if self._tool_gateway is not None:
             await self._tool_gateway.aclose()
+        # Close the shared caller only when this instance owns it; the DeepSearch feature
+        # closes an injected caller itself. It is None in M1-only contexts.
+        if self._owns_caller and self._llm_caller is not None:
+            await self._llm_caller.aclose()
 
 
 def _element_has_route(element: routing_v2.RouteMatrixElement) -> bool:
@@ -693,13 +728,27 @@ def _element_used_fallback(element: routing_v2.RouteMatrixElement) -> bool:
         return False
 
 
-def create_amenity_search(settings: Settings) -> AmenitySearch:
-    """Composition root: build the async Places and Routes clients and the MCP gateway, inject them.
+def create_amenity_search(
+    settings: Settings,
+    *,
+    llm_caller: StructuredLLMCaller | None = None,
+) -> AmenitySearch:
+    """Composition root: build the async Places and Routes clients, the MCP gateway, and the caller.
 
     The gateway opens no session here (no I/O at construction); a later mechanism opens and closes it.
+    Standalone (no `llm_caller`) builds its own caller and owns it; the DeepSearch feature injects a
+    shared caller it closes itself.
     """
+    if llm_caller is None:
+        caller = create_structured_llm_caller(settings)
+        owns_caller = True
+    else:
+        caller = llm_caller
+        owns_caller = False
     return AmenitySearch(
         create_places_async_client(settings),
         create_routes_async_client(settings),
         tool_gateway=create_mcp_tool_gateway(settings),
+        llm_caller=caller,
+        owns_caller=owns_caller,
     )
