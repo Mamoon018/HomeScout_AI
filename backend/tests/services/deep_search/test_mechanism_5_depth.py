@@ -15,6 +15,7 @@ import pytest
 
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import DepthAssignmentValidationError
+from src.clients.llm_provider import StructuredLLMCaller
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.feature_schemas.schemas import (
     DEPTH_ASSIGNMENT_SCHEMA_NAME,
@@ -179,7 +180,7 @@ def _state_after_mechanism_4(
 
 
 def _interpretation(provider: FakeStructuredProvider) -> UserRequirementsInterpretation:
-    return UserRequirementsInterpretation([provider])
+    return UserRequirementsInterpretation(StructuredLLMCaller([provider]))
 
 
 def _body(*assignments: dict) -> dict:

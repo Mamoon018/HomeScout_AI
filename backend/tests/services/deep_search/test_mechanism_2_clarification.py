@@ -11,6 +11,7 @@ import copy
 import pytest
 
 from src.exceptions.deep_search import ClarificationValidationError
+from src.clients.llm_provider import StructuredLLMCaller
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.feature_schemas.schemas import (
     CLARIFICATION_QUESTIONS_SCHEMA_NAME,
@@ -235,7 +236,7 @@ def _state_after_pass_1(
 
 
 def _interpretation(provider: FakeStructuredProvider) -> UserRequirementsInterpretation:
-    return UserRequirementsInterpretation([provider])
+    return UserRequirementsInterpretation(StructuredLLMCaller([provider]))
 
 
 def _queue_input(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> None:

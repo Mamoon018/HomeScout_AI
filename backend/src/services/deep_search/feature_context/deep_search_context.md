@@ -2812,6 +2812,73 @@ Problem-context-specific decisions:
     - After forcing a timeout on one crawl, the other in-flight calls still succeed and the session is still usable.
 
 
+## C3.1.2 Sub-component `Add a Tool-Turn Call to the Shared StructuredLLMCaller`
+
+### Goal of Component
+
+One `StructuredLLMCaller` holds the OpenAI-then-Groq chain and serves both R1 and R2. It exposes the existing structured call with unchanged behavior, and a tool turn. The tool turn takes a message history, function tool definitions and a `tool_choice`, and returns the assistant message with its optional `tool_calls`. The same `LLM_PROVIDER_ORDER` fallback applies to both calls.
+
+### Problem It Aims to Solve
+
+- The provider fallback logic is private to R1's class, so `AmenitySearch` cannot make LLM calls.
+- Both provider classes build a fixed system and user message pair. There is no message history and no tool path.
+- M3 needs a conversation in which tool results are appended and sent back.
+- A second copy of the fallback logic would drift from R1.
+
+### Finalized Approach
+
+**Extend the provider protocol.** Add `generate_turn(messages, tools, tool_choice)` to `StructuredLLMProvider` and both provider classes. The caller loops over providers for either method.
+
+**Cross-mechanism note (C3.1.2 build).** The provider-fallback funnel that was private to R1 (`UserRequirementsInterpretation._call_providers`) is **lifted** into a shared `StructuredLLMCaller` in `clients/llm_provider.py`. The caller exposes `call_structured` (the lifted funnel, same events/return) and the new `call_turn`, plus an idempotent `aclose`; `create_structured_llm_caller(settings)` builds it. R1's `_call_providers` is now a thin delegate to `call_structured` (signature, log events `llm_provider.attempt`/`llm_provider.raw_body`, and `(body, answered_by)` return all unchanged); the M1 inline `execute_and_validate` loop is left as-is. The two event-name constants moved to `clients/llm_provider.py` and are re-exported from `requirement_interpretation.py`, so the sample runners' imports keep working. `UserRequirementsInterpretation.__init__` now takes the caller plus `owns_caller`; `AmenitySearch.__init__` gains a keyword-only `llm_caller` (optional, `None`-tolerant in M1-only contexts, like the C3.1.1 gateway) plus `owns_caller`; each closes the caller only when it owns it. D6 is realized by a new `DeepSearch` feature class and `create_deep_search(settings)` composition root (`deep_search.py`): it builds the one shared caller first, injects it into R1 and R2 with `owns_caller=False`, and closes it once. The tool turn **receives** function tool definitions and a `tool_choice` as inputs and returns a typed `AssistantTurn` (content, `tool_calls`, and a provider-neutral re-appendable `message`); a truncated turn (`finish_reason="length"`) is a provider failure, not executed. Building the tool JSON schemas and the M6→MCP tool-name mapping is a **later** sub-component (C3.1.3+), not C3.1.2 — this corrects the C3.1.1 forward-guess that "mapping is C3.1.2's job." The typed `MetricResolutionProviderError` (with `stage`) is added to `exceptions/deep_search.py`; its `MetricResolutionValidationError` sibling is deferred to C3.1.3 (argument validation).
+
+### Critical Decision Choices
+
+Generally mandatory decisions:
+- **Ownership.** The caller is built once at the composition root and passed to R1 and `AmenitySearch`. It is created and closed once.
+- **Fallback rule.** Fallback happens on `LLMProviderError`, including a response cut short by the token limit. It never happens for a returned invalid body.
+- **Typed error.** The M3 call raises a typed M3 error (`MetricResolutionProviderError`) with `stage`. R1 keeps its own error behavior.
+- **Regression.** R1 behavior is unchanged. A test covers the lifted helper against the existing R1 cases.
+
+Problem-context-specific decisions:
+- **Message format.** The history uses the OpenAI chat format, which Groq also accepts. The history is provider-neutral, so a fallback provider receives the same messages, including prior `tool_calls` and `tool` messages with their `tool_call_id`s.
+- **No `strict` on function tools.** Groq does not support it, so tool arguments are validated in code (C3.1.3).
+- **Tools and structured output are separate requests.** Tool turns send `tools` and no `response_format`. The triage turn and the C3.2 resolution turn send `response_format` and no `tools`. Open verification: whether each provider accepts both in one request. The plan does not depend on it.
+- **Parallel calls.** `parallel_tool_calls` stays on, so the LLM may emit several calls in one turn.
+- **Truncated tool calls.** A response with `finish_reason` of `length` and partial tool arguments is treated as a provider failure, not executed.
+
+
+## C3.1.3 Sub-component `Build the Phase-Scoped Tool Catalog and Call Guard`
+
+### Goal of Component
+
+For each phase, the LLM receives only the function tools valid in that phase: `web_search` in phase 1 and `firecrawl_crawl` in phase 2. Every tool call the LLM returns passes a guard before it reaches the gateway. The guard checks the tool name, validates arguments, attributes the call to a metric, and sets every argument the application controls.
+
+### Problem It Aims to Solve
+
+- The MCP tool schemas let the caller set fields such as crawl `limit`, `maxDiscoveryDepth` and `allowExternalLinks`. The application must control these.
+- Phase order is enforced by the application. An instruction alone does not stop the LLM from calling a tool from the wrong phase.
+- Evidence must be attributed to a metric so the application can check that all metrics are covered. The MCP `web_search` schema has no metric field.
+- Groq does not enforce function argument schemas, so arguments must be validated in code.
+
+### Finalized Approach
+
+**Derived with controlled fields removed.** Function schemas are built from the MCP schemas, with application-controlled fields removed from the exposed schema. The code injects those fields and adds `metric_label`.
+
+### Critical Decision Choices
+
+Generally mandatory decisions:
+- **LLM-settable fields.** For `web_search`: `objective`, `search_queries` and `metric_label`. For `firecrawl_crawl`: only a start URL and an optional `metric_label` list.
+- **Guard failure handling.** An invalid call is returned to the LLM as a `tool` message with the error text. It is not executed, and it does not count against the call cap, because it never hits the gateway. The run continues (D5). A guard rejection is still a failed attempt, so the one retry for that metric (phase 1) or that amenity's crawl (phase 2) remains allowed.
+- **Unexposed tools.** Every MCP tool on either server other than `web_search` and `firecrawl_crawl` is never exposed.
+
+Problem-context-specific decisions:
+- **Query rules in the tool description.** Concise related keyword queries of 3 to 6 words, at least one per call, 2 to 3 diverse queries recommended, search operators allowed. The guard rejects a call with no queries.
+- **metric_label rule.** It must belong to the amenity's metric set. It is removed before the MCP call. A label outside the set is rejected.
+- **Crawl clamps.** The start URL must be on the resolved website's host. `limit` and `maxDiscoveryDepth` are fixed configurable values. `allowExternalLinks` is false. The guard overrides any value the LLM supplies.
+- **Caps.** The phase loop (C3.1.6) enforces one real attempt plus one retry. The guard does not. The cap counts only MCP calls that hit the gateway. Phase 1 is one `web_search` plus one retry per metric, because each search targets one metric. Phase 2 is one `firecrawl_crawl` plus one retry per amenity, of that single site crawl, not per metric. The retry is allowed only when attempt 1 failed, timed out, or was guard-rejected. A successful attempt 1 is not retried, including when metrics remain unresolved. A crawl timeout that C3.1.1 recovers by re-reading the same job is still attempt 1. The worst case is bounded by construction: up to two gateway searches per metric and up to two gateway crawls per amenity, and a guard rejection spends neither.
+- **Phase 2 availability.** The crawl tool is offered only when a URL exists and at least one metric is unresolved.
+
+
 
 
 

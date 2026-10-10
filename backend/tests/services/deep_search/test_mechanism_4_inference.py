@@ -13,6 +13,7 @@ import pytest
 
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import InferenceValidationError
+from src.clients.llm_provider import StructuredLLMCaller
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.feature_schemas.schemas import (
     INFERRED_CATEGORIES_SCHEMA_NAME,
@@ -191,7 +192,7 @@ def _state_after_mechanism_2(
 
 
 def _interpretation(provider: FakeStructuredProvider) -> UserRequirementsInterpretation:
-    return UserRequirementsInterpretation([provider])
+    return UserRequirementsInterpretation(StructuredLLMCaller([provider]))
 
 
 def _body(*entries: dict) -> dict:

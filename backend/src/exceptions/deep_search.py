@@ -218,3 +218,21 @@ class ResultAssemblyError(ResultAttachmentError):
     """Raised when a discovered category_id has no matching CategoryMetricPlan to join against."""
 
     stage: ClassVar[str] = "assemble_amenity_records"
+
+
+class MetricResolutionError(Exception):
+    """Base failure surface of Responsibility 2 Mechanism 3 (LLM-driven metric resolution)."""
+
+    # Named so a caller can report which stage exited without reading a traceback.
+    stage: ClassVar[str] = "run_llm_metric_resolution"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
+
+
+class MetricResolutionProviderError(MetricResolutionError):
+    """Raised when no provider in the bound order returned a metric-resolution tool turn."""
+
+    stage: ClassVar[str] = "run_llm_metric_resolution"

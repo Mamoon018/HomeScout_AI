@@ -10,7 +10,12 @@ from langdetect import DetectorFactory, detect
 from langdetect.lang_detect_exception import LangDetectException
 from pydantic import ValidationError
 
-from src.clients.llm_provider import StructuredLLMProvider, create_llm_providers
+from src.clients.llm_provider import (
+    LLM_PROVIDER_ATTEMPT_EVENT,
+    LLM_PROVIDER_RAW_BODY_EVENT,
+    StructuredLLMCaller,
+    create_structured_llm_caller,
+)
 from src.core.config import Settings
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import (
@@ -118,9 +123,9 @@ RAW_BODY_EVENT = "extraction.raw_body"
 
 # `_call_providers` is shared by every mechanism's constrained call, so its attempt and raw
 # body records carry no mechanism name; the `stage` field says which call they belong to.
-# The runners read these records back to print the attempt trail and the raw body.
-LLM_PROVIDER_ATTEMPT_EVENT = "llm_provider.attempt"
-LLM_PROVIDER_RAW_BODY_EVENT = "llm_provider.raw_body"
+# `LLM_PROVIDER_ATTEMPT_EVENT` and `LLM_PROVIDER_RAW_BODY_EVENT` moved to the shared caller
+# (C3.1.2); they are imported above and remain importable from here, so the sample runners'
+# existing imports keep working.
 
 _INPUT_TOO_SHORT_MESSAGE = (
     f"Instructions must be of more than {MIN_INPUT_WORD_COUNT} words"
@@ -151,8 +156,14 @@ class UserRequirementsInterpretation:
     the same provider chain.
     """
 
-    def __init__(self, providers: Sequence[StructuredLLMProvider]) -> None:
-        self._providers = tuple(providers)
+    def __init__(self, caller: StructuredLLMCaller, *, owns_caller: bool = True) -> None:
+        # The shared caller holds the OpenAI-then-Groq chain and the fallback funnel (C3.1.2).
+        # `self._providers` is kept so the Mechanism 1 inline loop and `aclose` read the same
+        # bound chain. `owns_caller` is False when a composition root (the DeepSearch feature)
+        # injects a caller it closes itself.
+        self._caller = caller
+        self._owns_caller = owns_caller
+        self._providers = caller.providers
 
     async def interpret(self, raw_input: str) -> RequirementInterpretationState:
         """Responsibility entry point; sequences the mechanisms and returns the state."""
@@ -1667,9 +1678,9 @@ class UserRequirementsInterpretation:
         return state
 
     async def aclose(self) -> None:
-        """Close each provider's HTTP session after a run."""
-        for provider in self._providers:
-            await provider.aclose()
+        """Close the shared caller after a run, unless a composition root owns it."""
+        if self._owns_caller:
+            await self._caller.aclose()
 
     async def _call_providers(
         self,
@@ -1681,81 +1692,15 @@ class UserRequirementsInterpretation:
         stage: str,
         provider_error_cls: type[Exception] = CategoryMappingProviderError,
     ) -> tuple[dict, str]:
-        """Try providers in the bound order; return the first body or a typed provider error."""
-        body: dict | None = None
-        answered_by: str | None = None
-
-        for provider in self._providers:
-            try:
-                body = await provider.generate_structured(
-                    instruction=instruction,
-                    user_content=user_content,
-                    json_schema=json_schema,
-                    schema_name=schema_name,
-                )
-            except LLMProviderError as exc:
-                # The adapter wraps the SDK error; the SDK's own message (for example an
-                # HTTP 400 naming a rejected schema path) is only on __cause__.
-                detail = str(exc)
-                if exc.__cause__ is not None:
-                    detail = f"{detail} | cause: {type(exc.__cause__).__name__}: {exc.__cause__}"
-                logger.info(
-                    json.dumps(
-                        {
-                            "event": LLM_PROVIDER_ATTEMPT_EVENT,
-                            "timestamp": _timestamp(),
-                            "stage": stage,
-                            "provider": provider.name,
-                            "model": provider.model,
-                            "outcome": "failed",
-                            "detail": detail,
-                        }
-                    )
-                )
-                continue
-
-            answered_by = provider.name
-            logger.info(
-                json.dumps(
-                    {
-                        "event": LLM_PROVIDER_ATTEMPT_EVENT,
-                        "timestamp": _timestamp(),
-                        "stage": stage,
-                        "provider": provider.name,
-                        "model": provider.model,
-                        "outcome": "answered",
-                    }
-                )
-            )
-            break
-
-        if body is None or answered_by is None:
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "llm_provider.rejected",
-                        "timestamp": _timestamp(),
-                        "stage": stage,
-                        "reason": "no_provider_answered",
-                        "attempted": [provider.name for provider in self._providers],
-                    }
-                )
-            )
-            raise provider_error_cls(
-                f"No LLM provider returned a {stage} body", stage=stage
-            )
-
-        logger.debug(
-            json.dumps(
-                {
-                    "event": LLM_PROVIDER_RAW_BODY_EVENT,
-                    "stage": stage,
-                    "provider": answered_by,
-                    "body": body,
-                }
-            )
+        """Delegate to the shared caller's funnel (lifted in C3.1.2); behavior unchanged."""
+        return await self._caller.call_structured(
+            instruction=instruction,
+            user_content=user_content,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            stage=stage,
+            provider_error_cls=provider_error_cls,
         )
-        return body, answered_by
 
     def _assert_nodes_in_taxonomy(
         self,
@@ -1859,9 +1804,20 @@ class UserRequirementsInterpretation:
             )
 
 
-def create_requirement_interpretation(settings: Settings) -> UserRequirementsInterpretation:
-    """Composition root: bind the provider chain that LLM_PROVIDER_ORDER names."""
-    return UserRequirementsInterpretation(create_llm_providers(settings))
+def create_requirement_interpretation(
+    settings: Settings,
+    *,
+    llm_caller: StructuredLLMCaller | None = None,
+) -> UserRequirementsInterpretation:
+    """Composition root: bind the shared caller that LLM_PROVIDER_ORDER names.
+
+    Standalone (no `llm_caller`) builds its own caller and owns it, so the per-responsibility
+    sample runners keep closing it. When the DeepSearch feature injects a shared caller, R1
+    does not own it and the feature closes it once.
+    """
+    if llm_caller is None:
+        return UserRequirementsInterpretation(create_structured_llm_caller(settings))
+    return UserRequirementsInterpretation(llm_caller, owns_caller=False)
 
 
 def _stamp_category_identities(extracted: ExtractedRequirements) -> ExtractedRequirements:

@@ -4,22 +4,22 @@ Description: The feature is quite broader in its horizon and therefore, required
 
 
 Here are the skills that you need to use for the plan:
-1. file for architectural decisions
+1. file for architectural decisions use skill defined in  @skills\Implementation_architecture_skill.md
 2. Split the code among relevant files without over-engineering it. Do not create new files uncessarily in the name of separation of concerns unless there is genuine need for it.
-3. Mkae sure that you follow guidelines to structure the plan
-4. Make sure you follow the guidelines to keep implementation async
+3. Make sure that you follow guidelines to structure the plan @skills\Plan_output_format.md
+4. Make sure you follow the guidelines to keep implementation async @skills\async_app_skill.md
+5. Make sure you use the skill @skills\drift_analyzer.md to ensure that along with the happy path you also consider and guard the drifts as well
+6. You need to ensure that you use the skill @skills\logs_recorder.md to write logs for the implementation
 
-For the better context, here is the file that provides the details about the following things:
-1. Problem context of the feature
-2. Problem statement of the feature
-3. Workflow of the feature
-4. Responsibilities of the feature
-5. problem context and problem statement of the responsibility 2
-6. Mechanisms of responsibility 2
-7. Implementation details in the form of sub-components of the Mechanism 1 component M1.3
+
+For the better context, here is the file @backend\src\services\deep_search\feature_context\deep_search_context.md that provides the details about the following things:
+1. Responsibility-2 of the feature
+2. problem context and problem statement of the responsibility 2
+3. Mechanisms of responsibility 2
+4. Implementation details in the form of sub-components of the Mechanism 3 subcomponent C3.1.2 (You need to implement this)
 
 # Current Mechanism Implementation: 
-Now, we will be implementing the mechanism 1 component M1.3 subcomponents of responsibility 2
+Now, we will be implementing the mechanism 3 component M3.1.2 subcomponents of responsibility 2
 
 Note: We should not make classes for mechanisms of the responsibility (Until it is necessary to have it otherwise feature would break):  
 
@@ -40,6 +40,8 @@ Mechanism Workflows
    ↓
 Stage Methods
 
+
+IMPORTANT NOTE: Implementation must be grounded in the spec of the specified sub-component, skills that are specified, and the structure of the code that is defined for the feature. 
 
 ### Here is how you should structure the implementation plan ###
 You need to follow the guidelines in Plan_output_format.md to compile your Implementation plan.
