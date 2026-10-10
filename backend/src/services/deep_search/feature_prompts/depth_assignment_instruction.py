@@ -109,8 +109,10 @@ contract; they are fixed and Maps-resolvable.
   Indirect = a persona / inferred fact implies they would weigh it.
 - value_type: one of number+unit | boolean | enum[fixed set] | date/time. Free-form prose
   as a final value is disallowed.
-- resolution_source: concrete tool + target: the shape of the web-search query, or which
-  page type firecrawl hits. Maps is not used for an LLM-defined metric.
+- resolution_source: both a web_target (names the attribute or question to resolve, in the
+  entity's domain terms, phrased as a direction — not a verdict, a source type, or keywords)
+  and a scrape_target (which page type firecrawl hits); every LLM-defined metric carries both.
+  Maps is not used for an LLM-defined metric.
 - verification: what evidence confirms the value.
 - null_policy: what to emit if unresolved — must be null / "unknown", never guessed.
 
@@ -118,7 +120,8 @@ Rejection example: "is it cozy?" fails because value_type has no enumerable rang
 resolution_source names nothing concrete, and verification cannot be specified.
 Reformulated to pass: label ambiance; question "user wants a quiet place to work (persona:
 remote worker) — is it quiet or lively?"; value_type enum[quiet, mixed, lively];
-resolution_source web search + review-term frequency; verification dominant sentiment
+resolution_source web_target "noise level and atmosphere at the venue" and scrape_target
+"about or atmosphere section on the official site"; verification dominant sentiment
 across ≥5 reviews mentioning noise/atmosphere; null_policy "unknown"."""
 
 SIGNAL_SOURCES = """\

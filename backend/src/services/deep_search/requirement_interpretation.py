@@ -2047,7 +2047,8 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
         entry.label,
         entry.question,
         entry.verification,
-        entry.resolution_source.target,
+        entry.resolution_source.web_target,
+        entry.resolution_source.scrape_target,
     )
     if any(not text.strip() for text in texts):
         return "text_completeness"
@@ -2077,8 +2078,8 @@ def _to_metric_spec(entry: MetricEntry) -> MetricSpec:
         unit=entry.unit.strip() if entry.unit and entry.unit.strip() else None,
         enum_values=[member.strip() for member in entry.enum_values],
         resolution_source=MetricResolutionSource(
-            tool=entry.resolution_source.tool,
-            target=entry.resolution_source.target.strip(),
+            web_target=entry.resolution_source.web_target.strip(),
+            scrape_target=entry.resolution_source.scrape_target.strip(),
         ),
         verification=entry.verification.strip(),
         null_policy=entry.null_policy,

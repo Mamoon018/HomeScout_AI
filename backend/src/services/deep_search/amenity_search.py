@@ -34,18 +34,16 @@ from src.exceptions.deep_search import (
 from src.exceptions.places import PlacesClientError
 from src.exceptions.routes import RoutesClientError
 from src.services.deep_search.feature_schemas.schemas import (
-    AMENITY_RECORD_CONTRACT_VERSION,
     DISCOVERY_MAX_RESULTS,
     ROUTING_MODES,
     TRANSIT_MATRIX_MAX_DESTINATIONS,
-    AmenityRecord,
-    AmenityRecordSet,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
     DiscoveryRequest,
     EnrichmentBundle,
     GeoPoint,
+    PredefinedMetricsRecord,
     RouteLeg,
     RouteView,
     TransitLeg,
@@ -556,23 +554,23 @@ class AmenitySearch:
     # -----------------------------------------------------------------------------
 
     def run_result_attachment(self, state: AmenitySearchState) -> AmenitySearchState:
-        """M1.3 workflow: join enrichment onto each discovered place, write the versioned envelope.
+        """M1.3 workflow: join enrichment onto each discovered place, write `predefined_records`.
 
-        Pure in-memory transform with no I/O, so it runs inline and is not async. `enrichment` is
-        retained on the state after the write.
+        Pure in-memory transform with no I/O, so it runs inline and is not async. Writes a plain
+        nested dict to `state.predefined_records` (no envelope, no version — the version lives on
+        the combined AmenityMetricsSet that C3.2.5 builds). `enrichment` is retained after the write.
         """
-        record_set = self.assemble_amenity_records(state)
-        state.amenity_records = record_set
+        records = self.assemble_amenity_records(state)
+        state.predefined_records = records
         logger.info(
             json.dumps(
                 {
                     "event": ATTACHMENT_COMPLETED_EVENT,
                     "timestamp": _timestamp(),
-                    "contract_version": record_set.contract_version,
-                    "category_count": len(record_set.records),
+                    "category_count": len(records),
                     "record_counts": {
-                        str(category_id): len(records)
-                        for category_id, records in record_set.records.items()
+                        str(category_id): len(category_records)
+                        for category_id, category_records in records.items()
                     },
                 }
             )
@@ -641,12 +639,16 @@ class AmenitySearch:
         transit_view = self.convert_transit_leg(bundle.transit if bundle is not None else None)
         return routing_map, transit_view
 
-    def assemble_amenity_records(self, state: AmenitySearchState) -> AmenityRecordSet:
-        """M1.3.c: pre-indexed merge of profile + accessibility + plan into the versioned envelope.
+    def assemble_amenity_records(
+        self, state: AmenitySearchState
+    ) -> dict[int, dict[str, PredefinedMetricsRecord]]:
+        """M1.3.c: pre-indexed merge of profile + accessibility + plan into a plain nested dict.
 
         Builds the place_id → accessibility index and the category_id → plan index once, then joins
-        one AmenityRecord per (category_id, place_id). A place absent from enrichment yields an
-        all-None routing map and None transit rather than a skipped record.
+        one PredefinedMetricsRecord per (category_id, place_id), returned as a plain dict keyed
+        category_id then place_id (no envelope, no version — the version lives on the combined
+        AmenityMetricsSet that C3.2.5 builds). A place absent from enrichment yields an all-None
+        routing map and None transit rather than a skipped record.
         """
         accessibility_index = {
             place_id: self.convert_accessibility(bundle)
@@ -654,7 +656,7 @@ class AmenitySearch:
         }
         plan_index = {plan.category_id: plan for plan in state.category_metric_plans}
 
-        records: dict[int, dict[str, AmenityRecord]] = {}
+        records: dict[int, dict[str, PredefinedMetricsRecord]] = {}
         for category_id, canonical in state.discovered_places.items():
             plan = plan_index.get(category_id)
             if plan is None:
@@ -662,7 +664,7 @@ class AmenitySearch:
                     f"discovered category {category_id} has no matching CategoryMetricPlan",
                     stage="assemble_amenity_records",
                 )
-            category_records: dict[str, AmenityRecord] = {}
+            category_records: dict[str, PredefinedMetricsRecord] = {}
             for place_id, canonical_place in canonical.items():
                 profile = self.project_place_profile(canonical_place.place)
                 if place_id in accessibility_index:
@@ -686,7 +688,7 @@ class AmenitySearch:
                     )
                     routing_map = {mode: None for mode in ROUTING_MODES}
                     transit_view = None
-                category_records[place_id] = AmenityRecord(
+                category_records[place_id] = PredefinedMetricsRecord(
                     category_id=category_id,
                     taxonomy_node=plan.taxonomy_node,
                     depth=plan.depth,
@@ -696,10 +698,7 @@ class AmenitySearch:
                     **profile,
                 )
             records[category_id] = category_records
-        return AmenityRecordSet(
-            contract_version=AMENITY_RECORD_CONTRACT_VERSION,
-            records=records,
-        )
+        return records
 
     async def aclose(self) -> None:
         """Close the async Places and Routes transports, the MCP gateway, and the caller."""

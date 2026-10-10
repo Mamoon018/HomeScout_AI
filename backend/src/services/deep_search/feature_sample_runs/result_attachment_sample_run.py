@@ -30,8 +30,8 @@ from src.services.deep_search.amenity_search import (
 )
 from src.services.deep_search.feature_schemas.schemas import (
     DEFAULT_RADIUS_KM,
-    AmenityRecord,
     AmenitySearchState,
+    PredefinedMetricsRecord,
     CanonicalPlace,
     CategoryMetricPlan,
     EnrichmentBundle,
@@ -197,7 +197,7 @@ def _describe_transit(view: TransitView | None) -> dict | None:
     }
 
 
-def _describe_record(record: AmenityRecord) -> dict:
+def _describe_record(record: PredefinedMetricsRecord) -> dict:
     return {
         "category_id": record.category_id,
         "taxonomy_node": record.taxonomy_node,
@@ -274,18 +274,18 @@ def run_sample_result_attachment() -> AmenitySearchState:
         )
     print("no-enrich-4 is absent here; M1.3.c gives it an all-null routing map and null transit.")
 
-    _section("STAGE c - run_result_attachment (assemble, join, write envelope)")
+    _section("STAGE c - run_result_attachment (assemble, join, write predefined_records)")
     search.run_result_attachment(state)
-    record_set = state.amenity_records
-    print(f"contract_version: {record_set.contract_version}")
+    predefined_records = state.predefined_records
+    print("predefined_records: plain nested dict (no envelope, no version)")
     print(
         json.dumps(
             {
                 str(category_id): {
                     place_id: _describe_record(record)
-                    for place_id, record in records.items()
+                    for place_id, record in category_records.items()
                 }
-                for category_id, records in record_set.records.items()
+                for category_id, category_records in predefined_records.items()
             },
             indent=2,
             ensure_ascii=False,

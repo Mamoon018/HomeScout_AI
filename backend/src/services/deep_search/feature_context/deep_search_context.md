@@ -1778,14 +1778,14 @@ Contract rules (per metric, in order):
 
 | Rule | Check | On failure |
 |---|---|---|
-| K1 Text completeness | `label`, `question`, `verification`, `resolution_source.target` are non-empty after trimming. | Drop |
+| K1 Text completeness | `label`, `question`, `verification`, `resolution_source.web_target`, `resolution_source.scrape_target` are non-empty after trimming. | Drop |
 | K2 Value-type parameters | `number_with_unit` → `unit` set and `enum_values` empty. `enum` → ≥2 distinct non-empty `enum_values` and `unit` unset. `boolean` / `date_time` → `unit` unset and `enum_values` empty. | Drop |
 | K3 Band within depth | `band = specific_attributes` only when the category's `depth = specific_attributes`. | Drop |
-| K4 (retired) | Formerly "`firecrawl` only with `band = specific_attributes`". Removed: both tools are allowed in either band, and `google_maps` cannot occur because the schema's closed `tool` set excludes it. The K-numbers of the other rules are kept so existing references stay valid. | — |
+| K4 (retired) | Formerly "`firecrawl` only with `band = specific_attributes`". Removed: per RC10 every LLM-defined metric carries both a `web_target` and a `scrape_target` in either band, so there is no per-metric tool to gate, and `google_maps` cannot occur because the LLM-defined metric names no tool. The K-numbers of the other rules are kept so existing references stay valid. | — |
 | K5 No duplicate | Same `label` (case-insensitive, trimmed) already kept for this category. | Drop the later one |
 | K6 Cap | More than 4 survivors in one band for one category. | Drop the extras after the 4th, in model order |
 
-**Not checkable in code:** whether `resolution_source.target` is genuinely concrete, whether `verification` is a real obtainable evidence type, whether `question` is truly tied to this user, and whether a metric restates a fixed dimension. These are enforced by the instruction and the worked examples only. Code checks structure; it cannot judge the "cozy" case.
+**Not checkable in code:** whether `resolution_source.web_target` and `resolution_source.scrape_target` are genuinely concrete, whether `verification` is a real obtainable evidence type, whether `question` is truly tied to this user, and whether a metric restates a fixed dimension. These are enforced by the instruction and the worked examples only. Code checks structure; it cannot judge the "cozy" case.
 
 #### Examples, not a catalog
 
@@ -1957,7 +1957,7 @@ Finalized Approach:
 
 Critical Decision Choices:
 * Locked at component level: the metrics live in a separate `state.category_metrics` list of `CategoryMetricSet(category_id, taxonomy_node, metrics)`. `ResolvedCategory` and `InferredCategory` are not changed. There is no facts list.
-* Locked: closed value sets are `value_type` (`number_with_unit`, `boolean`, `enum`, `date_time`), `null_policy` (`null`, `unknown`), `tool` (`parallel_web_search`, `firecrawl`; `MetricResolutionTool`, no `google_maps`, which stays only on the stored pre-defined `ResolutionSource`), and `band` (`operating_details`, `specific_attributes`). The stored `MetricSpec.resolution_source` is a separate `MetricResolutionSource` dataclass with the same two-value tool type.
+* Locked: closed value sets are `value_type` (`number_with_unit`, `boolean`, `enum`, `date_time`), `null_policy` (`null`, `unknown`), and `band` (`operating_details`, `specific_attributes`). An LLM-defined metric names no tool: per RC10 its `resolution_source` carries both a `web_target` (parallel_web_search) and a `scrape_target` (firecrawl), so the tool is implied by the field, never chosen, and `google_maps` stays only on the stored pre-defined `ResolutionSource`. The stored `MetricSpec.resolution_source` is a separate `MetricResolutionSource` dataclass carrying the same two targets.
 * `taxonomy_node` is not in the wire body. Code copies it by `category_id`. The model never emits it.
 * Which constraints the schema carries. Research result: Groq strict mode supports `type`, `properties`, `required`, `additionalProperties: false`, `enum`, `items`, `$ref`, and `anyOf`. It does not support `minLength`, `maxLength`, `minItems`, `maxItems`, or `if/then/else`. The OpenAI structured-outputs page fetched for this plan did not list its unsupported keywords. The schema therefore carries only required keys, closed objects, types, and closed enums. Empty-text, list-size, and cross-field rules are code checks in sub-component 4.
 * `unit` is `str | None`. Strict mode needs the null case as `anyOf`. Confirm that `_apply_strict_object_rules` keeps every property required and leaves the null branch intact.
@@ -2713,11 +2713,11 @@ A category with no `specific_metrics` (for example a `basic_profile` category) h
 **Cross-mechanism changes from the output-object split**
 
 - M1.3 text: updated in this file. M1.3 writes `state.predefined_records` as a plain nested dict with no envelope and no version.
-- Code (not changed yet):
-  - `schemas.py`: rename `AmenityRecord` to `PredefinedMetricsRecord`, remove `AmenityRecordSet`, add `SpecificMetricsRecord`, `AmenityMetricsRecord` and `AmenityMetricsSet`, and rename the constant to `AMENITY_METRICS_CONTRACT_VERSION` (value "1.0").
-  - `AmenitySearchState`: add `predefined_records` and `specific_records`, and retype `amenity_records` to `AmenityMetricsSet | None`.
+- Code (landed, M1.3/state prerequisite):
+  - `schemas.py`: renamed `AmenityRecord` to `PredefinedMetricsRecord`, removed `AmenityRecordSet`, added `EvidenceItem`, `ResolvedMetric`, `SpecificMetricsRecord`, `AmenityMetricsRecord` and `AmenityMetricsSet`, and renamed the constant to `AMENITY_METRICS_CONTRACT_VERSION` (value "1.0").
+  - `AmenitySearchState`: added `predefined_records` and `specific_records`, and retyped `amenity_records` to `AmenityMetricsSet | None`.
   - `amenity_search.py`: `assemble_amenity_records` returns the plain dict and `run_result_attachment` writes `predefined_records`. The `contract_version` is dropped from the M1.3 log event.
-  - Tests that read `AmenityRecordSet`.
+  - Tests and the M1.3 sample run updated off `AmenityRecordSet`.
 - M4 C4.1: its "inline enforcement at C3.2" wording no longer matches, and it reads `AmenityMetricsSet`.
 - M4 C4.2: the pairing of predefined and specific metrics per amenity is already done by C3.2.5. C4.2 consumes `AmenityMetricsSet` and builds the display structure, and its "merge each amenity's predefined + specific metrics" goal needs rewording. It carries `support`, `evidence` and `as_of` from `ResolvedMetric`.
 

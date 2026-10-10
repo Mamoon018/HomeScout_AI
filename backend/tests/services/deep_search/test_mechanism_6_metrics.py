@@ -39,6 +39,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     metric_definition_json_schema,
 )
 from src.services.deep_search.feature_prompts.metric_definition_instruction import (
+    build_metric_definition_few_shot_examples,
     build_metric_definition_instruction,
 )
 from src.services.deep_search.requirement_interpretation import UserRequirementsInterpretation
@@ -84,8 +85,8 @@ def _metric(label: str = "Service speed", **overrides) -> dict:
         "unit": None,
         "enum_values": ["slow", "mixed", "fast"],
         "resolution_source": {
-            "tool": "parallel_web_search",
-            "target": "review mentions of wait time",
+            "web_target": "typical service speed and wait time at the venue",
+            "scrape_target": "about or service section on the official site",
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning wait time",
         "null_policy": "unknown",
@@ -101,7 +102,10 @@ def _specific_metric(label: str = "Dedicated platform present", **overrides) -> 
         question="The customer named a platform as a requirement: does the gym have one?",
         value_type="boolean",
         enum_values=[],
-        resolution_source={"tool": "firecrawl", "target": "facilities page on the official site"},
+        resolution_source={
+            "web_target": "availability of a dedicated platform at the gym",
+            "scrape_target": "facilities page on the official site",
+        },
         verification="listed on the official facilities page",
         band="specific_attributes",
         **overrides,
@@ -289,7 +293,7 @@ async def test_valid_mixed_batch_writes_sets_by_id_in_explicit_then_inferred_ord
     assert _labels(state, 2) == ["New-patient wait"]
     stored = _metric_map(state)[0]
     assert stored is not None
-    assert stored[1].resolution_source.tool == "firecrawl"
+    assert stored[1].resolution_source.scrape_target == "facilities page on the official site"
     assert stored[1].band == "specific_attributes"
 
 
@@ -356,8 +360,14 @@ async def test_missing_field_rejects_whole_body_without_writing() -> None:
         {"band": "deep_dive"},
         {"value_type": "prose"},
         {"null_policy": "guess"},
-        {"resolution_source": {"tool": "diffbot", "target": "any page"}},
-        {"resolution_source": {"tool": "google_maps", "target": "places.rating"}},
+        {"resolution_source": {"web_target": "any query"}},
+        {
+            "resolution_source": {
+                "web_target": "any query",
+                "scrape_target": "any page",
+                "tool": "firecrawl",
+            }
+        },
     ],
 )
 async def test_value_outside_a_closed_set_rejects_whole_body(override: dict) -> None:
@@ -427,7 +437,10 @@ async def test_no_provider_answers_raises_provider_error() -> None:
     [
         (_metric("Blank question", question="   "), "text_completeness"),
         (
-            _metric("Blank target", resolution_source={"tool": "parallel_web_search", "target": " "}),
+            _metric(
+                "Blank target",
+                resolution_source={"web_target": " ", "scrape_target": "menu page"},
+            ),
             "text_completeness",
         ),
         (
@@ -462,7 +475,10 @@ async def test_failing_metric_is_dropped_and_neighbor_is_kept(bad: dict, rule: s
 async def test_firecrawl_is_allowed_in_the_operating_details_band() -> None:
     fetched = _metric(
         "Menu price range",
-        resolution_source={"tool": "firecrawl", "target": "menu page on the official site"},
+        resolution_source={
+            "web_target": "typical menu price range at the restaurant",
+            "scrape_target": "menu page on the official site",
+        },
     )
     provider = FakeStructuredProvider(bodies=[_body(_entry(0, _metric(), fetched), _entry(1, _metric()))])
     state = _state_after_mechanism_5(inferred_categories=[])
@@ -476,7 +492,7 @@ async def test_firecrawl_is_allowed_in_the_operating_details_band() -> None:
     assert rejections == []
     assert [m.label for m in survivors[0]] == ["Service speed", "Menu price range"]
     assert survivors[0][1].band == "operating_details"
-    assert survivors[0][1].resolution_source.tool == "firecrawl"
+    assert survivors[0][1].resolution_source.scrape_target == "menu page on the official site"
 
 
 async def test_specific_band_on_operating_details_category_is_dropped() -> None:
@@ -615,16 +631,55 @@ def test_instruction_lists_fixed_dimensions_cap_and_tools() -> None:
     assert f"At most {MAX_METRICS_PER_BAND} metrics per band" in instruction
     assert "firecrawl" in instruction and "parallel_web_search" in instruction
     assert "diffbot" not in instruction.lower()
-    assert "tool is parallel_web_search or firecrawl" in instruction
+    # RC10: the contract names both resolution targets, implying each tool by its field.
+    assert "web_target" in instruction and "scrape_target" in instruction
     assert "tool is google_maps" not in instruction
     assert "firecrawl is only for the specific_attributes band" not in instruction
 
 
-def test_wire_schema_offers_only_web_search_and_firecrawl_as_tools() -> None:
+def test_instruction_mandates_the_verification_source_clause() -> None:
+    # The source-acceptability clause is the factual/experiential switch M3's C3.2.1
+    # Google-reviews fallback reads, so the contract must require it, not merely show it.
+    instruction = build_metric_definition_instruction(metric_definition_json_schema())
+
+    assert "first-party/authoritative source only" in instruction
+    assert "customer-review evidence acceptable" in instruction
+    assert "Exactly one\n  clause, never both, never neither." in instruction
+
+
+def test_every_few_shot_verification_carries_exactly_one_source_clause() -> None:
+    # The worked examples teach the convention; a clauseless example would model behavior
+    # that violates the contract. Every metric's verification must carry exactly one clause.
+    factual = "first-party/authoritative source only"
+    experiential = "customer-review evidence acceptable"
+
+    metrics_seen = 0
+    for _sample_input, expected in build_metric_definition_few_shot_examples():
+        body = json.loads(expected)
+        for category in body["categories"]:
+            for metric in category["metrics"]:
+                verification = metric["verification"]
+                assert (verification.count(factual) + verification.count(experiential)) == 1, (
+                    f"{metric['label']!r} verification lacks exactly one source clause: "
+                    f"{verification!r}"
+                )
+                metrics_seen += 1
+    assert metrics_seen == 11
+
+
+def test_wire_schema_carries_both_web_and_scrape_targets_and_no_tool() -> None:
+    # RC10: every LLM-defined metric carries both sources. The wire shape is two string
+    # targets, the tool is implied by the field, and there is no selectable tool enum.
     schema = metric_definition_json_schema()
 
-    tool = schema["$defs"]["ResolutionSourceEntry"]["properties"]["tool"]
-    assert set(tool["enum"]) == {"parallel_web_search", "firecrawl"}
+    entry = schema["$defs"]["ResolutionSourceEntry"]
+    assert set(entry["properties"]) == {"web_target", "scrape_target"}
+    assert entry["properties"]["web_target"]["type"] == "string"
+    assert entry["properties"]["scrape_target"]["type"] == "string"
+    # Both required and the object closed (strict rules).
+    assert set(entry["required"]) == {"web_target", "scrape_target"}
+    assert entry["additionalProperties"] is False
+    assert "tool" not in entry["properties"]
 
 
 # Sub-component 6 / 7: pre-defined catalog and per-category metric compilation.
