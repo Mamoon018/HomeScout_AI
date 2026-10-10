@@ -243,8 +243,8 @@
           "good"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of pool cleanliness, maintenance, and water quality"
+          "web_target": "cleanliness, maintenance, and water quality of the pool",
+          "scrape_target": "pool or facilities information page on the official site"
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning cleanliness or maintenance",
         "null_policy": "unknown",
@@ -257,8 +257,8 @@
         "unit": null,
         "enum_values": [],
         "resolution_source": {
-          "tool": "firecrawl",
-          "target": "lap-swim schedule or pool timetable on the official site"
+          "web_target": "lap-swim schedule and pool timetable at the facility",
+          "scrape_target": "lap-swim schedule or pool timetable on the official site"
         },
         "verification": "lap-lane or lap-swim access before 6:00am is stated on the official schedule",
         "null_policy": "unknown",
@@ -271,8 +271,8 @@
         "unit": "degrees Fahrenheit",
         "enum_values": [],
         "resolution_source": {
-          "tool": "firecrawl",
-          "target": "pool specifications or aquatics information page on the official site"
+          "web_target": "pool temperature and specifications at the facility",
+          "scrape_target": "pool specifications or aquatics information page on the official site"
         },
         "verification": "temperature stated on the official pool information page",
         "null_policy": "unknown",
@@ -289,8 +289,8 @@
           "crowded"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of morning lap-swim crowding and lane availability"
+          "web_target": "morning lap-swim crowding and lane availability at the pool",
+          "scrape_target": "pool schedule or lap-swim information page on the official site"
         },
         "verification": "dominant sentiment across at least 5 reviews specifically mentioning morning crowds or lane sharing",
         "null_policy": "unknown",
@@ -428,8 +428,8 @@
           "usually_fresh"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of bread freshness and baking times"
+          "web_target": "bread freshness and baking times at the bakery",
+          "scrape_target": "about or bakery information page on the official site"
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning freshness",
         "null_policy": "unknown",
@@ -446,8 +446,8 @@
           "broad"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "bakery bread menu, product listings, and review mentions of selection"
+          "web_target": "range and selection of breads at the bakery",
+          "scrape_target": "product or menu page on the official site"
         },
         "verification": "bread varieties listed on the official site or confirmed by at least 3 listings",
         "null_policy": "unknown",
@@ -460,8 +460,8 @@
         "unit": "minutes",
         "enum_values": [],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of queue length and checkout wait time"
+          "web_target": "queue length and checkout wait time at the store",
+          "scrape_target": "store information or about page on the official site"
         },
         "verification": "wait time stated in reviews, with at least 5 reviews supporting the typical range",
         "null_policy": "unknown",
@@ -595,8 +595,8 @@
         "unit": null,
         "enum_values": [],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "official park description and review mentions of fencing and gates"
+          "web_target": "fencing and gated enclosure at the dog park",
+          "scrape_target": "park rules or facilities page on the official site"
         },
         "verification": "secure fencing and gated entry stated by the park authority or confirmed by at least 3 listings or reviews",
         "null_policy": "unknown",
@@ -609,8 +609,8 @@
         "unit": null,
         "enum_values": [],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "park facilities descriptions mentioning separate small-dog or puppy areas"
+          "web_target": "separate small-dog or puppy area at the dog park",
+          "scrape_target": "park facilities or amenities page on the official site"
         },
         "verification": "a separate small-dog area is stated by the park authority or official listing",
         "null_policy": "unknown",
@@ -627,8 +627,8 @@
           "good"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of dog waste, cleanliness, and maintenance"
+          "web_target": "dog-waste management, cleanliness, and maintenance at the park",
+          "scrape_target": "park maintenance or rules page on the official site"
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning cleanliness or waste",
         "null_policy": "unknown",
@@ -645,8 +645,8 @@
           "crowded"
         ],
         "resolution_source": {
-          "tool": "parallel_web_search",
-          "target": "review mentions of crowding, dog density, and available space"
+          "web_target": "crowding, dog density, and available space at the park",
+          "scrape_target": "park information or facilities page on the official site"
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning crowding or space",
         "null_policy": "unknown",

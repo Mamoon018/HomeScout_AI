@@ -10,14 +10,14 @@ import pytest
 from src.exceptions.deep_search import ResultAssemblyError
 from src.services.deep_search.amenity_search import AmenitySearch
 from src.services.deep_search.feature_schemas.schemas import (
-    AMENITY_RECORD_CONTRACT_VERSION,
+    AMENITY_METRICS_CONTRACT_VERSION,
     ROUTING_MODES,
-    AmenityRecordSet,
     AmenitySearchState,
     CanonicalPlace,
     CategoryMetricPlan,
     EnrichmentBundle,
     GeoPoint,
+    PredefinedMetricsRecord,
     RouteLeg,
     RouteView,
     TransitLeg,
@@ -183,12 +183,14 @@ def _state_two_places() -> AmenitySearchState:
 
 
 def test_assembly_keys_by_category_then_place() -> None:
-    record_set = _search().assemble_amenity_records(_state_two_places())
+    records = _search().assemble_amenity_records(_state_two_places())
 
-    assert isinstance(record_set, AmenityRecordSet)
-    assert set(record_set.records) == {0, 1}
-    assert set(record_set.records[0]) == {"p1"}
-    record = record_set.records[0]["p1"]
+    # Plain nested dict (no envelope), keyed category_id then place_id.
+    assert isinstance(records, dict)
+    assert set(records) == {0, 1}
+    assert set(records[0]) == {"p1"}
+    record = records[0]["p1"]
+    assert isinstance(record, PredefinedMetricsRecord)
     assert record.category_id == 0
     assert record.taxonomy_node == "bakery"  # from the plan
     assert record.depth == "operating_details"  # from the plan
@@ -197,30 +199,36 @@ def test_assembly_keys_by_category_then_place() -> None:
 
 
 def test_place_absent_from_enrichment_is_all_null_not_skipped() -> None:
-    record_set = _search().assemble_amenity_records(_state_two_places())
+    records = _search().assemble_amenity_records(_state_two_places())
 
-    assert "missing" in record_set.records[1]  # record built, not skipped
-    record = record_set.records[1]["missing"]
+    assert "missing" in records[1]  # record built, not skipped
+    record = records[1]["missing"]
     assert set(record.routing) == set(ROUTING_MODES)
     assert all(view is None for view in record.routing.values())
     assert record.transit is None
 
 
-def test_envelope_versioned_and_record_has_no_version() -> None:
-    record_set = _search().assemble_amenity_records(_state_two_places())
-    assert record_set.contract_version == AMENITY_RECORD_CONTRACT_VERSION
-    record = record_set.records[0]["p1"]
+def test_m13_output_is_plain_dict_with_no_envelope_or_version() -> None:
+    records = _search().assemble_amenity_records(_state_two_places())
+    # No envelope: a plain dict, no contract_version anywhere in the M1.3 output.
+    assert not hasattr(records, "contract_version")
+    record = records[0]["p1"]
     assert not hasattr(record, "contract_version")
+    # The single version now lives only on the combined AmenityMetricsSet built by C3.2.5.
+    assert AMENITY_METRICS_CONTRACT_VERSION == "1.0"
 
 
-def test_run_writes_envelope_and_retains_enrichment() -> None:
+def test_run_writes_predefined_records_and_retains_enrichment() -> None:
     state = _state_two_places()
     before = dict(state.enrichment)
 
     returned = _search().run_result_attachment(state)
 
     assert returned is state
-    assert isinstance(state.amenity_records, AmenityRecordSet)
+    assert isinstance(state.predefined_records, dict)
+    assert set(state.predefined_records) == {0, 1}
+    # amenity_records (the combined, versioned set) stays None until C3.2.5 runs.
+    assert state.amenity_records is None
     assert state.enrichment == before  # retained, not cleared
 
 

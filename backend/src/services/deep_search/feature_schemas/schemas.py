@@ -34,10 +34,10 @@ METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"
 MetricValueType = Literal["number_with_unit", "boolean", "enum", "date_time"]
 NullPolicy = Literal["null", "unknown"]
 ResolutionTool = Literal["google_maps", "parallel_web_search", "firecrawl"]
-# Tools an LLM-defined metric may name. `google_maps` is excluded: every value Google Maps can
-# supply is a code-owned pre-defined metric, so a model-defined metric is always a web-search or
-# page-fetch fact, in either band. Used by the wire schema and the stored MetricSpec.
-MetricResolutionTool = Literal["parallel_web_search", "firecrawl"]
+# An LLM-defined metric names no tool. `google_maps` never applies (every value Google Maps can
+# supply is a code-owned pre-defined metric), and `parallel_web_search` / `firecrawl` are both
+# implied: per RC10 every LLM-defined metric carries both a web-search target and a page-fetch
+# (firecrawl) target, so the tool is fixed by which target a later stage reads, not chosen.
 # The two dynamic depth bands the model defines metrics for; basic_profile is fixed.
 MetricBand = Literal["operating_details", "specific_attributes"]
 # The bands a pre-defined (code-owned, Google-Maps-resolved) metric belongs to. Includes
@@ -430,20 +430,27 @@ class DepthAssignmentResult(BaseModel):
 
 
 class ResolutionSourceEntry(BaseModel):
-    """Wire shape of where a later stage resolves one metric."""
+    """Wire shape of where later stages resolve one LLM-defined metric.
+
+    Per RC10 every LLM-defined metric carries both sources: a web-search target and a
+    firecrawl page-fetch target. The tool is implied by the field, never chosen by the model.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    tool: MetricResolutionTool = Field(
+    web_target: str = Field(
         description=(
-            "The tool a later stage uses: 'parallel_web_search' for a web search, "
-            "'firecrawl' for a fetched page."
+            "The parallel_web_search hint: names the attribute or question to resolve, in "
+            "the entity's domain terms, phrased as a direction (for example 'availability of "
+            "a dedicated powerlifting platform at the gym'). Never a verdict to confirm, a "
+            "source type (no 'reviews', 'listings', 'official site'), or bare keywords. "
+            "Specific enough that the search keywords follow directly from it."
         )
     )
-    target: str = Field(
+    scrape_target: str = Field(
         description=(
-            "The concrete target: the shape of the search query or the page type to "
-            "fetch. Must name something specific."
+            "The firecrawl target: the concrete page type to fetch for this metric (for "
+            "example the official site section or listing). Must name something specific."
         )
     )
 
@@ -622,10 +629,14 @@ class ResolutionSource:
 
 @dataclass
 class MetricResolutionSource:
-    """Stored tool and target of one LLM-defined metric (never `google_maps`)."""
+    """Stored resolution targets of one LLM-defined metric (never `google_maps`).
 
-    tool: MetricResolutionTool
-    target: str
+    Per RC10, both sources are always present: a web-search target and a firecrawl
+    page-fetch target. The tool is implied by the field, not stored.
+    """
+
+    web_target: str
+    scrape_target: str
 
 
 @dataclass
@@ -882,8 +893,9 @@ class EnrichmentBundle:
 # Responsibility 2 — Mechanism 1, Component M1.3 (Deterministic Result Attachment) contracts.
 # ---------------------------------------------------------------------------------
 
-# Version tag for the AmenityRecordSet shape. Stamped once on the envelope, never per record.
-AMENITY_RECORD_CONTRACT_VERSION = "1.0"
+# Version tag for the combined AmenityMetricsSet shape (built by Mechanism 3 C3.2.5). Stamped
+# once on that envelope, never per record. M1.3's PredefinedMetricsRecord carries no version.
+AMENITY_METRICS_CONTRACT_VERSION = "1.0"
 
 
 @dataclass(frozen=True)
@@ -904,13 +916,17 @@ class TransitView:
 
 
 @dataclass(frozen=True)
-class AmenityRecord:
+class PredefinedMetricsRecord:
     """One amenity per category: the M1.3 join of profile + accessibility, keyed (category_id, place_id).
+
+    Renamed from `AmenityRecord` (fields unchanged). It is the M1.3 output, held in
+    `state.predefined_records`; Mechanism 3 C3.2.5 later pairs it with a `SpecificMetricsRecord`.
 
     Every profile field is nullable: a missing value is None (M1.1/M1.2 returned nothing for it),
     and the reason (not requested at this depth vs. requested-but-not-returned) is derived on read
     from `depth`, not stored per field. `routing` carries every ROUTING_MODES key, each a RouteView
-    or None; `transit` is a TransitView or None. No contract_version here — it lives on the envelope.
+    or None; `transit` is a TransitView or None. No contract_version here — it lives on the
+    combined AmenityMetricsSet envelope built by C3.2.5.
     """
 
     category_id: int
@@ -933,12 +949,72 @@ class AmenityRecord:
     transit: TransitView | None
 
 
+# ---------------------------------------------------------------------------------
+# Mechanism 3 C3.2.5 record contracts. Defined here (the shared schemas module) as the
+# M1.3/state prerequisite; the logic that populates them lives in Mechanism 3 (not built yet).
+# ---------------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
-class AmenityRecordSet:
-    """The versioned M1.3 envelope: one contract_version plus the records, keyed category_id then place_id."""
+class EvidenceItem:
+    """One piece of evidence behind a resolved value (C3.2.4)."""
+
+    source: Literal["web", "scrape", "google_reviews"]
+    url: str | None
+    quote: str
+    retrieved_at: str
+
+
+@dataclass(frozen=True)
+class ResolvedMetric:
+    """One LLM-defined metric after resolution (C3.2.5), keyed by `label` within its category."""
+
+    label: str
+    status: Literal["resolved", "unresolved"]
+    value: float | bool | str | None
+    unit: str | None
+    support: Literal["both_sources", "single_source"] | None
+    evidence: tuple[EvidenceItem, ...]
+    as_of: str | None
+    unresolved_reason: str | None
+
+
+@dataclass(frozen=True)
+class SpecificMetricsRecord:
+    """The Mechanism 3 output, one per eligible amenity, keyed (category_id, place_id).
+
+    Shares identity fields with `PredefinedMetricsRecord` so C3.2.5 can pair them. Carries no
+    contract_version. Held in `state.specific_records`.
+    """
+
+    category_id: int
+    taxonomy_node: str
+    depth: DepthLevel
+    place_id: str
+    specific_metrics: dict[str, ResolvedMetric]
+
+
+@dataclass(frozen=True)
+class AmenityMetricsRecord:
+    """C3.2.5 pairing of the two record halves for one (category_id, place_id).
+
+    `specific` is None when the category has no `specific_metrics` (not applicable).
+    """
+
+    predefined: PredefinedMetricsRecord
+    specific: SpecificMetricsRecord | None
+
+
+@dataclass(frozen=True)
+class AmenityMetricsSet:
+    """The combined, versioned envelope built by C3.2.5: one contract_version plus the records.
+
+    Replaces the removed `AmenityRecordSet`. Written to `state.amenity_records`, None until
+    C3.2.5 runs. `records` is keyed category_id then place_id, mirroring `discovered_places`.
+    """
 
     contract_version: str
-    records: dict[int, dict[str, AmenityRecord]]
+    records: dict[int, dict[str, AmenityMetricsRecord]]
 
 
 @dataclass
@@ -948,8 +1024,12 @@ class AmenitySearchState:
     `discovered_places` is keyed category_id then place_id, so dedup is within a category
     only (a place matching two categories is one record per category). `enrichment` is keyed by
     the deduplicated union of place_ids across categories (routing/transit from a fixed origin do
-    not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM. `amenity_records` is the M1.3
-    output envelope, None until M1.3 runs.
+    not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM.
+
+    `predefined_records` is the M1.3 output: a plain nested dict (no envelope, no version) keyed
+    category_id then place_id, None-free (an empty dict until M1.3 runs). `specific_records` is
+    the Mechanism 3 output, same keying, populated by C3.2.5. `amenity_records` holds the
+    combined, versioned `AmenityMetricsSet`, None until C3.2.5 runs.
     """
 
     origin: GeoPoint
@@ -957,4 +1037,8 @@ class AmenitySearchState:
     category_metric_plans: list[CategoryMetricPlan]
     discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     enrichment: dict[str, EnrichmentBundle] = field(default_factory=dict)
-    amenity_records: AmenityRecordSet | None = None
+    predefined_records: dict[int, dict[str, PredefinedMetricsRecord]] = field(
+        default_factory=dict
+    )
+    specific_records: dict[int, dict[str, SpecificMetricsRecord]] = field(default_factory=dict)
+    amenity_records: AmenityMetricsSet | None = None

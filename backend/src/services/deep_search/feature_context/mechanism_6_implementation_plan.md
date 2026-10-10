@@ -118,14 +118,13 @@ All in `feature_schemas/schemas.py` except the error types in `exceptions/deep_s
 | `MetricValueType` | value type alias | `number_with_unit`, `boolean`, `enum`, `date_time` | type alias | wire + store |
 | `NullPolicy` | unresolved-value alias | `null`, `unknown` | type alias | wire + store |
 | `ResolutionTool` | tool alias | `google_maps`, `parallel_web_search`, `firecrawl` | type alias | pre-defined metrics only |
-| `MetricResolutionTool` | LLM-defined metric tool alias | `parallel_web_search`, `firecrawl` (no `google_maps`, either band) | type alias | wire + store |
 | `MetricBand` | band alias | `operating_details`, `specific_attributes` | type alias | wire + store |
-| `ResolutionSourceEntry` | wire tool and target | `tool: MetricResolutionTool` · `target: str` | wire model | execute, apply |
+| `ResolutionSourceEntry` | wire resolution targets (RC10: both sources) | `web_target: str` (parallel_web_search query shape) · `scrape_target: str` (firecrawl page type); no `tool` field — the tool is implied by the field, never `google_maps` | wire model | execute, apply |
 | `MetricEntry` | one wire metric | `label`, `question`, `verification`: `str` · `value_type: MetricValueType` · `unit: str \| None` · `enum_values: list[str]` · `resolution_source: ResolutionSourceEntry` · `null_policy: NullPolicy` · `band: MetricBand` | wire model | execute, apply |
 | `CategoryMetricsEntry` | wire metrics per category | `category_id: int` (echoed) · `metrics: list[MetricEntry]` (may be empty) | wire model | execute, apply |
 | `MetricDefinitionResult` | batched wire body | `categories: list[CategoryMetricsEntry]` | wire model | execute, apply |
 | `ResolutionSource` | stored tool and target of a pre-defined metric | `tool: ResolutionTool` · `target: str` | dataclass | schemas |
-| `MetricResolutionSource` | stored tool and target of an LLM-defined metric | `tool: MetricResolutionTool` · `target: str` | dataclass | apply, write |
+| `MetricResolutionSource` | stored resolution targets of an LLM-defined metric (RC10: both sources) | `web_target: str` · `scrape_target: str`; no `tool` field | dataclass | apply, write |
 | `MetricSpec` | one stored metric | same fields as `MetricEntry`, with `resolution_source: MetricResolutionSource`, text trimmed | dataclass | apply, write |
 | `CategoryMetricSet` | metrics for one category | `category_id: int` · `taxonomy_node: str` (copied by code) · `metrics: list[MetricSpec] \| None` | **mutable list on state** | write, later stages |
 | `RequirementInterpretationState` *(extended)* | mutable workflow state | existing fields plus `category_metrics: list[CategoryMetricSet]` (default `[]`) | **mutable** | M5 to M6 to later |
