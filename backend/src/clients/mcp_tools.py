@@ -36,6 +36,7 @@ from typing import Literal, Protocol
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 
 from src.core.config import Settings
@@ -49,18 +50,29 @@ logger = logging.getLogger(DEEP_SEARCH_LOGGER_NAME)
 # --------------------------------------------------------------------------------------------------
 SEARCH_TIMEOUT_SECONDS = 30.0
 # Map and scrape are single requests with no job id, so each has its own per-call bound; they are
-# not tied to the crawl timeout below.
-MAP_TIMEOUT_SECONDS = 45.0
-SCRAPE_TIMEOUT_SECONDS = 30.0
+# not tied to the crawl timeout below. Raised to 60 s (M10) so the budget covers a short queue
+# behind the 2-browser limit; Firecrawl's one clock counts queue wait against the job (OV-10).
+MAP_TIMEOUT_SECONDS = 60.0
+SCRAPE_TIMEOUT_SECONDS = 60.0
 # Each start or status call is bounded by its server's own per-call timeout; this caps the whole
 # crawl-plus-poll wait so a stuck job cannot block a run forever.
 CRAWL_CALL_TIMEOUT_SECONDS = 60.0
 CRAWL_DEADLINE_SECONDS = 180.0
+# Transient backoff for timeout/transport blips: retry fast on the same session.
 RETRY_BACKOFFS_SECONDS = (2.0, 3.0)
+# Rate-limited backoff (M8): a per-minute window needs a wait approaching 60 s, so two short waits
+# would both fall inside the same throttled minute. Honor a response Retry-After when present
+# (OV-8); the window figure is confirmed from Firecrawl's limits page.
+RATE_LIMIT_BACKOFFS_SECONDS = (30.0, 60.0)
 CRAWL_POLL_INTERVAL_SECONDS = 3.0
+# Batch scrape (A4) reads one job to completion by id, the same shape as crawl.
+BATCH_DEADLINE_SECONDS = 300.0
+BATCH_POLL_INTERVAL_SECONDS = 5.0
+# One batch job uses the full plan parallelism; a low value slows large batches (Firecrawl docs).
+BATCH_MAX_CONCURRENCY = 2
 SEARCH_CONCURRENCY = 4
-# One slot pool for every Firecrawl call (map, scrape, crawl). Sized to the vendor rate limit;
-# confirm the plan limit before raising it.
+# One slot pool for every Firecrawl call (map, scrape, batch, crawl). Sized to the plan's
+# concurrent-browser limit (Free = 2) so the gateway does not self-induce 429s (M9, OV-9).
 FIRECRAWL_CONCURRENCY = 2
 # Page mapped and scraped once at open() to confirm the MCP server 3.x JSON output shape.
 # Overridden from Settings.
@@ -80,6 +92,15 @@ FIRECRAWL_STATUS_TOOL = "firecrawl_check_crawl_status"
 # The job-id argument of the status tool. Provisional from the Firecrawl MCP docs; fixed from the
 # live capture. Isolated here so the open verification item is a one-line change.
 FIRECRAWL_STATUS_JOB_ARG = "id"
+# Batch-scrape tools (A4). Not part of the connect-time capability check (user decision), so a
+# missing or renamed tool surfaces as a per-call ToolFailure, like crawl. The exact names and the
+# job-id / cursor argument names are read from the authenticated tools/list at build time (OV-11);
+# these are provisional and isolated here so the fix is a one-line change.
+FIRECRAWL_BATCH_SCRAPE_TOOL = "firecrawl_batch_scrape"
+FIRECRAWL_BATCH_STATUS_TOOL = "firecrawl_check_batch_scrape_status"
+FIRECRAWL_BATCH_JOB_ARG = "id"
+# Cursor/offset argument the batch-status tool takes to page through results; provisional (OV-11).
+FIRECRAWL_BATCH_CURSOR_ARG = "skip"
 
 # Candidate keys for the crawl job id and the page fields, provisional until the live capture fixes
 # the real shapes. Kept as tuples so the parsers tolerate either the documented or captured name.
@@ -92,7 +113,12 @@ _HIT_LIST_KEYS = ("results", "excerpts", "items")
 _CRAWL_DONE_STATUSES = ("completed", "complete", "done", "success", "finished")
 _CRAWL_RUNNING_STATUSES = ("scraping", "pending", "processing", "active", "in_progress", "queued")
 
-_RATE_LIMIT_RE = re.compile(r"rate.?limit|too many requests|429", re.IGNORECASE)
+_RATE_LIMIT_RE = re.compile(r"rate.?limit|too many requests|429|retry.?after", re.IGNORECASE)
+# An MCPError whose message is the Streamable-HTTP SSE disconnect (the stream dropped and the SDK's
+# GET-based resume was exhausted). Classified `transport` (M6) so it retries, rather than `tool_error`
+# which would abort the probe as a misleading "wrong shape". Matched on the message, not the type
+# alone, so a genuine tool error wrapped as MCPError is not retried forever.
+_SSE_DISCONNECT_RE = re.compile(r"sse stream ended|reconnection attempts", re.IGNORECASE)
 
 # Failure kinds that mean a call could not complete, as opposed to returning a wrong body. Search,
 # map and scrape are idempotent reads, so these are the kinds they retry; the probe reports them
@@ -205,6 +231,22 @@ class ScrapeResult:
 
 
 @dataclass(frozen=True)
+class BatchScrapeResult:
+    """Typed `firecrawl_batch_scrape` outcome: one job, many pages (A4).
+
+    `pages` is one `ScrapeResult` per returned page, each keyed by its own `metadata.sourceURL`.
+    A page that failed inside an otherwise-completed job is recorded in `failed_urls`, not as a
+    whole-job `ToolFailure`. An empty `pages` tuple is a valid result, not a failure.
+    """
+
+    pages: tuple[ScrapeResult, ...]
+    total: int
+    completed: int
+    failed_urls: tuple[str, ...]
+    retrieved_at: str
+
+
+@dataclass(frozen=True)
 class ToolFailure:
     """A typed per-call failure, returned not raised, so a gather survives one bad call."""
 
@@ -233,6 +275,10 @@ class ToolGateway(Protocol):
 
     async def scrape_page(self, url: str) -> ScrapeResult | ToolFailure: ...
 
+    async def batch_scrape(
+        self, urls: Sequence[str], *, formats: Sequence[str] = ("markdown",)
+    ) -> BatchScrapeResult | ToolFailure: ...
+
     async def crawl_site(self, url: str, limit: int, depth: int) -> CrawlResult | ToolFailure: ...
 
     async def aclose(self) -> None: ...
@@ -258,7 +304,12 @@ def _streamable_http_factory(
         headers: dict[str, str] = {}
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
-        async with httpx2.AsyncClient(headers=headers) as http_client:
+        # read=None leaves the long-lived SSE response stream unbounded at the transport (M5), so a
+        # slow-but-live map/scrape/batch is not severed by httpx's 5 s read default. Duration is
+        # bounded in one place: the per-call asyncio.timeout and the SDK read_timeout_seconds.
+        # connect/write/pool stay bounded so a dead TCP connect still fails fast.
+        timeout = httpx2.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+        async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
             transport = streamable_http_client(config.url, http_client=http_client)
             async with Client(transport, read_timeout_seconds=config.call_timeout_seconds) as client:
                 yield client
@@ -606,6 +657,130 @@ class McpToolGateway:
         except _UnparseableResult as exc:
             return ToolFailure(FIRECRAWL_SCRAPE_TOOL, "unparseable", str(exc))
 
+    async def batch_scrape(
+        self, urls: Sequence[str], *, formats: Sequence[str] = ("markdown",)
+    ) -> BatchScrapeResult | ToolFailure:
+        """Scrape many pages in one Firecrawl batch job, read to completion by its id (A4).
+
+        One submission and one job clock instead of N single `scrape_page` calls serialized by the
+        Firecrawl pool. The URL list is app-resolved upstream (C3.1.6); the LLM never supplies it.
+        A page that fails inside an otherwise-completed job rides `failed_urls`, not a whole-job
+        `ToolFailure`.
+        """
+        page_urls = [u for u in urls]
+        if not page_urls:
+            raise ValueError("batch_scrape urls must be a non-empty sequence")
+        for u in page_urls:
+            if not u.startswith(("http://", "https://")):
+                raise ValueError("every batch_scrape url must be an http(s) URL")
+        client = self._firecrawl.client()
+        retrieved_at = _timestamp()
+        arguments = {
+            "urls": page_urls,
+            "formats": list(formats),
+            "onlyMainContent": True,
+            "maxConcurrency": BATCH_MAX_CONCURRENCY,
+        }
+        # Like crawl, the start call is never silently re-issued after a timeout or transport error:
+        # the job may already exist and be billed. Only a rate-limited start retries.
+        start = await self._call_with_retry(
+            self._firecrawl_sem,
+            client,
+            FIRECRAWL_BATCH_SCRAPE_TOOL,
+            arguments,
+            timeout=SCRAPE_TIMEOUT_SECONDS,
+            retry_kinds={"rate_limited"},
+        )
+        if isinstance(start, ToolFailure):
+            return start
+        try:
+            parsed = _parse_batch_start(start, retrieved_at)
+        except _UnparseableResult as exc:
+            return ToolFailure(FIRECRAWL_BATCH_SCRAPE_TOOL, "unparseable", str(exc))
+        if isinstance(parsed, BatchScrapeResult):
+            return parsed
+        # `parsed` is a job id; read it to completion on the same Client.
+        return await self._read_batch_job(client, parsed, retrieved_at)
+
+    async def _read_batch_job(
+        self,
+        client: Client,
+        job_id: str,
+        retrieved_at: str,
+    ) -> BatchScrapeResult | ToolFailure:
+        """Poll the batch-status tool by id until complete or the batch deadline, paging the result.
+
+        A timed-out status read is our wait giving up, not the job, so it is asked again with the
+        same id (the batch start is never re-sent). On completion the `next` cursor is followed so
+        all pages are collected before the typed result is built.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + BATCH_DEADLINE_SECONDS
+        pages: list[ScrapeResult] = []
+        failed: list[str] = []
+        cursor: object = None
+        total = 0
+        completed = 0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return ToolFailure(
+                    FIRECRAWL_BATCH_STATUS_TOOL,
+                    "timeout",
+                    f"batch deadline reached while polling; job_id={job_id}",
+                )
+            arguments: dict = {FIRECRAWL_BATCH_JOB_ARG: job_id}
+            if cursor is not None:
+                arguments[FIRECRAWL_BATCH_CURSOR_ARG] = cursor
+            outcome = await self._call_with_retry(
+                self._firecrawl_sem,
+                client,
+                FIRECRAWL_BATCH_STATUS_TOOL,
+                arguments,
+                timeout=min(self._firecrawl_config.call_timeout_seconds, remaining),
+                retry_kinds={"rate_limited"},
+            )
+            if isinstance(outcome, ToolFailure):
+                if outcome.kind == "timeout":
+                    continue  # our wait, not the job; ask again with the same id
+                return outcome
+            try:
+                status = _parse_batch_status(outcome, retrieved_at)
+            except _UnparseableResult as exc:
+                return ToolFailure(FIRECRAWL_BATCH_STATUS_TOOL, "unparseable", str(exc))
+            if status is None:
+                # Still running; wait a poll interval without exceeding the deadline.
+                await _async_sleep(
+                    min(BATCH_POLL_INTERVAL_SECONDS, max(0.0, deadline - loop.time()))
+                )
+                continue
+            page_batch, failed_batch, total, completed, next_cursor = status
+            pages.extend(page_batch)
+            failed.extend(failed_batch)
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+        if failed:
+            # A degrade raises nothing, so this line is the only evidence some pages were dropped.
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "mcp.batch_pages_failed",
+                        "timestamp": _timestamp(),
+                        "total": total or len(pages) + len(failed),
+                        "completed": completed or len(pages),
+                        "failed": len(failed),
+                    }
+                )
+            )
+        return BatchScrapeResult(
+            pages=tuple(pages),
+            total=total or len(pages) + len(failed),
+            completed=completed or len(pages),
+            failed_urls=tuple(failed),
+            retrieved_at=retrieved_at,
+        )
+
     async def crawl_site(
         self, url: str, limit: int, depth: int
     ) -> CrawlResult | ToolFailure:
@@ -668,14 +843,22 @@ class McpToolGateway:
         so a failed attempt can be tied to its page.
         """
         failure: ToolFailure | None = None
-        for attempt in range(len(RETRY_BACKOFFS_SECONDS) + 1):
+        max_retries = len(RETRY_BACKOFFS_SECONDS)
+        for attempt in range(max_retries + 1):
             outcome = await self._single_call(semaphore, client, tool, arguments, timeout)
             if not isinstance(outcome, ToolFailure):
                 return outcome
             failure = outcome
             _log_attempt(tool, attempt, outcome, target)
-            if outcome.kind in retry_kinds and attempt < len(RETRY_BACKOFFS_SECONDS):
-                await _async_sleep(RETRY_BACKOFFS_SECONDS[attempt])
+            if outcome.kind in retry_kinds and attempt < max_retries:
+                # Backoff by kind (M8): a rate limit needs a wait that clears the per-minute window,
+                # while a timeout/transport blip retries fast. Both sequences are the same length.
+                backoffs = (
+                    RATE_LIMIT_BACKOFFS_SECONDS
+                    if outcome.kind == "rate_limited"
+                    else RETRY_BACKOFFS_SECONDS
+                )
+                await _async_sleep(backoffs[attempt])
                 continue
             break
         assert failure is not None
@@ -784,8 +967,15 @@ def _classify_failure(error_or_result: object) -> ToolFailureKind:
     if status is None:
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)
+    # M7: a 429 counts as rate_limited whether it arrives as a status code/response or buried in
+    # the exception text (including an MCPError's message), so this is checked before the generic
+    # MCPError disconnect branch below.
     if status == 429 or _RATE_LIMIT_RE.search(str(exc)):
         return "rate_limited"
+    # M6: the SDK's own SSE-ended / reconnection-exhausted MCPError is a transport fault, so it is
+    # retried on the same session; other MCPError messages stay tool_error (de-mask on the message).
+    if isinstance(exc, MCPError) and _SSE_DISCONNECT_RE.search(str(exc)):
+        return "transport"
     if isinstance(exc, _TRANSPORT_ERRORS):
         return "transport"
     return "tool_error"
@@ -946,6 +1136,93 @@ def _parse_scrape_result(result: object, retrieved_at: str) -> ScrapeResult:
     if source_url is None:
         raise _UnparseableResult("scrape body had no metadata.sourceURL")
     return ScrapeResult(source_url, markdown, retrieved_at)
+
+
+def _int_or(value: object, default: int) -> int:
+    return value if isinstance(value, int) else default
+
+
+def _batch_page(entry: dict, retrieved_at: str) -> ScrapeResult | None:
+    """One batch `data[]` element as a `ScrapeResult`, keyed by its own `metadata.sourceURL`.
+
+    Uses the same rule as `_parse_scrape_result`: a usable page needs a string `markdown` and a
+    non-empty `metadata.sourceURL`. An entry missing either is not usable and returns None, so the
+    caller records it in `failed_urls` rather than emitting a page with a blank or missing key.
+    """
+    markdown = entry.get("markdown")
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else None
+    source_url = _opt_str(metadata.get("sourceURL")) if metadata else None
+    if not isinstance(markdown, str) or source_url is None:
+        return None
+    return ScrapeResult(source_url, markdown, retrieved_at)
+
+
+def _batch_pages(
+    raw_list: list, retrieved_at: str
+) -> tuple[list[ScrapeResult], list[str]]:
+    """Split a batch `data[]` list into usable pages and the URLs of the per-URL failures."""
+    pages: list[ScrapeResult] = []
+    failed: list[str] = []
+    for entry in raw_list:
+        if not isinstance(entry, dict):
+            continue
+        page = _batch_page(entry, retrieved_at)
+        if page is not None:
+            pages.append(page)
+            continue
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        url = (
+            _opt_str(entry.get("url"))
+            or _opt_str(metadata.get("sourceURL"))
+            or _opt_str(metadata.get("url"))
+        )
+        if url:
+            failed.append(url)
+    return pages, failed
+
+
+def _parse_batch_start(result: object, retrieved_at: str) -> "BatchScrapeResult | str":
+    """Read the batch start response: inline completed pages, or a job id to poll."""
+    data = _decode_body(result)
+    job_id = _extract_job_id(data)
+    status = _status_of(data)
+    if isinstance(data, dict):
+        raw = _first_key(data, _PAGE_LIST_KEYS)
+        if isinstance(raw, list) and raw and status not in _CRAWL_RUNNING_STATUSES:
+            pages, failed = _batch_pages(raw, retrieved_at)
+            total = _int_or(data.get("total"), len(pages) + len(failed))
+            completed = _int_or(data.get("completed"), len(pages))
+            return BatchScrapeResult(tuple(pages), total, completed, tuple(failed), retrieved_at)
+    if job_id:
+        return job_id
+    raise _UnparseableResult("batch start had neither pages nor a job id")
+
+
+def _parse_batch_status(
+    result: object, retrieved_at: str
+) -> "tuple[list[ScrapeResult], list[str], int, int, object] | None":
+    """Read a batch status response.
+
+    Returns `None` while the job is still running; otherwise a tuple of (pages, failed URLs, total,
+    completed, next-cursor) for this page of results. De-mask: a body that is neither a recognised
+    running state nor a terminal/data-bearing shape is `_UnparseableResult`, not polled to the
+    deadline (which would mislabel a shape mismatch as a timeout).
+    """
+    data = _decode_body(result)
+    status = _status_of(data)
+    raw = _first_key(data, _PAGE_LIST_KEYS) if isinstance(data, dict) else None
+    if status in _CRAWL_RUNNING_STATUSES and not isinstance(raw, list):
+        return None
+    if status in _CRAWL_DONE_STATUSES or isinstance(raw, list):
+        page_list = raw if isinstance(raw, list) else []
+        pages, failed = _batch_pages(page_list, retrieved_at)
+        total = _int_or(data.get("total") if isinstance(data, dict) else None, len(pages) + len(failed))
+        completed = _int_or(data.get("completed") if isinstance(data, dict) else None, len(pages))
+        next_cursor = data.get("next") if isinstance(data, dict) else None
+        return (pages, failed, total, completed, next_cursor or None)
+    raise _UnparseableResult(
+        f"batch status body had an unrecognised status {status!r} and no data"
+    )
 
 
 def _extract_pages(data: object) -> list[CrawledPage]:

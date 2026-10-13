@@ -584,3 +584,31 @@ carries both `id` and completed pages and asserts `job_id == "job-inline"` and z
 which the mutated code would fail (it would poll). The strengthened test passes on the real code
 (76 passed). **The M29 mutant has not been re-run against the strengthened T31**; that re-check is
 pending.
+
+---
+
+## Iteration 3 additions (fixes A4, M5–M10)
+
+Added to `test_c3_1_1_mcp_tool_gateway.py` (T50–T61) for the "Fixes to be incorporated in iteration"
+spec. The rate-limited retry backoff changed from `[2.0, 3.0]` to `[30.0, 60.0]` (M8); the existing
+rate-limit assertions in both suites were updated, while timeout/transport cases keep `[2.0, 3.0]`.
+
+| Test | Fix | Behavior proven |
+| --- | --- | --- |
+| T50 | M6 | an `MCPError` SSE-ended disconnect classifies `transport`, is retried on the same session (backoff `[2.0, 3.0]`), and recovers |
+| T51 | M6 | a persistent SSE disconnect returns `ToolFailure(transport)`, not `tool_error` |
+| T52 | M7, M8 | a `429` wrapped in an `MCPError` classifies `rate_limited` and uses the window-clearing backoff `[30.0, 60.0]` |
+| T53 | M6, M7 | unit: `_classify_failure` maps SSE-ended→transport, wrapped-429→rate_limited, other MCPError→tool_error |
+| T54 | A4 | `batch_scrape` polls a job to completion; pages keyed by their own `metadata.sourceURL`; totals carried |
+| T55 | A4 | the `next` cursor is followed so all pages are collected |
+| T56 | A4 | a per-URL failure inside a completed job rides `failed_urls` and logs `mcp.batch_pages_failed` (degrade, not whole-job failure) |
+| T57 | A4 | an unrecognised batch status is `ToolFailure(unparseable)`, not polled to the deadline |
+| T58 | A4, M10 | a never-completing batch job returns `ToolFailure(timeout)` carrying the job id |
+| T59 | A4 | bad input (empty list, non-http URL) raises `ValueError` before any call |
+| T60 | A4 | batch is not capability-checked (user decision): `open()` succeeds without the tool, the gap is a per-call `ToolFailure` |
+| T61 | M5 | real HTTP: a scrape whose body streams for ~6 s (past httpx's old 5 s read default) still completes, proving the factory sets `read=None` |
+
+**Deferred to a live runner pass (OV-8, OV-10):** the exact rate-limit window and the measured
+queue-inclusive timeout values; the starting values (30/60 s backoff, 60/60/300 s budgets) are in
+code. **Deferred to build-time (OV-11):** the exact batch MCP tool names (the fixtures use
+`firecrawl_batch_scrape` / `firecrawl_check_batch_scrape_status` as provisional names).

@@ -33,6 +33,7 @@ import sys
 from urllib.parse import urlsplit
 
 from src.clients.mcp_tools import (
+    BatchScrapeResult,
     CrawlResult,
     MapResult,
     ScrapeResult,
@@ -352,6 +353,26 @@ async def _stage_scrape(gateway, page_url: str, collector: _RecordCollector) -> 
     return True
 
 
+async def _stage_batch(
+    gateway, page_urls: list[str], collector: _RecordCollector
+) -> bool:
+    _section("STAGE 4b — batch_scrape (A4)")
+    print(f"request: urls={page_urls}")
+    result = await gateway.batch_scrape(page_urls)
+    _print_records(collector)
+    if isinstance(result, ToolFailure):
+        print(f"ToolFailure: tool={result.tool} kind={result.kind} message={result.message}")
+        return False
+    assert isinstance(result, BatchScrapeResult)
+    print(f"total: {result.total} completed: {result.completed} failed: {len(result.failed_urls)}")
+    print(f"retrieved_at: {result.retrieved_at}")
+    for page in result.pages[:5]:
+        print(f"  - url={page.url} len={len(page.text)}")
+    for failed in result.failed_urls[:5]:
+        print(f"  - FAILED {failed}")
+    return True
+
+
 async def _stage_crawl(gateway, crawl_url: str, collector: _RecordCollector) -> bool:
     _section("STAGE 5 — crawl_site (retained, unused by M3)")
     print(f"request: url={crawl_url} limit={_CRAWL_LIMIT} depth={_CRAWL_DEPTH}")
@@ -505,6 +526,14 @@ async def run_sample_mcp_gateway(argv: list[str]) -> int:
         # Scrape the first mapped page, or the site itself when the map is empty or failed.
         page_url = mapped.links[0].url if mapped is not None and mapped.links else site_url
         if not await _stage_scrape(gateway, page_url, collector):
+            degraded = True
+        # Batch-scrape the first few mapped pages (A4), or the site itself when the map is thin.
+        batch_urls = (
+            [link.url for link in mapped.links[:3]]
+            if mapped is not None and mapped.links
+            else [site_url]
+        )
+        if not await _stage_batch(gateway, batch_urls, collector):
             degraded = True
         if args.crawl and not await _stage_crawl(gateway, site_url, collector):
             degraded = True

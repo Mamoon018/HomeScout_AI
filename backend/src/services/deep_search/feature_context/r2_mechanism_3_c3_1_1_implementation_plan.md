@@ -1,6 +1,18 @@
-# Implementation Plan: Deep Search R2, Mechanism 3, C3.1.1 (MCP Tool Gateway for Parallel and Firecrawl), Iteration 2
+# Implementation Plan: Deep Search R2, Mechanism 3, C3.1.1 (MCP Tool Gateway for Parallel and Firecrawl), Iteration 3
 
-**Scope.** Iteration 2 of C3.1.1. The gateway built in iteration 1 (`search_web` and `crawl_site` over Parallel and Firecrawl) is extended to the new C3.1.1 spec in `R2_Mechanism_3_draft_spec.md`: M3 drives `firecrawl_map` and `firecrawl_scrape`; `firecrawl_crawl` is retained but unused by M3. The change points (A1 to A3, M1 to M4, R1, D1, D2) come from the "C3.1.1 Iteration Report: MCP Tool Gateway, old spec -> new spec". C3.1.2 onward (tool-schema building, phase gating, URL resolution, C3.2) is out of scope. Iteration 1 build-time corrections are not reopened: one owner task per server, no session replacement, `httpx2` as the HTTP client, unrecognised bodies de-masked into `ToolFailure(unparseable)`, `open()` tearing down on any non-local exit, `ValueError` on empty input.
+**Scope.** Iteration 3 of C3.1.1. The gateway built in iteration 2 (`search_web`, `map_site`, `scrape_page`, retained `crawl_site`, and the connect-time Firecrawl shape probe) is corrected and extended to the "Fixes to be incorporated in iteration" section of the C3.1.1 spec (`deep_search_context.md` L2810-2825). Those fixes were identified after a live `--v2a` sample run failed at the probe: the `firecrawl_map` response did not stream back within the httpx client's **default 5.0 s read timeout**, the SDK's GET-based SSE resume was refused `405`, and the resulting `MCPError` was misclassified `tool_error` (not retried) and surfaced as a misleading `McpToolUnavailableError(verify_probe)`. The change points (A4; M5 to M10) come from the "C3.1.1 Iteration Report: built spec -> Fixes" appended at the end of this file. C3.1.2 onward (tool-schema building, phase gating, URL resolution, C3.2) is out of scope. Iteration 1 and 2 build-time corrections are not reopened: one owner task per server, no session replacement (D1), `httpx2` as the HTTP client (D2), unrecognised bodies de-masked into `ToolFailure(unparseable)`, `open()` tearing down on any non-local exit, `ValueError` on empty input. Iteration-2 points (A1 to A3, M1 to M4, R1) stay as built; their tags remain in the body for provenance.
+
+**Iteration 3 change points (this revision).**
+
+| ID | Class | Summary |
+| --- | --- | --- |
+| A4 | ADD | `batch_scrape(urls)` over Firecrawl batch scrape: one job, many pages, keyed by `metadata.sourceURL` |
+| M5 | MODIFY | Explicit read timeout on the httpx2 client in `_streamable_http_factory` (was httpx default 5 s) |
+| M6 | MODIFY | `_classify_failure` maps `MCPError` (SSE-ended / reconnect-exhausted) to `transport` |
+| M7 | MODIFY | `_classify_failure` reaches `rate_limited` for a `429` even when wrapped in `MCPError` |
+| M8 | MODIFY | Lengthen the retry backoff so a `rate_limited` retry clears Firecrawl's per-minute window |
+| M9 | MODIFY | Cap gateway submission concurrency to the vendor plan limit (`FIRECRAWL_CONCURRENCY`) |
+| M10 | MODIFY | Per-call timeouts account for Firecrawl's queue-inclusive job clock |
 
 **Status tags used below.** `[ADD]`, `[MODIFY]`, `[REMOVE]` carry the iteration-report ID. Untagged items are built and unchanged.
 
@@ -17,6 +29,18 @@
 | P5 | Firecrawl semaphore | Renamed from crawl to Firecrawl. Value stays 2. | Spec: size to the vendor limit; confirm before raising. |
 | P6 | Probe failure classes | Shape problem raises `McpToolUnavailableError`; a call that cannot complete after retries raises `McpConnectionError`. Both use `stage="verify_probe"`. | Spec names only the shape case; the other must also stop the run before amenity work. |
 
+### Decisions taken for iteration 3 (the fixes)
+
+| ID | Topic | Decision | Basis |
+| --- | --- | --- | --- |
+| P7 | httpx read timeout (M5) | `_streamable_http_factory` builds `httpx2.AsyncClient(timeout=httpx2.Timeout(connect=10.0, read=None, write=10.0, pool=10.0))`. `read=None` so the transport never severs a live SSE stream; duration is governed in one place by the per-call `asyncio.timeout` and SDK `read_timeout_seconds`. connect/write/pool stay bounded so a dead TCP connect fails fast. | The default 5 s httpx read timeout severed a map that streamed for >5 s; the call budget, not a transport default, must bound the stream. Consistent with D2 (`httpx2`). |
+| P8 | `MCPError` classification (M6) | `_classify_failure` treats `mcp.shared.exceptions.MCPError` (SSE-ended / reconnection-exhausted) as `transport`, so it is retried on the same session and, if persistent, returns `ToolFailure(transport)`; a probe disconnect becomes `McpConnectionError(verify_probe)`. | A dropped stream is a transport fault, not a tool error; it must retry and read honestly. A retry reissues the call on the same `Client` (a new request stream), so D1 (no session replacement) holds. |
+| P9 | 429 inside `MCPError` (M7) | `_classify_failure` checks the rate-limit signal **first**: `status_code == 429` on the exception or its `response`, **or** a case-insensitive match of `{429, "rate limit", "too many requests", "retry-after"}` in `str(exc)` including when wrapped in `MCPError`; only then does the generic `MCPError`(SSE-ended) branch return `transport`. If the SDK exposes `status_code==429`, the existing branch already covers it (check only). | Rate/queue limits must retry as rate limits, not drop as `tool_error`, and a 429-bearing `MCPError` must not be mis-read as a plain disconnect. SDK opacity is an open item (OV-7). |
+| P10 | Rate-limit backoff (M8) | Split the backoff by kind. `timeout`/`transport` keep `(2.0, 3.0)` (brief blips, retry fast). `rate_limited` honors a `Retry-After` value when the response carries one, else uses `(30.0, 60.0)`; retry count stays at 2 (3 attempts), so the hard-throttle worst case adds about 90 s. The per-minute figure the window is sized against is an open item (OV-8). | Two short waits both fall inside the same throttled minute and are wasted; a rate-limited retry must approach a 60 s window. |
+| P11 | Submission concurrency (M9) | `FIRECRAWL_CONCURRENCY = 2` (the Free plan's concurrent-browser limit); `SEARCH_CONCURRENCY = 4` is unchanged (Parallel is a separate server). A4's per-job `BATCH_MAX_CONCURRENCY = 2` (one batch uses the full plan parallelism; the docs warn a low value slows large batches). Joint rule: at 2 + 2, a batch overlapping a single scrape can request up to 4 browsers; the excess only queues (not a 429), so C3.1.6 runs one batch **or** singles per amenity, not both, keeping our self-queue near zero (OV-9). | Over-submitting self-queues work whose wait is charged against each job's timeout; the cap and batch `maxConcurrency` must not jointly exceed the plan. |
+| P12 | Queue-aware timeouts (M10) | Starting values (unmeasured, configurable): `MAP_TIMEOUT_SECONDS = 60.0`, `SCRAPE_TIMEOUT_SECONDS = 60.0` (both raised to cover a short queue behind a busy pool), `BATCH_DEADLINE_SECONDS = 300.0` with a 5 s poll interval, `SEARCH_TIMEOUT_SECONDS = 30.0` unchanged (Parallel has no queue model), the retained `CRAWL_DEADLINE_SECONDS = 180.0` kept, `CRAWL_CALL_TIMEOUT_SECONDS = 60.0` kept. Firecrawl's one clock runs submission to execution (48 h ceiling), so each budget leaves room for queue wait without orphaning a job past its own timeout. Values confirmed on the runner (OV-10). | A job still queued under the 2-browser limit must not be dropped by us too early, nor awaited long past Firecrawl's own timeout. |
+| P13 | Batch scrape (A4) | Add `batch_scrape(urls, formats=["markdown"])`: start a batch job, poll by job id (reusing the `crawl_site` / `_read_crawl_job` start-then-poll shape), parse the job envelope's `data[]` into a list of the existing `ScrapeResult` under a new `BatchScrapeResult` wrapper, follow the `next` cursor, and tolerate per-URL partial failures. Per-job `maxConcurrency` stays within the plan. `scrape_page` is kept for single-page and the probe. Batch is **not** added to the connect-time capability check (user decision): `verify_capabilities` stays `web_search` + `firecrawl_map` + `firecrawl_scrape`, and a missing or renamed batch tool surfaces as a per-call `ToolFailure` on the first `batch_scrape`, like the retained `crawl_site`. | A site deep-search scrapes several pages; one batch job is one submission and one job clock instead of N calls serialized by the 2-browser pool. The authenticated MCP session exposes a batch tool (confirmed by the domain owner); the exact tool name and arguments are read from the authenticated `tools/list` at build time so A4 binds to the real name, not a guessed one (OV-11). |
+
 ## Iteration point to plan section
 
 | ID | Class | Where planned |
@@ -29,6 +53,13 @@
 | M3 | MODIFY | V2b runner and fixtures: section 4; todos 9, 10, 12 |
 | M4 | MODIFY (check only) | `_decode_body`: section F; one test in todos 9, 12 |
 | R1 | REMOVE (code retained) | crawl and status requirement leaves `verify_capabilities`: sections D, F; todos 5, 9, 12 |
+| A4 | ADD | `batch_scrape`: sections B, C, D, E, F, G; todos 5, 9, 10, 12 |
+| M5 | MODIFY | `_streamable_http_factory` timeout: sections D, F, G; todos 5, 9, 12 |
+| M6 | MODIFY | `_classify_failure` MCPError->transport: sections D, E, F, G; todos 5, 9, 12 |
+| M7 | MODIFY | `_classify_failure` 429-in-MCPError->rate_limited: sections F, G; todos 5, 9, 12 |
+| M8 | MODIFY | retry backoff values: sections D, F; todos 5, 9, 12 |
+| M9 | MODIFY | `FIRECRAWL_CONCURRENCY` sizing: sections D, Layer 3 G; todo 5 |
+| M10 | MODIFY | queue-aware per-call timeouts: sections D, F, G; todos 5, 9, 12 |
 
 **Checked against the real SDK** (`mcp==2.2.0`, read in the installed environment):
 - `Client(transport)` and `streamable_http_client(...)` are one-shot. The gateway never reconnects or replaces a `Client`: a timeout is our side giving up on waiting, so the open session stays in use.
@@ -38,6 +69,7 @@
 - `Client` caches `tools/list` by default, so the capability check uses `cache_mode="bypass"`.
 - Endpoints: Parallel `https://search.parallel.ai/mcp`; Firecrawl `https://mcp.firecrawl.dev/v2/mcp` (bearer). The `/v2/` segment is the hosted endpoint's name, not the MCP server package version; whether the server behind it returns the MCP server 3.x JSON output is settled at run time by the probe (open item OV-3).
 - `mcp.server.MCPServer` serves in-process, so tests need no network.
+- **Iteration 3 transport facts (from the live trace that motivated the fixes):** the hosted Firecrawl transport is a long-lived SSE stream; the caller-owned `httpx2.AsyncClient` built with no `timeout` applies httpx's default 5.0 s read timeout to the SSE response, so a tool call that streams for longer raises `httpx2.ReadTimeout`; the SDK then resumes via an HTTP `GET` to the same endpoint, which Firecrawl answers `405 Method Not Allowed`, and after `MAX_RECONNECTION_ATTEMPTS` it raises `mcp.shared.exceptions.MCPError("SSE stream ended and reconnection attempts were exhausted")`. `_classify_failure` does not recognise `MCPError`, so it returns `tool_error`. These are the facts M5-M7 act on.
 
 ## 0. Cross-mechanism check (updates to earlier mechanisms)
 
@@ -63,15 +95,15 @@ No prompt module: there is no LLM call. The gateway stays in `clients/`. No new 
 | 2 | `backend/src/core/config.py` | Modify | Add `firecrawl_probe_url` (`str`, default `https://example.com`); fix keyless comment | A3, M1 |
 | 3 | `backend/.env.example` | Modify | Document `FIRECRAWL_PROBE_URL`; reword keyless Firecrawl comment | A3, M1 |
 | 4 | `backend/src/exceptions/mcp.py` | Modify (docstrings only) | Module and `McpToolUnavailableError` docstrings cover a wrong output shape; no new class | A3, R1 |
-| 5 | `backend/src/clients/mcp_tools.py` | Modify | Result contracts, Protocol members, `map_site`, `scrape_page`, probe, capability set, semaphore rename, parsers, log changes | A1 to A3, M1, M2, R1 |
+| 5 | `backend/src/clients/mcp_tools.py` | Modify | Result contracts, Protocol members, `map_site`, `scrape_page`, probe, capability set, semaphore rename, parsers, log changes; **iteration 3:** httpx timeout in `_streamable_http_factory`, `_classify_failure` MCPError/429 handling, backoff values, `FIRECRAWL_CONCURRENCY` sizing, queue-aware timeouts, new `batch_scrape` op + `BatchScrapeResult` + batch parser + batch tool constants | A1 to A3, M1, M2, R1, A4, M5 to M10 |
 | 6 | `backend/src/services/deep_search/amenity_search.py` | No change | Injection and `aclose` are unaffected | |
 | 7 | `test_place_discovery.py`, `test_accessibility_enrichment.py`, `test_result_attachment.py` | No change | Pass `tool_gateway=None` | |
 | 8 | `feature_sample_runs/result_attachment_sample_run.py` | No change | Passes `tool_gateway=None` | |
-| 9 | `backend/tests/services/deep_search/test_mcp_tool_gateway.py` | Modify | Fixture server serves map and scrape; capability, probe, map, scrape, concurrency cases | A1 to A3, M1 to M4, R1 |
-| 10 | `feature_sample_runs/mcp_tool_gateway_sample_run.py` | Modify | Add map and scrape stages; crawl becomes opt-in; V2b on scrapes | A1 to A3, M3 |
+| 9 | `backend/tests/services/deep_search/test_mcp_tool_gateway.py` | Modify | Fixture server serves map and scrape; capability, probe, map, scrape, concurrency cases; **iteration 3:** slow-stream-survives-timeout, MCPError->transport retry, 429-in-MCPError->rate_limited, longer backoff values, queue-aware timeout, batch-job fixtures | A1 to A3, M1 to M4, R1, A4, M5 to M10 |
+| 10 | `feature_sample_runs/mcp_tool_gateway_sample_run.py` | Modify | Add map and scrape stages; crawl becomes opt-in; V2b on scrapes; **iteration 3:** a `batch_scrape` stage over mapped pages (the transport/call/header diagnostic tracers added this session already live here behind `--trace-calls`) | A1 to A3, M3, A4 |
 | 11 | `feature_context/deep_search_context.md` | Modify | C3.1.1 section brought to the new spec | all |
-| 12 | `feature_tests/test_c3_1_1_mcp_tool_gateway.py` (not in iteration-1 plan; in repo) | Modify | Same fixture and case changes as #9 | A1 to A3, M1 to M4, R1 |
-| 13 | `feature_tests/C3_1_1_mcp_tool_gateway_test_plan.md` (not in iteration-1 plan; in repo) | Modify (docs) | Reword capability entries; add entries for the new cases | M1, R1, A1 to A3 |
+| 12 | `feature_tests/test_c3_1_1_mcp_tool_gateway.py` (not in iteration-1 plan; in repo) | Modify | Same fixture and case changes as #9 | A1 to A3, M1 to M4, R1, A4, M5 to M10 |
+| 13 | `feature_tests/C3_1_1_mcp_tool_gateway_test_plan.md` (not in iteration-1 plan; in repo) | Modify (docs) | Reword capability entries; add entries for the new cases; **iteration 3:** entries for M5-M10 and A4 | M1, R1, A1 to A3, A4, M5 to M10 |
 
 Result contracts stay in `clients/mcp_tools.py`, not `schemas.py`, because `clients/` must not import `services/`.
 
@@ -92,9 +124,12 @@ Feature: Deep Search
                ├─ Stage 4: search_web, typed web_search on Parallel
                ├─ Stage 5: map_site, typed firecrawl_map on Firecrawl                            [A1]
                ├─ Stage 6: scrape_page, typed firecrawl_scrape on Firecrawl                      [A2]
+               ├─ Stage 6b: batch_scrape, one firecrawl batch job over many URLs               [A4]
                ├─ Stage 7: crawl_site and status re-read, retained and unused by M3
                └─ Stage 8: aclose, close every session in its owner task
 ```
+
+Iteration-3 fixes attach to the shared machinery under these stages, not as new stages: the client factory's read timeout [M5], the failure classifier [M6, M7], the retry backoff [M8], the Firecrawl slot pool size [M9], and the per-call timeout budgets [M10] all sit on the call path every Firecrawl stage uses.
 
 C3.1.1 adds no workflow method to `AmenitySearch`. `run_llm_metric_resolution` will call `open` first and `aclose` last when built later.
 
@@ -107,20 +142,23 @@ C3.1.1 adds no workflow method to `AmenitySearch`. `run_llm_metric_resolution` w
 | `CrawledPage`, `CrawlResult` | crawl page and outcome | unchanged (retained path) | immutable | Stage 7 → later |
 | `MapLink` **[A1]** | one candidate page of a site | `url: str` · `title: str \| None` · `description: str \| None` | immutable | Stage 5 → C3.1.3/C3.1.6 |
 | `MapResult` **[A1]** | typed map outcome | `url: str` (the mapped homepage) · `links: tuple[MapLink, ...]` · `retrieved_at: str` | immutable | Stage 5 → C3.1.3/C3.1.6 |
-| `ScrapeResult` **[A2]** | typed scrape outcome | `url: str` (from `metadata.sourceURL`) · `text: str` (markdown) · `retrieved_at: str` | immutable | Stage 6 → C3.1.3/C3.1.6 |
+| `ScrapeResult` **[A2]** | typed scrape outcome | `url: str` (from `metadata.sourceURL`) · `text: str` (markdown) · `retrieved_at: str` | immutable | Stage 6 and 6b → C3.1.3/C3.1.6 |
+| `BatchScrapeResult` **[A4]** | typed batch-scrape outcome (job wrapper) | `pages: tuple[ScrapeResult, ...]` (one per returned page, each keyed by its own `sourceURL`) · `total: int` · `completed: int` · `failed_urls: tuple[str, ...]` (per-URL partial failures) · `retrieved_at: str` | immutable | Stage 6b → C3.1.6 |
 | `ToolFailure` | typed per-call failure, returned not raised | `tool` · `kind: tool_error \| timeout \| rate_limited \| transport \| unparseable` · `message` | immutable | Stages 4 to 7 → callers |
 | `McpGatewayError` tree | gateway-level failure, raised | `McpConnectionError`, `McpToolUnavailableError`; `stage` is `open`, `verify_capabilities` or `verify_probe` **[A3]** | immutable | Stages 1 to 3 → run |
 
-> Rules: an empty `links` list is a valid `MapResult`, and empty `text` with a `sourceURL` is a valid `ScrapeResult`; neither is a failure, so C3.1.4 can label them `empty`. A scrape body with no non-empty `sourceURL` is `ToolFailure(unparseable)`. `ScrapeResult.url` is `metadata.sourceURL` as reported; per Firecrawl's docs that is the URL that was requested (the post-redirect URL is the separate `metadata.url`, which is not carried), so callers key by it as a stable page key (not live-verified). `retrieved_at` is stamped when the operation starts, as in `search_web`. No new failure kind. Keys appear only in `McpServerConfig.api_key`.
+> Rules: an empty `links` list is a valid `MapResult`, and empty `text` with a `sourceURL` is a valid `ScrapeResult`; neither is a failure, so C3.1.4 can label them `empty`. A scrape body with no non-empty `sourceURL` is `ToolFailure(unparseable)`. `ScrapeResult.url` is `metadata.sourceURL` as reported; per Firecrawl's docs that is the URL that was requested (the post-redirect URL is the separate `metadata.url`, which is not carried), so callers key by it as a stable page key (not live-verified). `retrieved_at` is stamped when the operation starts, as in `search_web`. No new failure kind (`BatchScrapeResult` reuses `ScrapeResult` per page and `ToolFailure` for a whole-job failure). Keys appear only in `McpServerConfig.api_key`.
+>
+> **Iteration 3 [A4] rule:** `BatchScrapeResult` is a job wrapper, not a per-page type: each element of its `pages` is the existing `ScrapeResult`, keyed by the page's own `metadata.sourceURL` (not request order). A page that failed inside an otherwise-completed job is recorded in `failed_urls` (the batch's own error listing), not as a whole-job `ToolFailure`; an unreadable job envelope is `ToolFailure(unparseable)`.
 
 ## C. Supporting Actors & Interfaces
 
 | Actor | Kind | Contract | Implementations | Depended on by |
 | --- | --- | --- | --- | --- |
-| `ToolGateway` | Protocol | `open()` · `search_web(objective, search_queries)` · `map_site(url)` **[A1]** · `scrape_page(url)` **[A2]** · `crawl_site(url, limit, depth)` · `aclose()` | `McpToolGateway`, test fake | `AmenitySearch`; C3.1.3 to C3.1.7 later |
+| `ToolGateway` | Protocol | `open()` · `search_web(objective, search_queries)` · `map_site(url)` **[A1]** · `scrape_page(url)` **[A2]** · `batch_scrape(urls)` **[A4]** · `crawl_site(url, limit, depth)` · `aclose()` | `McpToolGateway`, test fake | `AmenitySearch`; C3.1.3 to C3.1.7 later |
 | `ClientFactory` | callable alias | `(McpServerConfig) -> async context manager yielding mcp.Client` | Streamable HTTP (default), in-process fake (tests) | `_ServerSession` |
 | `mcp.Client` | external SDK | `list_tools(cache_mode)` · `call_tool(name, arguments, read_timeout_seconds)` | SDK | `_ServerSession`, `McpToolGateway` |
-| `httpx2.AsyncClient` | external SDK | carries the `Authorization` header | SDK | default `ClientFactory` |
+| `httpx2.AsyncClient` **[M5]** | external SDK | carries the `Authorization` header; built with an explicit `timeout` (read bound matched to the call budget, not httpx's 5 s default) | SDK | default `ClientFactory` |
 | `Settings` | existing config | keys, URLs, and `firecrawl_probe_url` **[A3]** | one | `create_mcp_tool_gateway` |
 
 ## D. Class & Method Blueprint
@@ -129,17 +167,19 @@ C3.1.1 adds no workflow method to `AmenitySearch`. `run_llm_metric_resolution` w
 
 | Method | Signature | Purpose (one line) |
 | --- | --- | --- |
-| `__init__` **[M2, A3]** | `(parallel: McpServerConfig, firecrawl: McpServerConfig, *, search_concurrency: int, firecrawl_concurrency: int, firecrawl_probe_url: str, client_factory: ClientFactory)` | hold configs, per-server semaphores, probe target, connect seam |
+| `__init__` **[M2, A3, M9]** | `(parallel: McpServerConfig, firecrawl: McpServerConfig, *, search_concurrency: int, firecrawl_concurrency: int, firecrawl_probe_url: str, client_factory: ClientFactory)` | hold configs, per-server semaphores (Firecrawl pool sized to the plan browser limit [M9]), probe target, connect seam |
 | `open` **[A3]** | `() -> None [raises: McpConnectionError, McpToolUnavailableError]` | start both sessions, verify capabilities, then probe Firecrawl |
 | `verify_capabilities` **[M1, R1]** | `() -> None [raises: McpToolUnavailableError, McpConnectionError]` | list tools on both servers, match web_search, map, scrape |
 | `_probe_firecrawl_shape` **[A3]** | `() -> None [raises: McpToolUnavailableError, McpConnectionError]` | map and scrape the probe URL, confirm MCP server 3.x JSON output shape |
 | `search_web` | `(objective: str, search_queries: Sequence[str]) -> WebSearchResult \| ToolFailure [raises: ValueError, McpConnectionError]` | run `web_search` with retry, parse excerpts |
 | `map_site` **[A1]** | `(url: str) -> MapResult \| ToolFailure [raises: ValueError, McpConnectionError]` | run `firecrawl_map` with retry, parse the link set |
 | `scrape_page` **[A2]** | `(url: str) -> ScrapeResult \| ToolFailure [raises: ValueError, McpConnectionError]` | run `firecrawl_scrape` with retry, parse one page |
+| `batch_scrape` **[A4]** | `(urls: Sequence[str], *, formats: Sequence[str] = ("markdown",)) -> BatchScrapeResult \| ToolFailure [raises: ValueError, McpConnectionError]` | start one batch job over many URLs, poll by id, parse the job envelope |
 | `crawl_site` | `(url: str, limit: int, depth: int) -> CrawlResult \| ToolFailure [raises: ValueError, McpConnectionError]` | retained; start crawl, read the job by id |
 | `aclose` | `() -> None` | idempotent; end every owner task |
 | `_call_with_retry` **[A1, A2]** | `(semaphore, client, tool: str, arguments: dict, *, timeout: float, retry_kinds: set[str], target: str \| None = None) -> object \| ToolFailure` | one bounded call with transient retry; failure log names target |
 | `_read_crawl_job` | `(client, job_id: str, url: str, retrieved_at: str) -> CrawlResult \| ToolFailure` | retained; poll or re-read the job by id |
+| `_read_batch_job` **[A4]** | `(client, job_id: str, retrieved_at: str) -> BatchScrapeResult \| ToolFailure` | poll the batch job by id, follow the `next` cursor to the end |
 
 **`_ServerSession`** (private) is unchanged: `start`, `client`, `stop`; one owner task per server.
 
@@ -147,13 +187,24 @@ C3.1.1 adds no workflow method to `AmenitySearch`. `run_llm_metric_resolution` w
 
 | Function | Signature | Purpose (one line) |
 | --- | --- | --- |
-| `_parse_search_result`, `_parse_crawl_result`, `_parse_crawl_status`, `_classify_failure`, `_decode_body` | unchanged | existing parsing and classification |
+| `_parse_search_result`, `_parse_crawl_result`, `_parse_crawl_status`, `_decode_body` | unchanged | existing parsing and classification |
+| `_classify_failure` **[M6, M7]** | `(error_or_result) -> ToolFailureKind` | map an exception or `is_error` result to a kind; now classifies `MCPError`(SSE-ended) as `transport` and a `429` embedded in an `MCPError` as `rate_limited` |
+| `_streamable_http_factory` **[M5]** | `(config: McpServerConfig) -> AbstractAsyncContextManager[Client]` | default client factory; builds `httpx2.AsyncClient` with an explicit `timeout` matched to the call budget |
 | `_parse_map_result` **[A1]** | `(result: CallToolResult, url: str, retrieved_at: str) -> MapResult [raises: _UnparseableResult]` | read `links` into typed candidates |
 | `_parse_scrape_result` **[A2]** | `(result: CallToolResult, retrieved_at: str) -> ScrapeResult [raises: _UnparseableResult]` | read top-level `markdown` and `metadata.sourceURL` |
+| `_parse_batch_scrape_result` **[A4]** | `(result: CallToolResult, retrieved_at: str) -> BatchScrapeResult \| str [raises: _UnparseableResult]` | read the batch envelope's `data[]` into `ScrapeResult`s, or return a job id to poll |
 | `_log_attempt` **[A1, A2]** | `(tool: str, attempt: int, failure: ToolFailure, target: str \| None = None) -> None` | record one failed attempt as WARN |
 | `create_mcp_tool_gateway` **[A3]** | `(settings: Settings) -> McpToolGateway` | composition root; opens nothing; passes probe URL |
 
 **Module constants** **[A1, A2, M1, M2, R1]**: add map and scrape tool names, their argument tuples, `MAP_TIMEOUT_SECONDS`, `SCRAPE_TIMEOUT_SECONDS`, `FIRECRAWL_PROBE_URL_DEFAULT`; rename `CRAWL_CONCURRENCY` to `FIRECRAWL_CONCURRENCY`; remove `FIRECRAWL_CRAWL_ARGS` (no reader once the check drops crawl). Keep `FIRECRAWL_CRAWL_TOOL`, `FIRECRAWL_STATUS_TOOL`, `FIRECRAWL_STATUS_JOB_ARG` for the retained crawl path.
+
+**Module constants (iteration 3)** **[A4, M8, M9, M10]**, with the agreed starting values:
+- `BATCH_MAX_CONCURRENCY = 2` [A4, M9]; `BATCH_DEADLINE_SECONDS = 300.0`, `BATCH_POLL_INTERVAL_SECONDS = 5.0` [A4, M10]; batch-scrape / batch-status / batch-errors tool names and their job-id argument (names read from the authenticated `tools/list` at build time, OV-11).
+- Retry backoff split by kind [M8]: keep `RETRY_BACKOFFS_SECONDS = (2.0, 3.0)` for `timeout`/`transport`; add `RATE_LIMIT_BACKOFFS_SECONDS = (30.0, 60.0)` used for `rate_limited`, overridden by a response `Retry-After` when present; 2 retries / 3 attempts retained.
+- `FIRECRAWL_CONCURRENCY = 2` (plan browser limit) [M9]; `SEARCH_CONCURRENCY = 4` unchanged.
+- `MAP_TIMEOUT_SECONDS = 60.0`, `SCRAPE_TIMEOUT_SECONDS = 60.0` (raised from 45/30), queue-inclusive [M10]; `SEARCH_TIMEOUT_SECONDS = 30.0`, `CRAWL_CALL_TIMEOUT_SECONDS = 60.0`, `CRAWL_DEADLINE_SECONDS = 180.0`, `CRAWL_POLL_INTERVAL_SECONDS = 3.0` kept.
+
+These remain unmeasured starting values; the rate-window figure (OV-8) and the queue-inclusive budgets (OV-10) are confirmed on the runner, and the batch tool names at build time (OV-11).
 
 ## E. Runtime Flow: Data Object Journey
 
@@ -167,6 +218,7 @@ Request path (runner and fixtures excluded). Unchanged stages are listed so the 
 | 4 | `search_web` | objective, queries | `WebSearchResult` or `ToolFailure` | typed excerpts |
 | 5 | `map_site` **[A1]** | homepage url | `MapResult` or `ToolFailure` | typed candidate links |
 | 6 | `scrape_page` **[A2]** | page url | `ScrapeResult` or `ToolFailure` | typed page keyed by source URL |
+| 6b | `batch_scrape`, `_read_batch_job` **[A4]** | list of page urls | `BatchScrapeResult` or `ToolFailure` | typed pages keyed by source URL, job totals, failed urls |
 | 7 | `crawl_site`, `_read_crawl_job` | url, limit, depth | `CrawlResult` or `ToolFailure` (retained) | typed pages |
 | 8 | `aclose` | all sessions | tasks ended, clients closed | gateway closed |
 
@@ -193,6 +245,20 @@ Request path (runner and fixtures excluded). Unchanged stages are listed so the 
  → both typed, scrape text non-empty            → proceed, log mcp.probe_passed
  | any ToolFailure(unparseable | tool_error) or empty text → McpToolUnavailableError(verify_probe)
  | any ToolFailure(timeout | transport | rate_limited)     → McpConnectionError(verify_probe)
+
+(urls)                                                          # batch_scrape  [A4]
+ → arguments{ urls, formats=["markdown"], maxConcurrency=BATCH_MAX_CONCURRENCY }
+ → [Firecrawl slot] → shared Client → call_tool(firecrawl batch scrape) under batch budget [M10]
+ → start envelope → job id → _read_batch_job polls status, follows `next` cursor
+ → data[] pages → BatchScrapeResult{ pages[ScrapeResult], total, completed, failed_urls }
+ | unreadable envelope → ToolFailure(unparseable)
+ | whole-job timeout/transport/rate_limited → ToolFailure(kind)   # per-URL misses ride failed_urls
+
+(any Firecrawl call)                                            # classification  [M5, M6, M7]
+ → httpx2.AsyncClient read timeout matches the call budget, not 5 s default   [M5]
+ → MCPError(SSE-ended / reconnect-exhausted) → _classify_failure → transport  [M6]  → retried
+ → 429 (bare status or wrapped in MCPError) → _classify_failure → rate_limited [M7] → retried
+ → rate_limited retry waits a window-clearing backoff                          [M8]
 ```
 
 **Approach at the real decision points:**
@@ -201,6 +267,8 @@ Request path (runner and fixtures excluded). Unchanged stages are listed so the 
 - Map and scrape retry on timeout, transport error and rate limit (2 s then 3 s). A non-rate-limit `is_error` makes one attempt. Exhaustion returns a `ToolFailure`.
 - Only "cannot connect", "expected tool or argument missing" and "Firecrawl output shape not confirmed" raise. Everything else degrades per item (D5).
 - The gateway never replaces a session or `Client` (D1). A timeout means our side stopped waiting; the session stays open. A dead session shows as repeated `ToolFailure(transport)` and is what V2a and V2b would reveal.
+- **[M5, M6, M7, M8]** A Firecrawl call's SSE stream read is now bounded by the call budget, not httpx's 5 s default, so a slow-but-live stream is not severed early. A dropped stream (`MCPError`, SSE-ended / reconnection-exhausted) classifies as `transport` and a `429` classifies as `rate_limited`, both even when the SDK wraps them in `MCPError`; both are transient, so the shared retry path retries them on the same session (a retry reissues the call as a new request stream, not a replaced `Client`, keeping D1). A `rate_limited` retry waits a window-clearing backoff so it does not fall inside the same throttled minute.
+- **[A4]** `batch_scrape` starts one job and reads it to completion by id, the same start-then-poll shape as `crawl_site`; per-URL failures inside a completed job ride `failed_urls`, not a whole-job `ToolFailure`. `scrape_page` stays for single-page use and the probe; C3.1.6 chooses which to use for Phase-2 fan-out.
 
 ## F. Method Detail
 
@@ -236,6 +304,29 @@ Request path (runner and fixtures excluded). Unchanged stages are listed so the 
 - Add an optional `target` carried only into the failure log; behaviour and retry rules unchanged. Failed attempts log at WARN (see section H).
 
 **`crawl_site`, `_read_crawl_job`, `search_web`, `_ServerSession`** are unchanged. `crawl_site` and the status poll draw from the same Firecrawl pool, now named for Firecrawl **[M2]**.
+
+**`_streamable_http_factory` [M5]**
+- **Purpose:** build the caller-owned `httpx2.AsyncClient` and the `Client` with a read timeout that fits the call budget.
+- **What it does:** construct `httpx2.AsyncClient(headers=…, timeout=…)` with an explicit timeout whose read bound is at least the longest per-call budget (map 45 s), rather than leaving httpx's 5 s default to sever a slow SSE response; the bearer header handling is unchanged. The per-call `asyncio.timeout` and SDK `read_timeout_seconds` still bound each call.
+- **Failure:** unchanged; a connect failure still raises `McpConnectionError(stage="open")` through `_ServerSession`.
+
+**`_classify_failure` [M6, M7]**
+- **Purpose:** map an exception or an `is_error` result to a `ToolFailureKind` so the retry path and the caller react correctly.
+- **What it does:** keep the existing branches (timeout, 429 by `status_code`/text, `_TRANSPORT_ERRORS`, else `tool_error`), and add: `mcp.shared.exceptions.MCPError` whose message is the SSE-ended / reconnection-exhausted disconnect classifies as `transport` [M6]; a `429` that the SDK surfaces inside an `MCPError` (not as a bare `status_code`) classifies as `rate_limited` [M7]. Order the checks so a 429-bearing `MCPError` is read as `rate_limited` before the generic SSE-ended `transport` branch.
+- **Failure:** pure function; returns a kind, never raises. Whether the SDK buries the status in `MCPError` is OV-7; if it exposes `status_code==429`, M7 is already covered (check only).
+
+**`batch_scrape` and `_read_batch_job` [A4]**
+- **Purpose:** scrape many pages in one server-side-concurrent job instead of N single calls serialized by the Firecrawl pool.
+- **What it does:** validate the URL list (non-empty; each a non-empty `http(s)` URL, same rule as `scrape_page`); take one Firecrawl slot; start the batch job with `formats=["markdown"]` and a per-job `maxConcurrency` within the plan limit; the start response is either inline pages or a job id. For a job id, `_read_batch_job` polls the batch-status tool by id under the batch deadline [M10], following the `next` cursor until no more pages. Parse each `data[]` element into a `ScrapeResult` keyed by its own `metadata.sourceURL`; record per-URL failures in `failed_urls` (from the batch error listing). Return `BatchScrapeResult`.
+- **Failure:** bad input raises `ValueError`; session-not-open propagates `McpConnectionError`; a whole-job timeout/transport/rate-limited outcome returns `ToolFailure(kind)` after the shared retry; an unreadable envelope returns `ToolFailure(unparseable)`. A single page failing inside a completed job is **not** a whole-job failure; it rides `failed_urls`.
+
+**`_streamable_http_factory` timeout [M5]**
+- Build `httpx2.AsyncClient(timeout=httpx2.Timeout(connect=10.0, read=None, write=10.0, pool=10.0))`. `read=None` leaves the SSE stream unbounded at the transport; the per-call `asyncio.timeout` and SDK `read_timeout_seconds` are the single duration source. The bearer-header handling is unchanged.
+
+**Retry backoff [M8] and Firecrawl concurrency [M9] and timeouts [M10]**
+- **M8:** backoff is split by kind in `_call_with_retry`: `timeout`/`transport` use `RETRY_BACKOFFS_SECONDS = (2.0, 3.0)`; `rate_limited` honors a response `Retry-After` if present, else `RATE_LIMIT_BACKOFFS_SECONDS = (30.0, 60.0)`. Retry count stays 2 (3 attempts); the loop structure is unchanged. The per-minute window the 30/60 values target is OV-8.
+- **M9:** `FIRECRAWL_CONCURRENCY = 2` (plan browser limit), surfaced at the composition root; A4's per-job `BATCH_MAX_CONCURRENCY = 2`. Jointly they can request up to 4 browsers only if a batch overlaps a single scrape; the excess queues (not a 429), and C3.1.6 avoids that overlap per amenity (OV-9). `SEARCH_CONCURRENCY = 4` unchanged.
+- **M10:** `MAP_TIMEOUT_SECONDS = 60.0`, `SCRAPE_TIMEOUT_SECONDS = 60.0`, `BATCH_DEADLINE_SECONDS = 300.0` (poll 5 s) include Firecrawl's queue wait so a still-queued job is neither dropped early nor awaited long past Firecrawl's own timeout; `SEARCH_TIMEOUT_SECONDS = 30.0` and the retained crawl budgets are unchanged (OV-10).
 
 ---
 
@@ -328,6 +419,40 @@ Scanned categories: input, preconditions, dependencies, concurrency, resources, 
 **Left out (why):**
 - URL validation here: the probe's `map_site` call rejects a bad URL with `ValueError`. *Wrong boundary.*
 
+### `_streamable_http_factory` [M5]
+**Core behavior:** build the httpx2 client and the `Client` with a read timeout matched to the call budget.
+**Drifts handled:**
+- **Slow-but-live SSE stream severed by the default 5 s read timeout.** Observed in the live trace (map streamed >5 s → `httpx2.ReadTimeout`). Caught at **infra** (the client build). **Recovered** by setting an explicit `timeout` whose read bound is at least the longest per-call budget, so the call budget, not a transport default, bounds the stream.
+**Left out (why):**
+- A separate connect/read/write timeout per phase: one read bound tied to the budget is enough until a capture shows a distinct connect problem. *Imaginary.*
+- Retrying the stream inside the factory: retry belongs to `_call_with_retry`, which now retries the `transport` kind (M6). *Wrong boundary.*
+
+### `_classify_failure` [M6, M7]
+**Core behavior:** map an exception or `is_error` result to a `ToolFailureKind`.
+**Drifts handled:**
+- **`MCPError` (SSE-ended / reconnection-exhausted) read as `tool_error`.** Grounded in the live trace. Caught in the **core** classifier. **Recovered** by classifying it `transport` so the shared retry reissues the call on the same session; a probe disconnect becomes `McpConnectionError(verify_probe)`.
+- **`429` buried inside an `MCPError` rather than a bare `status_code`.** Caught in the **core** classifier. **Recovered** by matching the 429 inside the `MCPError` and returning `rate_limited`, ordered before the generic SSE-ended branch. Whether the SDK buries it is OV-7.
+**Left out (why):**
+- Parsing arbitrary `MCPError` subtypes into fine-grained kinds: only the SSE-ended and 429 cases are observed; others stay `tool_error`. *Not live.*
+- Treating every `MCPError` as transport: a genuine tool error wrapped as `MCPError` must not be retried forever; only the SSE-ended/reconnect message is transport. *Trust (de-mask on the message, not the type alone).*
+
+### `batch_scrape` and `_read_batch_job` [A4]
+**Core behavior:** start one batch job over many URLs, poll by id, return typed pages.
+**Drifts handled:**
+- **Bad input.** Empty list, or a non-`http(s)` / empty URL in it. Caught at the method **edge**. **Rejected** with `ValueError`, matching `scrape_page`.
+- **Session not open.** Caught in the core via `client()`. **Propagated** as `McpConnectionError`.
+- **Start/poll call fails, times out, or is rate limited.** Shared call path. **Recovered** by retry (M8), then returned as a whole-job `ToolFailure`. The start call is never silently re-issued after a timeout (a batch job may already be billed), matching the `crawl_site` rule.
+- **Paginated results.** The job returns pages across a `next` cursor. Caught in `_read_batch_job`. **Recovered** by following the cursor to the end before building the result, so pages are not silently truncated.
+- **Per-URL partial failure inside a completed job.** Some URLs fail while the job completes. Caught in the parser via the batch error listing. **Recovered (degrade, signaled):** the failed URLs ride `failed_urls`; the job is not turned into a whole-job failure, and the degrade is visible in the result and a WARN log.
+- **Unreadable job envelope.** `_parse_batch_scrape_result`. **Rejected** as `ToolFailure(unparseable)`, never a confident empty page set (de-mask).
+- **Deadline.** A job that never completes within the batch deadline. Caught in `_read_batch_job`. **Rejected** as `ToolFailure(timeout)` carrying the job id, matching the crawl deadline rule.
+**Left out (why):**
+- Splitting a large URL list into sub-batches, or a per-URL retry: C3.1.6 owns fan-out shaping and the call cap. *Wrong boundary.*
+- Host-filtering or de-duping the URL list: C3.1.6 owns candidate shaping. *Wrong boundary.*
+- Tolerating a non-3.x per-page shape: the connect-time probe already fails older shapes. *Trust (probe).*
+- Tolerating the batch tool being absent: its existence is confirmed by the domain owner; the exact name is read from `tools/list` at build time (OV-11). *Trust (confirmed).*
+- Capability-checking batch at connect: by user decision batch stays out of `verify_capabilities`; a missing/renamed batch tool surfaces as a per-call `ToolFailure` on first use, like `crawl_site`. *Not live (connect check scope).*
+
 ---
 
 ## H. Logging
@@ -340,6 +465,8 @@ Per the diagnostic-logger skill: one stream of structured lines, boundary crossi
 | `mcp.probe_passed` **[A3]** | INFO | boundary | `map_link_count`, `scrape_chars`, `scrape_url_matches_probe` | once per `open` after both probe calls are typed |
 | `mcp.call_attempt_failed` **[A1, A2]** | WARN (was INFO) | silent drift (recover) | `tool`, `attempt`, `kind`, `message`, `target` (map and scrape) | each failed attempt, retried or final |
 | `mcp.map_links_skipped` **[A1]** | WARN | silent drift (degrade) | `url`, `skipped`, `kept` | only when entries were skipped |
+| `mcp.batch_pages_failed` **[A4]** | WARN | silent drift (degrade) | `total`, `completed`, `failed` | only when a completed batch job has per-URL failures |
+| `mcp.probe_passed` scrape disconnect note **[M6]** | WARN | silent drift (recover) | `tool`, `attempt`, `kind="transport"` | each retried SSE-ended attempt, via the existing `mcp.call_attempt_failed` line (kind now `transport`, not `tool_error`) |
 
 - **Rejects ride their exception.** Probe and capability failures are not logged again here; the exception message carries operation and kind, and the caller logs where it handles it.
 - **Not logged:** every successful call, page text, link lists, anything derived from a key. The existing key-hygiene test keeps guarding keys and extends to the new tools.
@@ -369,8 +496,11 @@ Per the diagnostic-logger skill: one stream of structured lines, boundary crossi
 | STAGE 2, `search_web` | request, excerpt count, first URLs, lengths, `retrieved_at`, or `ToolFailure` |
 | STAGE 3, `map_site` **[A1]** | request, link count, first 5 links (url, title), `retrieved_at`, or `ToolFailure` |
 | STAGE 4, `scrape_page` **[A2]** | the first mapped page: reported `url`, text length, `retrieved_at`, or `ToolFailure` |
+| STAGE 4b, `batch_scrape` **[A4]** | several mapped pages in one job: per-page `url`/length, `total`/`completed`, `failed_urls`, or `ToolFailure` |
 | STAGE 5, `crawl_site` (only with `--crawl`) | page count, job id, or `ToolFailure` |
 | STAGE 6, `aclose` | owner tasks ended, second `aclose` is a no-op |
+
+**Diagnostics (iteration 3, already in the runner).** A `--trace-calls` flag installs three redacted, sample-run-only tracers added while diagnosing the probe failure: `mcp_diag.call_tool_raised` / `mcp_diag.call_tool_is_error` (raw per-call outcome), `mcp_diag.transport` (the SDK transport logs, which exposed the `httpx2.ReadTimeout` and the `405` SSE-resume), and `mcp_diag.http_request` (request `Last-Event-ID` / `Mcp-Session-Id`). They edit no production code and stay off by default. Keep them; they are the instrument that confirms M5-M7 on the next live run.
 
 Raw bodies and per-attempt records come from the `homescout.deep_search` logger via the collecting handler. On `McpGatewayError`: print class, `stage`, message, exit non-zero. A returned `ToolFailure` prints and gives non-zero exit at the end. Nothing is written to disk.
 
@@ -403,7 +533,14 @@ Applies to both gateway test files (todos 9 and 12): pytest with the in-process 
 | Concurrency **[M2, A2]** | several concurrent `scrape_page` calls each return their own page; in-flight Firecrawl calls (map, scrape, crawl) never exceed the pool size |
 | Decode **[M4]** | when a result carries both structured content and a differing text block, the structured payload is used |
 | Retained crawl | existing crawl, status re-read, deadline and argument cases keep passing unchanged against the extended fixture |
-| Session scope, secrets | unchanged; the key-hygiene case also runs a map and a scrape |
+| Slow stream vs timeout **[M5]** | a Firecrawl handler that streams for longer than the old 5 s default still completes, because the client timeout matches the call budget; proven with the in-process server delaying past 5 s |
+| MCPError classification **[M6]** | `call_tool` raising `MCPError`(SSE-ended) is classified `transport`, retried (2+ attempts, same `Client`), then `ToolFailure(transport)` if persistent; a probe disconnect raises `McpConnectionError(verify_probe)` |
+| 429-in-MCPError **[M7]** | a `429` surfaced inside an `MCPError` is classified `rate_limited` and retried; a bare `status_code==429` still is (check-only case kept) |
+| Rate-limit backoff **[M8]** | a rate-limited call records the new window-clearing wait values, not `[2.0, 3.0]` |
+| Firecrawl concurrency **[M9]** | in-flight Firecrawl calls never exceed `FIRECRAWL_CONCURRENCY`; the value equals the configured plan browser limit |
+| Queue-aware timeout **[M10]** | a handler that stays "queued" past the old budget but within the new one still returns; forced-timeout assertions use the new budgets |
+| Batch typed **[A4]** | a multi-page batch envelope parses to `BatchScrapeResult` with one `ScrapeResult` per `data[]` keyed by `sourceURL`; `next`-paginated results are fully collected; a per-URL failure rides `failed_urls` and logs `mcp.batch_pages_failed`; an unreadable envelope gives `ToolFailure(unparseable)`; a never-completing job gives `ToolFailure(timeout)` carrying the job id; bad input raises `ValueError` before any call |
+| Session scope, secrets | unchanged; the key-hygiene case also runs a map, a scrape and a batch |
 
 ---
 
@@ -444,6 +581,12 @@ Applies to both gateway test files (todos 9 and 12): pytest with the in-process 
 | One Firecrawl semaphore for map, scrape and crawl | spec: one semaphore per server | a second pool lets crawl and scrape together exceed the vendor limit |
 | Capability check drops crawl and status | M3 does not use them (spec) | a map/scrape-only server is refused for a tool it never calls |
 | `ToolFailure(unparseable)` reused for shape misses | no new reaction is needed downstream | a new kind forces every consumer to handle one more case |
+| Explicit httpx2 client timeout matched to the call budget [M5] | the live map call streamed for >5 s and httpx's 5 s default severed it | every map/scrape/batch slower than 5 s fails at connect-probe and mid-run |
+| `MCPError`(SSE-ended) classified `transport`; 429-in-`MCPError` classified `rate_limited` [M6, M7] | the disconnect and rate limits must retry, not abort as a misleading "wrong shape" | a dropped stream or a throttle ends the run at the probe instead of retrying |
+| Window-clearing rate-limit backoff [M8] | a 429 retry must wait past the per-minute window | both retries fall inside the same throttled minute and waste the attempt |
+| `FIRECRAWL_CONCURRENCY` sized to the plan browser limit [M9] | over-submitting self-induces 429 under the 2-browser limit | the gateway throttles itself and loses throughput, or trips the vendor limit |
+| `batch_scrape` as a typed Protocol member returning `BatchScrapeResult` [A4] | a site scrape touches several pages; N single calls serialize on the 2-browser pool | Phase-2 scraping is N serialized round trips instead of one job |
+| `BatchScrapeResult` reuses `ScrapeResult` per page | callers already key evidence by `ScrapeResult.url` | a second per-page type forces callers to handle two page shapes |
 
 **D. Kept Concrete / Rejected**
 
@@ -463,6 +606,12 @@ Applies to both gateway test files (todos 9 and 12): pytest with the in-process 
 | Parallel `session_id`, `web_fetch` | not added | unchanged: ignored on paid keys; locked unused |
 | Thread or process offload for parsing | not added | small inline JSON; revisit if a capture shows multi-megabyte map bodies |
 | New source files | not created | all new code fits `clients/mcp_tools.py` and existing modules |
+| A new `ToolFailure` kind for a dropped stream (M6) | rejected | the SSE-ended disconnect is a `transport` fault; the existing kind carries the reaction |
+| A per-page `BatchPage` type distinct from `ScrapeResult` (A4) | rejected | the page shape is identical; one wrapper plus the existing type is enough |
+| A separate semaphore pool for batch vs single scrape (A4, M9) | rejected | all Firecrawl calls share one plan-sized pool; per-job `maxConcurrency` bounds server-side fan-out |
+| Reconnecting/replacing the session on an SSE disconnect (M6) | rejected | a `transport` retry reissues the call on the same `Client`; D1 (no replacement) stands |
+| A retry library for the longer backoff (M8) | rejected | the existing `_call_with_retry` loop plus new constant values suffices |
+| Splitting a large URL list into sub-batches in the gateway (A4) | rejected | C3.1.6 owns fan-out and the call cap; the gateway runs one job per call |
 
 **Over-engineering guard: every element retained in this iteration and its one-line justification**
 
@@ -473,6 +622,11 @@ Applies to both gateway test files (todos 9 and 12): pytest with the in-process 
 | `FIRECRAWL_PROBE_URL` setting | the probe target must be changeable without a code edit and no amenity URL exists at `open` |
 | `target` field in the failure log | ties a failed attempt to its page, since gateway lines carry no other page identity |
 | `MAP_TIMEOUT_SECONDS`, `SCRAPE_TIMEOUT_SECONDS` | spec requires scrape's own timeout; map is bounded the same way |
+| explicit httpx2 client `timeout` [M5] | the httpx 5 s read default severed a live map stream; the budget must bound the stream |
+| `MCPError`/429 branches in `_classify_failure` [M6, M7] | a dropped stream and a throttle must retry, not end the run as "wrong shape" |
+| window-clearing `rate_limited` backoff [M8] | a short retry inside the throttled minute is wasted; the wait must clear the window |
+| `FIRECRAWL_CONCURRENCY` = plan browser limit [M9] | the cap stops the gateway self-inducing 429 under the 2-browser limit |
+| `batch_scrape` + `BatchScrapeResult` + `_read_batch_job` [A4] | one job scrapes many pages without serializing on the 2-browser pool; callers key by the existing `ScrapeResult.url` |
 
 ## Layer 3: Wiring
 
@@ -485,7 +639,7 @@ create_amenity_search → create_mcp_tool_gateway → Settings (keys, URLs, prob
 
 **F. Composition Root**
 - **Where:** `create_amenity_search(settings)` in `amenity_search.py`, which calls `create_mcp_tool_gateway(settings)` in `clients/mcp_tools.py`.
-- **Selects:** keys, URLs and the probe URL from `Settings`; module-constant starting values (unmeasured, configurable): search timeout 30 s, map timeout 45 s, scrape timeout 30 s, crawl per-call 60 s, crawl overall deadline 180 s, retry waits 2 s then 3 s, crawl poll 3 s, search semaphore 4, Firecrawl semaphore 2.
+- **Selects:** keys, URLs and the probe URL from `Settings`; module-constant starting values (unmeasured, configurable). **Iteration 3 updates in bold:** search timeout 30 s, **map timeout 60 s (was 45)**, **scrape timeout 60 s (was 30)**, **batch deadline 300 s, batch poll 5 s**, crawl per-call 60 s, crawl overall deadline 180 s, crawl poll 3 s, transient retry waits 2 s then 3 s, **rate-limited retry waits `Retry-After` else 30 s then 60 s**, search semaphore 4, **Firecrawl semaphore 2 (= plan browser limit)**, **batch per-job maxConcurrency 2**, **httpx `Timeout(connect=10, read=None, write=10, pool=10)`**.
 - **Lifecycle:** the factory opens nothing. `open()` runs at the start of `run_llm_metric_resolution` and `aclose()` at its end. `AmenitySearch.aclose()` also closes the gateway (covers a leaked session). Probe runs inside `open`.
 
 **G. Async Execution Map** (placement set by blocking behavior, ordering by data dependency, decided separately)
@@ -496,7 +650,8 @@ create_amenity_search → create_mcp_tool_gateway → Settings (keys, URLs, prob
 | Capability check | `list_tools` per server | independent; needs open sessions | event loop | concurrent (gather) | read only | none; no worker |
 | Firecrawl probe **[A3]** | `map_site` and `scrape_page` on the probe URL | independent of each other; needs verified capabilities | event loop | concurrent (gather, exceptions collected); probe starts after the check | each call returns a value; no shared writes | none; every call under `asyncio.timeout` and SDK read timeout |
 | Search call path | semaphore wait, `call_tool`, backoff sleep | retry depends on previous attempt | event loop | sequential inside one call; calls from different amenities gathered by the caller (later) | per-server semaphore bounds in-flight; results returned | none; every call under timeout |
-| Map and scrape call path **[A1, A2]** | semaphore wait, `call_tool`, backoff sleep | retry depends on previous attempt; map and scrape of different pages are independent | event loop | sequential inside one call; scrapes of different pages gathered by the caller (C3.1.6 Phase 2) | one Firecrawl pool bounds in-flight map, scrape and crawl; results returned | none; every call under timeout |
+| Map and scrape call path **[A1, A2]** | semaphore wait, `call_tool`, backoff sleep | retry depends on previous attempt; map and scrape of different pages are independent | event loop | sequential inside one call; scrapes of different pages gathered by the caller (C3.1.6 Phase 2) | one Firecrawl pool (sized to the plan browser limit [M9]) bounds in-flight map, scrape, batch and crawl; results returned | none; every call under timeout (budget includes queue wait [M10]) |
+| Batch scrape call path **[A4]** | semaphore wait, start `call_tool`, status polls by job id, `next`-cursor reads | each poll and each cursor read depends on the job id and the prior page | event loop | sequential inside one call; server-side page concurrency is set by the job's `maxConcurrency`, not the event loop | same Firecrawl pool [M9]; one slot per in-flight batch job | none; every call under the batch budget [M10] |
 | Crawl call path | semaphore wait, start `call_tool`, status polls by job id | each poll depends on the job id | event loop | sequential inside one call | same pool as above | none; no worker |
 | Result parsing | JSON decode, dataclass build | needs its own response | inline on event loop | sequential after the call | none | short CPU; revisit if a capture shows multi-megabyte map bodies |
 | Close | signal and await owner tasks | independent | event loop | concurrent (gather) | each task exits its own contexts | none; no worker |
@@ -507,14 +662,18 @@ Owner tasks exist because the SDK client holds a task group (a set of child task
 1. A caller (later `run_llm_metric_resolution`) calls `tool_gateway.open()`.
 2. Two owner tasks connect; `verify_capabilities` checks `web_search`, `firecrawl_map`, `firecrawl_scrape` with their arguments.
 3. The probe maps and scrapes the probe URL together and confirms the 3.x JSON shape, or `open` closes both sessions and raises.
-4. Callers (later pipelines) call `search_web`, `map_site` and `scrape_page`, each bounded by its server's semaphore. `crawl_site` stays available but unused by M3.
-5. Each call uses the server's shared client, runs under timeout, retries transient failures, and returns a typed result or `ToolFailure`.
+4. Callers (later pipelines) call `search_web`, `map_site`, `scrape_page` and `batch_scrape`, each bounded by its server's semaphore. `crawl_site` stays available but unused by M3.
+5. Each call uses the server's shared client, runs under a queue-inclusive timeout [M10], and retries transient failures (now including an `MCPError` SSE disconnect [M6] and a 429 wrapped in `MCPError` [M7], with a window-clearing backoff [M8]) on the same session, returning a typed result or `ToolFailure`. The client's read timeout is matched to the call budget [M5], not httpx's 5 s default.
 6. The caller ends with `aclose()`; `AmenitySearch.aclose()` repeats it harmlessly.
 
 ## Layer 4: Backing
 
 - **Owner task per server:** the locked same-task scope cannot be met from arbitrary tasks because of the SDK task group.
-- **No session replacement:** a timeout stops our wait and does not break the session; V2a and V2b judge this, and a failure sends the shared-Client approach back for review, as locked. D1 confirmed this for iteration 2.
+- **No session replacement:** a timeout stops our wait and does not break the session; V2a and V2b judge this, and a failure sends the shared-Client approach back for review, as locked. D1 confirmed this for iteration 2. Iteration 3 keeps it: an `MCPError` SSE disconnect now retries (M6) by reissuing the call as a new request stream on the same `Client`, not by replacing the session.
+- **Transport read timeout matched to the budget [M5]:** the SSE response stream is read under the call budget, not httpx's 5 s default; the live trace showed the default severing a map that streamed for ~9 s.
+- **Classifier owns the retry decision [M6, M7]:** a dropped stream and a 429 are transient and must retry; leaving `MCPError` as `tool_error` ended the run at the probe with a misleading "wrong shape".
+- **One plan-sized Firecrawl pool [M9] and queue-aware budgets [M10]:** the single pool and the queue-inclusive timeouts keep the gateway inside the vendor's 2-browser / per-minute limits without dropping queued jobs.
+- **Batch over N single calls [A4]:** one job is one submission and one job clock; `scrape_page` stays for single-page use and the probe.
 - **`httpx2` stays:** the SDK transport, its error types and its SSE reader are `httpx2`; D2.
 - **Probe before work:** a wrong output shape would otherwise appear as `unparseable` on every Phase 2 call of every amenity. One connect-time check costs two calls per run.
 - **Returned failures:** D5 says a failed item gets null and the run continues. Only connect, capability and shape failures stop the run.
@@ -533,6 +692,12 @@ Owner tasks exist because the SDK client holds a task group (a set of child task
 | OV-4 | Map and scrape timeout values, Firecrawl pool size | measure on the runner; confirm the vendor limit before raising the pool above 2 |
 | OV-5 | Rate-limit signal, crawl job id field, status tool argument name | retained crawl path only; read from a capture if crawl is re-enabled |
 | OV-6 | V2a and V2b | run via runner flags (they spend credits); a failure sends the shared-Client approach back for review, as locked |
+| OV-7 | Does the MCP SDK expose a 429 as `status_code`/`response`, or bury it inside `MCPError`? [M7] | run the runner with `--trace-calls`; read the `mcp_diag.call_tool_raised` / `mcp_diag.transport` lines. Handled either way: M7 checks `status_code==429` **and** the rate-limit regex against `str(exc)` including inside `MCPError`, so classification holds regardless; this run only tells us whether the regex branch is actually exercised |
+| OV-8 | Confirm the rate-limit backoff window [M8] | **Starting value set:** honor `Retry-After`, else `(30.0, 60.0)` for `rate_limited`. Residual: read Firecrawl's per-minute rate figure from its pricing/limits page and adjust if the window differs. Free per-minute number not in the provided text |
+| OV-9 | `FIRECRAWL_CONCURRENCY` vs batch `maxConcurrency` [M9, A4] | **Resolved (structural):** `FIRECRAWL_CONCURRENCY = 2`, `BATCH_MAX_CONCURRENCY = 2`; C3.1.6 runs one batch or singles per amenity so they do not jointly exceed the plan. Residual: confirm Free = 2 browsers still holds on the account's plan |
+| OV-10 | Confirm the queue-inclusive timeout values [M10] | **Starting values set:** map 60 s, scrape 60 s, batch deadline 300 s (poll 5 s). Residual: measure start-to-complete time (including queue wait) on the runner under the 2-browser limit and tighten so a queued job is neither dropped early nor awaited past Firecrawl's own timeout |
+| OV-11 | Exact batch-scrape (and status/errors) MCP tool names and arguments on the authenticated session [A4] | **Existence confirmed by the domain owner** (the authenticated session exposes a batch tool). Residual: read the exact tool name and argument tuples from the authenticated `tools/list` at build time so the batch constants bind to the real name, not a guessed one. The authenticated session already lists more tools than keyless (keyless advertised only `firecrawl_search`/`firecrawl_scrape`/`firecrawl_parse`; authenticated adds `firecrawl_map`/`firecrawl_crawl`). |
+| OV-12 | Vendor: does the MCP endpoint support GET-based SSE resume (it answered `405`)? [M6] | confirm with Firecrawl; M5/M6 make the gateway resilient regardless |
 
 ## Handoffs to later sub-components
 
@@ -540,501 +705,348 @@ Owner tasks exist because the SDK client holds a task group (a set of child task
 | --- | --- |
 | C3.1.3 | passes app-injected homepage URL to `map_site` and the id-resolved URL to `scrape_page`; the gateway does no host check |
 | C3.1.4 | empty `links` and empty `text` arrive as valid results, never failures; timeouts and parse misses arrive as `ToolFailure` |
-| C3.1.6 | applies the 50-candidate cap, URL dedup and fan-out; keys evidence by the returned `ScrapeResult.url` (per Firecrawl's docs the requested URL; not live-verified) |
+| C3.1.6 | applies the 50-candidate cap, URL dedup and fan-out; keys evidence by the returned `ScrapeResult.url` (per Firecrawl's docs the requested URL; not live-verified); chooses `batch_scrape` (one job, many pages) over repeated `scrape_page` for Phase-2 multi-page scraping [A4], and keeps the URL list within the plan limit alongside the gateway's own cap [M9] |
 | C3.1.6/C3.1.7 | owns the per-amenity correlation id for log lines; counts gateway-internal retries when it reasons about call caps |
 
 ---
 
-# Appendix: C3.1.1 Iteration Report: MCP Tool Gateway, old spec -> new spec
+# Appendix: C3.1.1 Iteration Report: built spec -> "Fixes to be incorporated in iteration"
 
-This is the stage-one report (per `skills/iteration_report.md`) that this plan implements. It is kept as
-delivered, with three updates for accuracy: the plan-mode "Deliverable" lines are dropped, and the three
-places that said D1 and D2 were still waiting now point to their resolutions in "Decisions taken for this
-revision" at the top of this file (D1: keep as built; D2: keep `httpx2`).
-
-## Report context
-
-Sub-component C3.1.1 (MCP tool gateway for Parallel and Firecrawl) was already built. The new
-Mechanism 3 draft spec changes its Firecrawl side: M3 now drives `firecrawl_map` + `firecrawl_scrape`
-instead of `firecrawl_crawl`. The report states which points are added, modified or removed, which
-artifacts each touches, and how the flow changes. It does **not** write the implementation plan or any
-code; this file above it is that plan.
+This is the stage-one report (per `skills/iteration_report.md`) that this iteration-3 plan implements. It
+replaces the earlier iteration-1->2 report. The point IDs below are renumbered to continue this plan's
+existing ID space so they do not collide with iteration-2's A1-A3 / M1-M4 / R1: **A4** = batch_scrape,
+**M5-M10** = the five transport/limit fixes plus the new op's timeouts, flags **F15+**.
 
 **How to read the traceflows:** each one is a top-down tree, and the status tag sits in one aligned
-column at the right of each diagram. `◄── NEW` = added, `◄── CHANGED` = altered, `◄── GONE` =
-removed. BEFORE and AFTER are stacked, each scoped to its own point.
+column at the right of each diagram. `◄── NEW` = added, `◄── CHANGED` = altered, `◄── GONE` = removed.
+BEFORE and AFTER are stacked, each scoped to its own point.
 
 ---
 
 ## Report 1. Confirmation
 
-- **Read:** the skill; old spec (`deep_search_context.md` L2773-2813); old implementation plan
-  (`r2_mechanism_3_c3_1_1_implementation_plan.md`); new spec (`R2_Mechanism_3_draft_spec.md`
-  C3.1.1 L101-131, plus cross-references at L30, L53, L163-167, L193, L344, L493-497).
-- **"Implemented"** = old spec + old plan **including its build-time corrections**:
-  (a) one owner task per server (the SDK `Client` holds an anyio task group);
-  (b) the gateway never reconnects or replaces a session ("replaced by reconnecting" was dropped);
-  (c) the caller-owned HTTP client is `httpx2.AsyncClient`, not `httpx`;
-  (d) the status tool is a required capability; (e) unrecognised bodies are de-masked into
-  `ToolFailure(unparseable)`; (f) `open()` tears both sessions down on any non-local exit;
-  (g) `search_web` rejects empty input with `ValueError`.
-- **Repo was available.** I checked `src/clients/mcp_tools.py`, `src/exceptions/mcp.py`,
-  `src/core/config.py` and the tests against the plan; they match it.
-- **Naming convention.** `#n` = item number in the old plan's file table (#1 requirements.txt,
-  #2 config.py, #3 .env.example, #4 exceptions/mcp.py, #5 clients/mcp_tools.py, #6 amenity_search.py,
-  #7 three existing test files, #8 result_attachment_sample_run.py, #9 test_mcp_tool_gateway.py,
-  #10 mcp_tool_gateway_sample_run.py, #11 deep_search_context.md).
-  `(new spec)` = name stated by the new spec but absent from the plan.
-  `(illustrative)` = name I chose, or a symbol that exists in code but is not in the plan.
-- **Not in the old plan but present in the repo:** `feature_tests/test_c3_1_1_mcp_tool_gateway.py`
-  (T1-T24) and `feature_tests/C3_1_1_mcp_tool_gateway_test_plan.md`. Marked
-  `(illustrative, not in plan)` below; see F12.
-- **Result:** 3 ADD, 4 MODIFY, 1 REMOVE, 2 DECISION-GATED, plus an Unchanged list.
+- **Read, in full:** the skill (`skills/iteration_report.md`); the **old spec** = C3.1.1 as currently
+  written (`deep_search_context.md` L2778-2808); the **old implementation plan** (this file, iteration 2);
+  the **new requirements** = the "Fixes to be incorporated in iteration" section (`deep_search_context.md`
+  L2810-2825).
+- **"Implemented" means** old spec + plan, including the build-time corrections carried forward: one owner
+  task per server; **no session replacement / no reconnect** (D1); **`httpx2.AsyncClient`** as the
+  caller-owned client (D2); unrecognised bodies de-masked to `ToolFailure(unparseable)`; `open()` tears down
+  on any non-local exit; `ValueError` on bad input.
+- **Artifact names** come from the plan's file table (`#2` config.py, `#3` .env.example, `#4`
+  exceptions/mcp.py, `#5` clients/mcp_tools.py, `#9` tests/.../test_mcp_tool_gateway.py, `#10`
+  mcp_tool_gateway_sample_run.py, `#11` deep_search_context.md, `#12` feature_tests test, `#13` test-plan
+  doc) and its symbol blueprint. Symbols the plan names (`_streamable_http_factory`, `_classify_failure`,
+  `_call_with_retry`, `_read_crawl_job`, `FIRECRAWL_CONCURRENCY`, `MAP_TIMEOUT_SECONDS`,
+  `SCRAPE_TIMEOUT_SECONDS`, `ScrapeResult`, `ToolGateway`) are used as-is; ones in code but not named in the
+  plan are `(illustrative)`. A change the fixes imply but do not state is `(inferred)`.
+- **Repo context gathered this session:** the live failure trace that motivated the fixes and the confirmed
+  httpx default read timeout of 5.0 s.
+- **Result:** **1 ADD (A4), 6 MODIFY (M5-M10), 0 REMOVE, 0 DECISION-GATED**, plus Unchanged and flags
+  F15-F23. Fix 6 (vendor-confirm the `405` on GET resumption) carries **no code artifact** and is recorded
+  in Flags (F15) and OV-12, not as an implementation point.
+- **No DECISION-GATED points:** each fix was checked against D1 (no session replacement) and D2 (`httpx2`);
+  none contradicts them. M6's retry reissues a call on the same session (a new request stream), not a
+  replaced `Client`, so D1 holds; M5 keeps `httpx2`.
 
 ---
 
 ## Report 2. Current traceflow, with change locations
 
 ```
-run_llm_metric_resolution          (planned in C3.1.7, not built yet)
+run_llm_metric_resolution                               (C3.1.7, not built yet)
 │
-└─ McpToolGateway                   (clients/mcp_tools.py, #5)
+└─ McpToolGateway                                        (mcp_tools.py, #5)
    │
    ├─ open()
-   │    ├─ start sessions: Parallel + Firecrawl
-   │    └─ verify_capabilities                     ◄── M1, R1, A3
-   │          Parallel : web_search
-   │          Firecrawl: firecrawl_crawl + firecrawl_check_crawl_status
+   │    └─ start sessions ─ _streamable_http_factory          ◄── M5
+   │          httpx2.AsyncClient(headers)  no timeout → 5 s    ◄── M5
    │
-   ├─ search_web(objective, queries) ──► WebSearchResult | ToolFailure
+   ├─ shared call path ─ _call_with_retry / _single_call
+   │    ├─ call_tool ──► CallToolResult | raises
+   │    ├─ _classify_failure(exc | result)                     ◄── M6, M7
+   │    │     MCPError(SSE-ended) ──► tool_error  (not retried) ◄── M6
+   │    │     429 wrapped in MCPError ──► tool_error            ◄── M7
+   │    └─ backoff (2 s, 3 s)                                   ◄── M8
    │
-   ├─ crawl_site(url, limit, depth) ──► CrawlResult | ToolFailure
-   │     └─ takes a slot from the Firecrawl pool   ◄── M2
+   ├─ Firecrawl slot pool  FIRECRAWL_CONCURRENCY = 2           ◄── M9
    │
-   ├─ map_site(url)       attaches here            ◄── A1
-   ├─ scrape_page(url)    attaches here            ◄── A2
+   ├─ map_site / scrape_page   MAP=45 s / SCRAPE=30 s timeouts ◄── M10
+   ├─ scrape_page(url)         one page                        (kept; A4 is multi-page)
+   ├─ batch_scrape(urls)       attaches here                   ◄── A4
    │
    └─ aclose()
 ```
 
-Also touched outside this flow: the `ToolGateway` Protocol gains two members (A1, A2);
-`_decode_body` is checked (M4); the V2b runner and fixtures change (M3); a reconnect step would sit
-in `_ServerSession` (D1); the HTTP client factory is in question (D2).
+Also touched outside this flow: the `ToolGateway` Protocol gains `batch_scrape` (A4); `RETRY_BACKOFFS_SECONDS`
+(M8), `FIRECRAWL_CONCURRENCY` (M9) and the timeout constants (M10) are composition-root values; `_read_crawl_job`
+is the poll pattern A4 mirrors; the vendor `405` resumption is a verification item (F15 / OV-12).
 
 | ID | Class | Summary |
 |----|-------|---------|
-| A1 | ADD | `map_site(url)` over `firecrawl_map`: typed link candidate list |
-| A2 | ADD | `scrape_page(url)` over `firecrawl_scrape`: one typed page keyed by `metadata.sourceURL` |
-| A3 | ADD | Connect-time live probe that confirms the Firecrawl MCP server 3.x JSON output shape |
-| M1 | MODIFY | Capability check: Firecrawl must expose `firecrawl_map` + `firecrawl_scrape` |
-| M2 | MODIFY | The single Firecrawl semaphore now guards map/scrape (crawl retained) |
-| M3 | MODIFY | V2b verification moves from concurrent crawls to concurrent scrapes after a map |
-| M4 | MODIFY | Confirm the real structured-content attribute name (check only) |
-| R1 | REMOVE | Crawl and crawl-status tools no longer required at connect (code retained) |
-| D1 | DECISION-GATED | New spec: failed session "replaced by reconnecting"; the build dropped that |
-| D2 | DECISION-GATED | New spec says `httpx`; the build corrected this to `httpx2` |
+| A4 | ADD | `batch_scrape(urls)` over Firecrawl batch scrape + its job envelope → typed results |
+| M5 | MODIFY | Explicit read timeout on the httpx2 client in `_streamable_http_factory` (was default 5 s) |
+| M6 | MODIFY | `_classify_failure` maps `MCPError` (SSE-ended / reconnect-exhausted) → `transport` |
+| M7 | MODIFY | `_classify_failure` reaches `rate_limited` for a `429` even when wrapped in `MCPError` |
+| M8 | MODIFY | Retry backoff lengthened to clear a per-minute rate window (`RETRY_BACKOFFS_SECONDS`) |
+| M9 | MODIFY | Cap gateway submission concurrency to the vendor plan limit (`FIRECRAWL_CONCURRENCY`) |
+| M10 | MODIFY | Per-call timeouts account for Firecrawl's queue-inclusive job clock |
 
 ---
 
 ## Report 3. ADD points
 
-### A1: `map_site(url)` over `firecrawl_map`
+### A4: `batch_scrape(urls)` over Firecrawl batch scrape
 
 | Artifact | Change |
 |---|---|
-| mcp_tools.py (#5) · `ToolGateway` Protocol | add: a `map_site(url)` member returning a typed map result or `ToolFailure`, so callers and injected fakes see the Firecrawl map operation without any MCP types. |
-| mcp_tools.py (#5) · `McpToolGateway.map_site` (new spec) | add: validate the URL, call `firecrawl_map` through the existing retry, timeout and semaphore path, parse the body, and return the typed result or a `ToolFailure`. The URL is app-injected; the LLM never supplies it. |
-| mcp_tools.py (#5) · map result contracts (illustrative `MapResult`, `MapLink`) | add: frozen typed values holding the homepage url, the candidate links (url, optional title and description) and `retrieved_at`. They sit beside `CrawlResult` because `clients/` must not import `services/`. |
-| mcp_tools.py (#5) · map parser (illustrative) | add: read `links` (an array of `{url, title?, description?}`; a plain-string form is tolerated) through the shared `_decode_body` (illustrative). An unreadable body becomes `ToolFailure(unparseable)`, not an empty list. |
-| mcp_tools.py (#5) · Firecrawl name constants (illustrative) | add: the `firecrawl_map` tool name and its `url` argument beside the existing `FIRECRAWL_*` constants, so M1 and the call share one definition. |
-| test_mcp_tool_gateway.py (#9) and feature_tests/test_c3_1_1_mcp_tool_gateway.py (illustrative, not in plan) | add: map fixtures on the in-process Firecrawl server (object links, string links, empty links, `is_error`, unrecognised body) plus retry, timeout and semaphore cases for this op. |
-| mcp_tool_gateway_sample_run.py (#10) | add: a stage that maps the seeded place's website and prints the link count and first URLs. |
-| deep_search_context.md (#11) | modify: the C3.1.1 text and cross-mechanism note, so the context file lists `map_site`. |
-| config.py (#2), exceptions/mcp.py (#4) | check only: no new setting or exception type expected. |
+| mcp_tools.py (#5) · `ToolGateway` Protocol | add: a `batch_scrape(urls, formats=["markdown"])` member returning typed per-page results or a `ToolFailure`, so callers and the fake see one batched scrape with no MCP types. |
+| mcp_tools.py (#5) · `McpToolGateway.batch_scrape` (illustrative) | add: start a batch job over a URL list and read it to completion by job id, mirroring the retained `crawl_site` / `_read_crawl_job` start-then-poll pattern; set the per-job `maxConcurrency` within the plan limit (ties to M9). |
+| mcp_tools.py (#5) · `BatchScrapeResult` wrapper (illustrative) | add: a job-level wrapper (pages, total, completed, failed_urls, retrieved_at) holding a list of the existing `ScrapeResult`; reuse `ScrapeResult`, do not invent a per-page type. |
+| mcp_tools.py (#5) · `_parse_batch_scrape_result`, `_read_batch_job` (illustrative) | add: iterate the job envelope's `data` array, key each page by its own `metadata.sourceURL`, tolerate per-URL partial failures, follow the `next` cursor; unreadable envelope → `ToolFailure(unparseable)`. |
+| mcp_tools.py (#5) · batch tool-name constants (illustrative) | add: the batch-scrape / batch-status / batch-errors MCP tool names and argument tuples beside the `FIRECRAWL_*` constants. **Existence confirmed by the domain owner; the exact names/args are read from the authenticated `tools/list` at build time — F21 / OV-11.** |
+| test_mcp_tool_gateway.py (#9), feature_tests test (#12) | add: in-process batch fixtures (multi-page `data`, partial per-URL failure, paginated `next`, empty, unparseable, never-completing) plus start+poll, retry and timeout cases. |
+| mcp_tool_gateway_sample_run.py (#10) | add: STAGE 4b that batch-scrapes the mapped pages and prints per-page url/length and the job totals. |
+| deep_search_context.md (#11) | modify: add `batch_scrape` and its envelope parse rule to the C3.1.1 operations text. |
 
 BEFORE
 ```
 McpToolGateway
-├─ search_web(...)
-├─ crawl_site(...)
+├─ map_site(url)
+├─ scrape_page(url)          one page per call, serialized by the pool
+├─ crawl_site(...)           kept, unused by M3
 └─ aclose()
 ```
 
 AFTER
 ```
 McpToolGateway
-├─ search_web(...)
-├─ crawl_site(...)                         kept, unused by M3
-├─ map_site(url)                                              ◄── NEW
-│    ├─ validate the url                                      ◄── NEW
-│    ├─ wait for a Firecrawl slot                             ◄── NEW
-│    ├─ call firecrawl_map, with retry                        ◄── NEW
-│    └─ read the links field                                  ◄── NEW
-│         ├─ readable    ──► MapResult(links, retrieved_at)   ◄── NEW
-│         └─ unreadable  ──► ToolFailure(unparseable)         ◄── NEW
+├─ map_site(url)
+├─ scrape_page(url)                              kept (single page)
+├─ batch_scrape(urls)                                        ◄── NEW
+│    ├─ start batch job over the URL list                    ◄── NEW
+│    ├─ poll by job id (mirrors _read_crawl_job)             ◄── NEW
+│    └─ read job envelope                                    ◄── NEW
+│         ├─ data[] → list[ScrapeResult], keyed by sourceURL ◄── NEW
+│         ├─ follow `next` cursor for all pages              ◄── NEW
+│         ├─ per-URL partial failure → failed_urls           ◄── NEW
+│         └─ unreadable envelope ──► ToolFailure(unparseable)◄── NEW
 └─ aclose()
 ```
 
-Behaviour change: callers can ask for a site's link set as a typed candidate list, with no page
-content and no crawl job, or get a typed failure.
-
-### A2: `scrape_page(url)` over `firecrawl_scrape`
-
-| Artifact | Change |
-|---|---|
-| mcp_tools.py (#5) · `ToolGateway` Protocol | add: a `scrape_page(url)` member returning one typed page or a `ToolFailure`. |
-| mcp_tools.py (#5) · `McpToolGateway.scrape_page` (new spec) | add: validate the URL, call `firecrawl_scrape` with `formats: ["markdown"]` and `onlyMainContent`, parse, and return the page or a failure. It uses its own per-call timeout (see F7). The URL is app-resolved from the LLM's `id` upstream (C3.1.3). |
-| mcp_tools.py (#5) · scrape result contract (illustrative `ScrapeResult`) | add: a frozen `(url, text, retrieved_at)` value where `url` comes from `metadata.sourceURL`, so M3 can key and provenance-check evidence by URL. |
-| mcp_tools.py (#5) · scrape parser (illustrative) | add: read the unwrapped top-level `markdown` and `metadata.sourceURL` (not `data.markdown`). A body with no non-empty `sourceURL` is a failure, because M3 keys evidence by that URL. |
-| mcp_tools.py (#5) · Firecrawl name constants (illustrative) | add: the `firecrawl_scrape` tool name, its `url` and `formats` arguments, and its timeout value. |
-| both gateway test files (#9; illustrative, not in plan) | add: scrape fixtures (3.x JSON shape, missing `sourceURL`, empty markdown with a `sourceURL`, `is_error`, timeout then next call works). |
-| mcp_tool_gateway_sample_run.py (#10) | add: a stage that scrapes one mapped page and prints url, text length and `retrieved_at`. |
-| deep_search_context.md (#11) | modify: add the scrape operation and its parse rule to the C3.1.1 text. |
-
-BEFORE
-```
-McpToolGateway
-├─ search_web(...)
-├─ crawl_site(...)          the only way to get page content
-└─ aclose()
-```
-
-AFTER
-```
-McpToolGateway
-├─ search_web(...)
-├─ crawl_site(...)                         kept, unused by M3
-├─ scrape_page(url)                                           ◄── NEW
-│    ├─ validate the url                                      ◄── NEW
-│    ├─ wait for a Firecrawl slot                             ◄── NEW
-│    ├─ call firecrawl_scrape (markdown, onlyMainContent)     ◄── NEW
-│    └─ read markdown + metadata.sourceURL                    ◄── NEW
-│         ├─ sourceURL present  ──► ScrapeResult(url, text)   ◄── NEW
-│         └─ sourceURL missing  ──► ToolFailure               ◄── NEW
-└─ aclose()
-```
-
-Behaviour change: callers get one page's markdown keyed by its source URL, or a typed failure,
-without starting a crawl job.
-
-### A3: Connect-time Firecrawl shape probe
-
-Depends on A1 and A2 (it calls both); it can be reverted on its own.
-
-| Artifact | Change |
-|---|---|
-| mcp_tools.py (#5) · `McpToolGateway.open` | add: a step after `verify_capabilities` that runs the probe, so a wrong-version endpoint fails before any amenity work. Existing teardown on any non-local exit already covers the new failure. |
-| mcp_tools.py (#5) · probe step (illustrative) | add: one `map_site` and one `scrape_page` against a known page, confirming non-empty page text, a non-empty `metadata.sourceURL` and parseable `links`. A different shape raises `McpToolUnavailableError`. `outputSchema` is not relied on. |
-| mcp_tools.py (#5) · module docstring "only two conditions raise" | modify: a third raise condition (wrong output shape) now exists. |
-| exceptions/mcp.py (#4) · `McpToolUnavailableError` | check only: reused; the `stage` value for a probe miss is unspecified (F2). |
-| config.py (#2), .env.example (#3) | check only: the probe's target URL is not named by the spec; a setting may be needed (F2). |
-| both gateway test files (#9; illustrative, not in plan) | add: probe pass and probe fail cases. modify: **every** test that calls `open()` against the fixture Firecrawl server must now serve 3.x JSON-shaped map and scrape bodies. |
-| mcp_tool_gateway_sample_run.py (#10) · STAGE 1 | modify: print the probe outcome next to the capability table. |
-
-BEFORE
-```
-open()
-├─ start sessions: Parallel + Firecrawl
-├─ verify_capabilities
-└─ ready
-```
-
-AFTER
-```
-open()
-├─ start sessions: Parallel + Firecrawl
-├─ verify_capabilities
-├─ shape probe                                                          ◄── NEW
-│    ├─ map_site(probe url)                                             ◄── NEW
-│    ├─ scrape_page(first mapped page)                                  ◄── NEW
-│    ├─ shape matches    ──► continue                                   ◄── NEW
-│    └─ any other shape  ──► McpToolUnavailableError                    ◄── NEW
-│                              └─ open() closes both sessions, raises   ◄── NEW
-└─ ready
-```
-
-Behaviour change: a Firecrawl endpoint that returns the wrong output shape now fails at connect;
-every run pays one extra map and one extra scrape call at `open()`.
+Behaviour change: callers scrape many pages in one server-side-concurrent job instead of N single calls
+serialized against the 2-browser limit, getting one result set keyed by source URL.
 
 ---
 
 ## Report 4. MODIFY points
 
-### M1: Capability check requires `firecrawl_map` and `firecrawl_scrape`
+### M5: Explicit read timeout on the httpx2 client
 
 | Artifact | Change |
 |---|---|
-| mcp_tools.py (#5) · `verify_capabilities` | modify: the Firecrawl required set gains `firecrawl_map` (arg `url`) and `firecrawl_scrape` (args `url`, `formats`). The Parallel `web_search` requirement is untouched. A miss still raises `McpToolUnavailableError(stage="verify_capabilities")`. |
-| mcp_tools.py (#5) · required-name constants (illustrative) | modify: add the map and scrape tool and argument tuples that the check reads. The crawl constants stay (see R1). |
-| test_mcp_tool_gateway.py (#9) · capability tests | modify: the "full set passes", "missing tool" and "missing argument" cases must build the Firecrawl fixture with map and scrape. |
-| feature_tests/test_c3_1_1_mcp_tool_gateway.py (illustrative, not in plan) | modify: the same capability entries (T1-T5). |
-| mcp_tool_gateway_sample_run.py (#10) · STAGE 1 | modify: the capability table prints map and scrape presence. |
-| .env.example (#3), config.py (#2) · keyless comment | modify (inferred): the comment says a keyless Firecrawl "has no crawl tool"; the new check is about map and scrape, and that claim was unverified (F5). Resolved: the comments now say a missing key stops the session from opening (401 per Firecrawl's changelog; not verified live). |
+| mcp_tools.py (#5) · `_streamable_http_factory` (named, D2 block) | modify: build `httpx2.AsyncClient(headers=…, timeout=…)` with an explicit read timeout matched to the call budget instead of httpx's default 5.0 s, which severs any SSE response slower than 5 s. |
+| config.py (#2) / .env.example (#3) | check only (inferred): the timeout may be a module constant rather than a setting. |
+| test files (#9, #12) | add: a case proving a response slower than the old 5 s default still completes. |
 
 BEFORE
 ```
-verify_capabilities
-├─ Parallel : web_search
-│       needs: objective, search_queries
-└─ Firecrawl
-     ├─ firecrawl_crawl
-     │      needs: url, limit, maxDiscoveryDepth, allowExternalLinks
-     └─ firecrawl_check_crawl_status
-            needs: id
+_streamable_http_factory
+└─ httpx2.AsyncClient(headers)             no timeout → 5 s read default
+     └─ slow SSE response (>5 s)  ──► httpx2.ReadTimeout ──► stream ends
 ```
 
 AFTER
 ```
-verify_capabilities
-├─ Parallel : web_search
-│       needs: objective, search_queries
-└─ Firecrawl
-     ├─ firecrawl_map             ◄── NEW
-     │      needs: url            ◄── NEW
-     ├─ firecrawl_scrape          ◄── NEW
-     │      needs: url, formats   ◄── NEW
-     ├─ firecrawl_crawl                       (still here; see R1)
-     └─ firecrawl_check_crawl_status          (still here; see R1)
+_streamable_http_factory
+└─ httpx2.AsyncClient(headers, timeout=…)                 ◄── CHANGED
+     └─ slow SSE response (>5 s)  ──► read to completion       ◄── CHANGED
 ```
 
-Behaviour change: a Firecrawl server missing map or scrape now fails at connect.
+Behaviour change: a Firecrawl call whose result takes longer than 5 s to stream no longer dies on a
+premature read timeout.
 
-### M2: Firecrawl semaphore guards map and scrape
+### M6: `_classify_failure` maps `MCPError` (SSE-ended) → `transport`
 
 | Artifact | Change |
 |---|---|
-| mcp_tools.py (#5) · `McpToolGateway.__init__` (`crawl_concurrency`, `_crawl_sem`) | modify: the one per-server Firecrawl slot pool is now what map and scrape calls draw from (C3.1.7 L344: "replacing the old crawl semaphore"). The role changes; renaming the crawl-named attribute is (inferred). |
-| mcp_tools.py (#5) · composition constants (`CRAWL_CONCURRENCY`, illustrative) | modify: the starting value 2 was sized for crawls; it must be re-checked against up to 8 concurrent scrapes per amenity (F8). |
-| mcp_tools.py (#5) · `create_mcp_tool_gateway` | check only: builds the gateway with the constants; no change unless the keyword is renamed. |
-| both gateway test files (#9; illustrative, not in plan) | modify: the "in-flight never exceeds semaphore" case is extended to map and scrape on the Firecrawl pool. |
+| mcp_tools.py (#5) · `_classify_failure` (named) | modify: recognise `mcp.shared.exceptions.MCPError` for the SSE-ended / reconnection-exhausted case and return `transport` instead of `tool_error`, so it retries and is labelled honestly. |
+| mcp_tools.py (#5) · `_TRANSPORT_ERRORS` (named, D2 block) | modify (inferred): add an explicit `MCPError` branch keyed on the disconnect message (not the type alone). |
+| mcp_tools.py (#5) · `_probe_firecrawl_shape` | check only: a probe disconnect becomes a transient `McpConnectionError(verify_probe)` rather than `McpToolUnavailableError`. |
+| test files (#9, #12) | add: `call_tool` raises `MCPError(SSE-ended)` → `ToolFailure(transport)`, retried. |
 
 BEFORE
 ```
-Firecrawl slot pool            size 2, named for crawl
-└─ used by
-     └─ crawl_site and its status polls
+_single_call
+└─ call_tool raises MCPError(SSE-ended)
+     └─ _classify_failure ──► tool_error
+          ├─ not in retry set ──► no retry
+          └─ probe ──► McpToolUnavailableError(verify_probe) "wrong shape"
 ```
 
 AFTER
 ```
-Firecrawl slot pool            size still open (F8)   ◄── CHANGED
-└─ used by
-     ├─ map_site                                      ◄── NEW
-     ├─ scrape_page                                   ◄── NEW
-     └─ crawl_site and its status polls       kept
+_single_call
+└─ call_tool raises MCPError(SSE-ended)
+     └─ _classify_failure ──► transport                      ◄── CHANGED
+          ├─ in retry set ──► retried on the same session    ◄── CHANGED
+          └─ exhausted ──► ToolFailure(transport) | probe: McpConnectionError ◄── CHANGED
 ```
 
-Behaviour change: Firecrawl throughput for M3 is bounded by this pool, so its size now limits
-Phase-2 scraping rather than crawls.
+Behaviour change: a dropped stream is retried on the same session and, if persistent, surfaces honestly as
+`transport`, not as a misleading "did not return the expected shape."
 
-### M3: V2b verification moves to the scrape path
+### M7: `429` reaches `rate_limited` even when wrapped in `MCPError`
 
 | Artifact | Change |
 |---|---|
-| mcp_tool_gateway_sample_run.py (#10) · `--v2b` | modify: replace "two concurrent crawls, a capability call during a crawl, forced crawl timeout" with "several concurrent `scrape_page` calls after one `map_site`; each result matches its page; one forced scrape timeout does not fail the others; the session stays usable". Crawl-interference checks apply only to retained `crawl_site`. |
-| mcp_tool_gateway_sample_run.py (#10) · `--crawl-url` | modify (inferred): the URL now seeds map and scrape; the flag name is stale. |
-| both gateway test files (#9; illustrative, not in plan) | modify: add scrape equivalents of the concurrency and forced-timeout cases (same `Client` serves the next call, no new `Client` built). |
-| deep_search_context.md (#11) · V2b bullet | modify: the V2b text under C3.1.1. |
+| mcp_tools.py (#5) · `_classify_failure` (named) | modify: classify a `429` (per-minute rate limit or exceeding max queued jobs) as `rate_limited` even when the SDK surfaces it inside an `MCPError`. **Whether the SDK buries the status is unverified — F17 / OV-7;** if it exposes `status_code==429`, the existing branch covers it (check only). |
+| test files (#9, #12) | add: a `429`-bearing `MCPError` → `ToolFailure(rate_limited)`. |
 
 BEFORE
 ```
-V2b check (Firecrawl)
-├─ run two crawls at the same time
-├─ call a fast tool while a crawl runs
-└─ force one crawl to time out
-     └─ re-read that crawl by its job id
-          └─ other calls and the session must still work
+_classify_failure(exc)
+├─ status_code == 429           ──► rate_limited
+├─ text matches rate-limit RE   ──► rate_limited
+└─ MCPError hiding a 429        ──► tool_error   (missed)
 ```
 
 AFTER
 ```
-V2b check (Firecrawl, M3 path)                           ◄── CHANGED
-├─ map_site once                                         ◄── NEW
-├─ scrape_page for several pages at the same time        ◄── NEW
-│    └─ each result must match its own page              ◄── NEW
-└─ force one scrape to time out                          ◄── NEW
-     └─ the other scrapes must still succeed             ◄── NEW
-          └─ the same session must serve the next call   ◄── NEW
-(crawl-interference checks stay only for the retained crawl_site)
+_classify_failure(exc)
+├─ status_code == 429           ──► rate_limited
+├─ text matches rate-limit RE   ──► rate_limited
+└─ MCPError exposing a 429      ──► rate_limited              ◄── CHANGED
 ```
 
-Behaviour change: the manual verification now proves the shared `Client` under the calls M3
-actually makes.
+Behaviour change: rate-limit rejections are retried as rate limits rather than dropped as generic tool
+errors.
 
-### M4: Confirm the structured-content attribute name (check only)
+### M8: Lengthen retry backoff to clear a per-minute rate window
 
 | Artifact | Change |
 |---|---|
-| mcp_tools.py (#5) · `_decode_body` (illustrative) | check only: confirm it reads the attribute the SDK really exposes. Old plan section 0 says `CallToolResult` has `structured_content` in mcp==2.2.0, so no change is expected (F6). |
-| both gateway test files (#9; illustrative, not in plan) | add (inferred): one case where structured content and text differ, proving the structured path is the one used. |
+| mcp_tools.py (#5) · `RETRY_BACKOFFS_SECONDS` (illustrative; plan: "waits 2 s then 3 s") | modify: raise the `rate_limited` backoff so a retry waits past Firecrawl's per-minute window. **The concrete value is unspecified — F18 / OV-8.** |
+| mcp_tools.py (#5) · `_call_with_retry` (named) | check only: the retry loop structure is unchanged; only wait values (possibly a per-kind wait) change. |
+| test files (#9, #12) · retry cases | modify: the recorded-sleep assertions (`[2.0, 3.0]`) update to the new values. |
 
 BEFORE
 ```
-_decode_body(result)
-├─ structured payload present  ──► use it
-└─ otherwise                   ──► JSON-decode the text block
+_call_with_retry (rate_limited)
+└─ backoff ──► 2 s, then 3 s         retries likely inside the same minute
 ```
 
 AFTER
 ```
-_decode_body(result)
-├─ structured payload present  ──► use it
-│       attribute name checked against the SDK   ◄── CHANGED (check only)
-└─ otherwise                   ──► JSON-decode the text block
+_call_with_retry (rate_limited)
+└─ backoff ──► longer, window-clearing waits   ◄── CHANGED
 ```
 
-Behaviour change: none expected; the worry that the structured payload is silently skipped is
-closed by a check.
+Behaviour change: a throttled call waits out the rate window before retrying.
+
+### M9: Cap submission concurrency to the vendor plan limit
+
+| Artifact | Change |
+|---|---|
+| mcp_tools.py (#5) · `FIRECRAWL_CONCURRENCY` (named) | modify: size the single Firecrawl slot pool to the plan's concurrent-browser limit (Free = 2) so the gateway does not self-induce `429`s; make the rationale explicit (value may stay 2). Interacts with A4's server-side `maxConcurrency` — F19 / OV-9. |
+| mcp_tools.py (#5) · `create_mcp_tool_gateway` (named) / config.py (#2) | check only (inferred): whether the cap becomes a plan-keyed setting or stays a constant. |
+| test files (#9, #12) · concurrency case | check only: "in-flight never exceeds the pool" still holds at the chosen value. |
+
+BEFORE
+```
+Firecrawl slot pool  FIRECRAWL_CONCURRENCY = 2    sized for crawl, re-check pending
+```
+
+AFTER
+```
+Firecrawl slot pool  FIRECRAWL_CONCURRENCY = plan browser limit   ◄── CHANGED
+     └─ submission never exceeds the vendor concurrency ──► fewer self-induced 429s
+```
+
+Behaviour change: the gateway holds its own in-flight Firecrawl calls at or below the plan's browser limit.
+
+### M10: Per-call timeouts account for Firecrawl's queue-inclusive job clock
+
+| Artifact | Change |
+|---|---|
+| mcp_tools.py (#5) · `MAP_TIMEOUT_SECONDS`, `SCRAPE_TIMEOUT_SECONDS` (named), the crawl deadline and the new batch deadline (illustrative) | modify: choose timeouts that allow for queue wait under the 2-browser limit (Firecrawl's one clock runs submission→execution), so a still-queued job is neither dropped too early nor orphaned long after Firecrawl's own timeout. **No concrete value is given — F20 / OV-10.** |
+| mcp_tools.py (#5) · `_streamable_http_factory` timeout (M5) | check only: the httpx read timeout (M5) and these budgets are chosen together. |
+| test files (#9, #12) · timeout cases | modify: forced-timeout assertions update to the new budgets. |
+
+BEFORE
+```
+map_site / scrape_page
+└─ asyncio.timeout(MAP=45 / SCRAPE=30)   assumes execution time only
+     └─ queued job still counts against Firecrawl's clock (unaccounted)
+```
+
+AFTER
+```
+map_site / scrape_page
+└─ timeout chosen for submission + queue wait   ◄── CHANGED
+     └─ queued-but-not-dropped, bounded against Firecrawl's own timeout  ◄── CHANGED
+```
+
+Behaviour change: a job waiting in Firecrawl's queue is given time to run rather than being timed out as if
+it had already started.
 
 ---
 
 ## Report 5. REMOVE points
 
-### R1: Crawl and crawl-status tools no longer required at connect
-
-Code fate: retained (only the connect-time requirement goes; `crawl_site` stays).
-
-| Artifact | Change |
-|---|---|
-| mcp_tools.py (#5) · `verify_capabilities` | remove: the `firecrawl_crawl` (4 args) and `firecrawl_check_crawl_status` (`id`) requirements, because M3 does not use them. A server lacking them now passes. The status tool is dropped by implication (inferred). |
-| mcp_tools.py (#5) · `FIRECRAWL_CRAWL_*`, `FIRECRAWL_STATUS_*` (illustrative) | check only: still used by retained `crawl_site` and `_read_crawl_job`. Whether `FIRECRAWL_CRAWL_ARGS` stays once nothing checks it is open. |
-| test_mcp_tool_gateway.py (#9) · "missing status tool raises", "keyless without crawl tool raises" | remove or reword: they assert a connect-time raise that no longer happens. |
-| feature_tests/test_c3_1_1_mcp_tool_gateway.py (illustrative, not in plan) | remove or reword: the matching T-entries. |
-| deep_search_context.md (#11) · capability bullet | modify: drop crawl and status from the required list. |
-
-BEFORE
-```
-Firecrawl server does not list firecrawl_crawl
-└─ open()
-     └─ verify_capabilities
-          └─ McpToolUnavailableError, caught at connect
-```
-
-AFTER
-```
-Firecrawl server does not list firecrawl_crawl
-└─ open()
-     └─ verify_capabilities
-          ├─ crawl no longer required             ◄── GONE
-          └─ open() passes
-               └─ later crawl_site(...) call
-                    └─ ToolFailure at call time   ◄── CHANGED
-```
-
-Behaviour change: a missing crawl tool is no longer caught at connect; a later caller of the
-retained `crawl_site` would see it as a per-call failure.
+None. No built requirement or check is dropped by these fixes.
 
 ---
 
 ## Report 6. DECISION-GATED points
 
-### D1: Replace a failed or timed-out session by reconnecting
-
-New spec (L127): "A timed-out/failed session is replaced by reconnecting in the owning task."
-Old spec (L2806) and plan (section D rejected row, Layer 4) record this as **corrected in the
-build and rejected**: a timeout is our side giving up one wait; the session stays valid.
-
-AS BUILT
-```
-a call times out
-└─ ToolFailure(timeout) is returned
-     └─ the same open session serves the next call
-          └─ a dead session shows as repeated ToolFailure(transport)
-```
-
-IF INTENDED
-```
-a call times out, or the session fails
-└─ gateway replaces the session by reconnecting, in the owner task   ◄── NEW
-     ├─ builds a new Client (the SDK Client is one-shot)             ◄── NEW
-     └─ calls still in flight on the old Client must be handled      ◄── NEW
-touches: _ServerSession (replace step), _single_call / _call_with_retry,
-         tests on forced timeout and session usable, V2a/V2b runner,
-         the rejected-options table of the old plan
-```
-
-Not planned for when the report was written. **Resolved: keep as built.** The status re-check runs on the
-same `Client` and map and scrape have no job id, so no session replacement is added (see "Decisions
-taken for this revision", D1).
-
-### D2: HTTP client library (`httpx` vs `httpx2`)
-
-New spec (L107): "The `httpx` client that carries the `Authorization` header." The build corrected
-this: mcp 2.x depends on `httpx2`, so the caller-owned client is `httpx2.AsyncClient`.
-
-AS BUILT
-```
-_streamable_http_factory
-└─ httpx2.AsyncClient(headers: Authorization: Bearer ...)
-     └─ streamable_http_client(url, http_client=...) ──► mcp.Client
-```
-
-IF INTENDED
-```
-_streamable_http_factory
-└─ httpx.AsyncClient(headers: Authorization: Bearer ...)   ◄── CHANGED
-     └─ streamable_http_client(url, http_client=...) ──► mcp.Client
-touches: _TRANSPORT_ERRORS (httpx2.HTTPError), requirements.txt (#1),
-         tests that use the factory, the SDK notes of the old plan
-```
-
-Not planned for when the report was written. **Resolved: keep `httpx2`.** The approach is compatible; the
-`httpx` library is not, because the mcp 2.2.0 transport is written against `httpx2` types (see "Decisions
-taken for this revision", D2).
+None. The fixes do not contradict the build-time corrections:
+- **D1 (no session replacement):** M6's retry reissues a call on the same session (a fresh request/response
+  stream), not a replaced `Client`.
+- **D2 (`httpx2`):** M5 keeps `httpx2.AsyncClient` and only sets its `timeout`.
 
 ---
 
 ## Report 7. Unchanged
 
-- `search_web` operation, its retry set (timeout, transport, rate limit) and its parser. The new
-  spec confirms the Parallel body matches the existing parser (`results[]`, `excerpts` list).
-- Typed results or typed `ToolFailure`; failures returned, not raised; keys never logged.
-- Session scope (open at the start of `run_llm_metric_resolution`, close at its end, not in a
-  constructor; `aclose()` closes a leaked session) and the owner task per server.
-- High-level `Client` wrapper over `streamable_http_client(url, http_client=...)`; bearer keys
-  from `Settings`; `ToolGateway` Protocol as the test seam.
-- Error typing: `McpConnectionError` and `McpToolUnavailableError`, each with `stage`.
-- Retained crawl path: `crawl_site`, both result shapes, the longer crawl timeout, re-read by job
-  id, never re-issued (now explicitly "retained, unused by M3").
-- One shared `Client` per server, one semaphore per server (the rule), explicit timeouts, no
-  sharing across threads or loops.
-- V2a (ten concurrent `web_search` calls).
-- `AmenitySearch` injection and `aclose` (#6), the three existing test files and
-  `result_attachment_sample_run.py` that pass `tool_gateway=None` (#7, #8), `requirements.txt` (#1).
+- `search_web`, `map_site`, `scrape_page`, `crawl_site` operations and their parsers (A4 adds a sibling; it
+  does not change these).
+- `_probe_firecrawl_shape`, `verify_capabilities`, the capability set, and `open()` teardown — unchanged in
+  structure (M6 only changes how a probe-call disconnect is classified).
+- Typed results / returned `ToolFailure`; failures returned not raised; keys never logged.
+- Owner task per server; one shared `Client` per server; session scope; `aclose` idempotence.
+- Error typing `McpConnectionError` / `McpToolUnavailableError` with `stage`.
+- `ScrapeResult`, `MapResult`, `MapLink` contracts (A4 reuses `ScrapeResult`).
+- V2a; `AmenitySearch` injection (#6); the `tool_gateway=None` callers (#7, #8); `requirements.txt` (#1).
 
 ---
 
 ## Report 8. Component traceflow after all points
 
 ```
-run_llm_metric_resolution                   (planned in C3.1.7)
+run_llm_metric_resolution                               (C3.1.7)
 │
-└─ McpToolGateway
+└─ McpToolGateway                                        (mcp_tools.py, #5)
    │
    ├─ open()
-   │    ├─ start sessions: Parallel + Firecrawl        unchanged
-   │    ├─ verify_capabilities
-   │    │     Parallel : web_search                    unchanged
-   │    │     Firecrawl: firecrawl_map(url)                 ◄── M1
-   │    │                firecrawl_scrape(url, formats)     ◄── M1
-   │    │                crawl + status: not required       ◄── R1
-   │    └─ shape probe: map_site + scrape_page              ◄── A3
-   │          wrong shape ──► McpToolUnavailableError       ◄── A3
+   │    └─ start sessions ─ _streamable_http_factory(timeout set)   ◄── M5
    │
-   ├─ search_web(...)                                 unchanged
-   ├─ map_site(url)     ──► MapResult | ToolFailure         ◄── A1
-   ├─ scrape_page(url)  ──► ScrapeResult | ToolFailure      ◄── A2
-   ├─ crawl_site(...)   retained, unused by M3              ◄── R1
+   ├─ shared call path ─ _call_with_retry / _single_call
+   │    ├─ _classify_failure
+   │    │     MCPError(SSE-ended)        ──► transport             ◄── M6
+   │    │     429 (even inside MCPError) ──► rate_limited          ◄── M7
+   │    └─ backoff = window-clearing waits                         ◄── M8
    │
-   │   Firecrawl slot pool shared by map / scrape / crawl   ◄── M2
-   │   structured-payload attribute confirmed               ◄── M4
-   │   V2b check = concurrent scrape_page after one map     ◄── M3
+   ├─ Firecrawl pool  FIRECRAWL_CONCURRENCY = plan limit           ◄── M9
    │
-   └─ aclose()                                        unchanged
+   ├─ map_site / scrape_page  timeouts incl. queue wait            ◄── M10
+   ├─ scrape_page(url)        single page                          (kept)
+   ├─ batch_scrape(urls)      job envelope ──► list[ScrapeResult]  ◄── A4
+   │
+   └─ aclose()
 
-Resolved after the report was delivered:
-   D1  failed session replaced by reconnecting?   no, keep as built
-   D2  httpx or httpx2 for the HTTP client?       keep httpx2
+Open / vendor:
+   F15 / OV-12  405 on GET SSE resumption — confirm with Firecrawl (no code)
 ```
 
 ---
@@ -1043,32 +1055,24 @@ Resolved after the report was delivered:
 
 | #   | Flag |
 |-----|------|
-| D1  | New spec re-introduces "replaced by reconnecting", which the build explicitly rejected and removed. Resolved: keep as built. |
-| D2  | New spec says `httpx`; the build recorded `httpx2` as a correction. Resolved: keep `httpx2`; spec wording is drift. |
-| F1  | `onlyMainContent` is listed for `firecrawl_scrape` with no value (presumably true). Only `url` and `formats` are capability-checked, so a server that lacks `onlyMainContent` passes connect. |
-| F2  | The probe's target URL, whether it needs a setting, which `stage` a probe miss reports, and whether a probe call that fails (rather than returns a wrong shape) raises `McpToolUnavailableError` or `McpConnectionError` are all unspecified. Every run also pays one map and one scrape at `open()`. |
-| F3  | Every offline test that calls `open()` must now serve 3.x JSON-shaped map and scrape bodies, because `open()` probes. This is the widest supporting-artifact ripple. |
-| F4  | `firecrawl_mcp_url` defaults to `https://mcp.firecrawl.dev/v2/mcp` while the spec requires MCP server 3.x JSON output. Research found the `/v2/` segment is the endpoint's name, not the MCP server version; whether the server behind it returns that shape is settled by the probe. |
-| F5  | The spec said a missing map/scrape "also catches a missing key", but its research note did not name the 3 tools a keyless endpoint exposed. Resolved by later research: per Firecrawl's 3.29.1 changelog hosted keyless access was removed (401), so a missing key fails at session open (`McpConnectionError`, stage `open`), not at the capability check. Not verified live. |
-| F6  | New spec: code reads snake_case `structured_content`, "if the SDK exposes camelCase" it returns None. Old plan section 0 says mcp==2.2.0 `CallToolResult` has `structured_content`. The two documents disagree; likely already satisfied. |
-| F7  | "M3 scrape uses its own per-call timeout" has no value. Today `McpServerConfig` holds one per-server timeout (Firecrawl: 60 s) and the crawl deadline is 180 s. A per-op value needs a source. Map's timeout is unstated. |
-| F8  | Semaphore size (value 2, named for crawl) versus up to 8 concurrent scrapes per amenity across concurrent pipelines. The spec says "confirm vendor rate limit before raising"; no value given. |
-| F9  | Retry accounting: gateway-internal retries (2 s, 3 s) stack under C3.1.3's "each scrape + one retry". C3.1.3's caps count only calls that hit the gateway, so real MCP requests can exceed its stated worst case. Retry kinds for map/scrape are not stated (inferred: same set as search; both are idempotent reads). |
-| F10 | Empty versus failed at the gateway boundary: the spec only says "no `sourceURL` is a failure". Inferred: empty `links`, or empty `markdown` with a `sourceURL`, is a valid empty result (C3.1.4 needs this to label `empty`), and a body with no `links` key is `unparseable`. |
-| F11 | The gateway returns the full link set; the 50-candidate cap is C3.1.6, not here (inferred). URL validation for map/scrape (http(s), non-empty, `ValueError`) is unstated; inferred to mirror `crawl_site`. |
-| F12 | Two gateway test files plus a test-plan doc exist; only one test file is in the old plan. All fixture changes (M1, A3, R1) land in both unless one is retired. |
-| F13 | Stale text carried into the new spec: "R2 has no MCP client ... no `mcp` dependency, no server keys" (already built), and the old plan's rejected-options reason "only two tools are needed" (now four typed operations; the typed-ops decision still holds). |
-| F14 | Old open-verification items are narrowed: parser shapes are closed for Parallel and map/scrape (new spec, verified); the crawl job-id field and status-tool argument name stay open for the retained crawl path only. |
+| F15 | **Fix 6 is verification-only, no code artifact.** The `405 Method Not Allowed` on the SDK's GET SSE resume is a vendor behaviour to confirm (OV-12); M5/M6 make the gateway resilient regardless. |
+| F16 | **M5 timeout value is open (OV-10).** Fix 1 offers "align to per-call budgets, or `None` for the stream" with no single value; M5 and M10 are chosen together. |
+| F17 | **M7 may be change-or-check-only (OV-7).** If `429` arrives as `status_code`, the existing branch classifies it (check only); if buried in `MCPError`, M7 is a real change. Unverified — the same SDK opacity that masked the disconnect this session. |
+| F18 | **M8 backoff length undefined (OV-8).** The Free-plan per-minute rate number is not in the provided text; the window-clearing wait has no concrete value yet. |
+| F19 | **M9 ↔ A4 interaction (OV-9).** The gateway pool cap (M9) bounds single-call concurrency; batch (A4) pushes concurrency server-side via `maxConcurrency`. The two must be reconciled so they do not jointly exceed the plan. |
+| F20 | **M10 value undefined, and a tension (OV-10).** Firecrawl's clock includes queue wait (hard ceiling 48 h); "account for queue time" conflicts with "fail fast." No concrete budget yet. |
+| F21 | **A4 binds to a batch MCP tool whose exact name is read at build time (OV-11).** The authenticated session exposes a batch tool (confirmed by the domain owner); the batch-scrape / status / errors tool names and args are read from the authenticated `tools/list` so the constants are not guessed. Decided: batch is **not** capability-checked at connect (user decision), so `verify_capabilities` is unchanged (`web_search` + `firecrawl_map` + `firecrawl_scrape`); a missing or renamed batch tool surfaces as a per-call `ToolFailure` on the first `batch_scrape`, the same as the retained `crawl_site`. |
+| F22 | **`scrape_page` vs `batch_scrape` ownership (handoff).** Fix 5 says batch "instead of many single `scrape_page` calls," but `scrape_page` (single page, and the probe) is retained. Which operation C3.1.6 fan-out uses for multi-page scraping is a handoff, not settled here. |
+| F23 | **M6 retry semantics (inferred).** A retried call after `MCPError(SSE-ended)` opens a new request/response stream on the same `Client`; this assumes the dead SSE was per-request, not a dead session, keeping D1 intact. Worth confirming against the SDK. |
 
 ---
 
 ## Report self-check (against the skill's "Before answering")
 
-- Every new-spec C3.1.1 requirement is in exactly one point or in Unchanged: ops (A1, A2), parsing
-  (A1, A2), probe (A3), capability set (M1, R1), decode attribute (M4), semaphore (M2), V2b (M3),
-  reconnect (D1), `httpx` (D2); everything else is in Report 7.
-- Every old-spec requirement is in Unchanged, MODIFY or REMOVE (crawl requirement -> R1, V2b -> M3,
-  semaphore role -> M2, reconnect -> D1).
-- Every artifact comes from the plan or is labelled `(new spec)` or `(illustrative)`.
-- Every point has BEFORE/AFTER and a `Behaviour change` line; no code, no implementation steps.
-- The implementation plan is the main body of this file; D1 and D2 were resolved before it was written.
+- Every fix is in exactly one point or Unchanged: batch op + its parsing/paging/partial-failure (A4),
+  httpx timeout (M5), MCPError classification (M6), 429-in-MCPError (M7), backoff (M8), concurrency cap (M9),
+  queue-aware timeouts (M10); Fix 6 is F15 / OV-12 (no code). Everything else is in Report 7.
+- Every old-spec requirement touched by a fix is in MODIFY; nothing is removed.
+- Every artifact comes from the plan or is labelled `(illustrative)` / `(inferred)`.
+- Every point has BEFORE/AFTER and a Behaviour-change line; no code, no implementation steps.
+- IDs continue the plan's existing space (A4; M5-M10; F15+), stable for follow-ups.
