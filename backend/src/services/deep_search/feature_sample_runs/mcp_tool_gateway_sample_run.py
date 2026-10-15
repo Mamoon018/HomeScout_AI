@@ -10,8 +10,9 @@ objective and queries are hand-written. Raw per-attempt and session records are 
 From `backend/` (needs PARALLEL_API_KEY, FIRECRAWL_API_KEY and network access):
     python -m src.services.deep_search.feature_sample_runs.mcp_tool_gateway_sample_run
 
-Stages: open (capability check, then the Firecrawl shape probe), search_web, map_site, scrape_page,
-and aclose. Crawl is retained in the gateway but unused by M3, so it only runs with --crawl.
+Stages: open (capability check only — the Firecrawl shape probe was removed in iteration 5),
+search_web, map_site, scrape_page, scrape_pages (concurrent firecrawl_scrape fan-out), and aclose.
+Crawl is retained in the gateway but unused by M3, so it only runs with --crawl.
 
 Flags:
     --v2a                 ten concurrent searches checked against their own requests, plus a
@@ -22,6 +23,9 @@ Flags:
     --crawl               also run the retained crawl_site stage (spends Firecrawl credits)
     --url <url>           the site that map, scrape and crawl target (default: the seeded
                           place's website)
+    --scrape-only         cost-saving (temporary): open (capability check only), then run ONLY
+                          scrape_pages over the site; skips the search/map/single-scrape/crawl
+                          stages so the only billed calls are scrape_pages' fan-out
 """
 
 import argparse
@@ -33,10 +37,10 @@ import sys
 from urllib.parse import urlsplit
 
 from src.clients.mcp_tools import (
-    BatchScrapeResult,
     CrawlResult,
     MapResult,
     ScrapeResult,
+    ScrapeResults,
     ToolFailure,
     WebSearchResult,
     create_mcp_tool_gateway,
@@ -46,6 +50,16 @@ from src.core.logging import DEEP_SEARCH_LOGGER_NAME, configure_logging
 from src.exceptions.mcp import McpGatewayError
 
 _RULE = "=" * 78
+
+
+def _is_traced_tool(name: str) -> bool:
+    """True for the scrape tool the `scrape_pages` fan-out drives (iteration 5 re-scope).
+
+    `--trace-calls` filters diagnostics to this, so a scrape-focused run keeps the scrape calls'
+    full trace while search/map stay quiet. There is no batch tool anymore (R2/R3); the fan-out
+    calls `firecrawl_scrape`, so the stable "scrape" substring is matched.
+    """
+    return "scrape" in (name or "").lower()
 
 _DISCOVERED_PLACES_PATH = pathlib.Path(__file__).parent / "data" / "m1_1_discovered_places.json"
 
@@ -76,7 +90,9 @@ class _RecordCollector(logging.Handler):
         return out
 
 
-def _install_call_tracer(logger: logging.Logger, secrets: tuple[str, ...]) -> None:
+def _install_call_tracer(
+    logger: logging.Logger, secrets: tuple[str, ...], *, traced_only: bool = False
+) -> None:
     """Wrap the MCP SDK's `Client.call_tool` so the raw per-call outcome is logged.
 
     The gateway's `_single_call` collapses every per-call problem into a bare
@@ -104,22 +120,24 @@ def _install_call_tracer(logger: logging.Logger, secrets: tuple[str, ...]) -> No
         return text
 
     async def traced(self, name, *args, **kwargs):  # noqa: ANN001
+        want = (not traced_only) or _is_traced_tool(name)
         try:
             result = await original(self, name, *args, **kwargs)
         except BaseException as exc:  # noqa: BLE001 - logged for diagnosis, then re-raised unchanged
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "mcp_diag.call_tool_raised",
-                        "timestamp": _timestamp(),
-                        "tool": name,
-                        "exc_type": f"{type(exc).__module__}.{type(exc).__name__}",
-                        "exc_message": _redact(str(exc))[:500],
-                    }
+            if want:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "mcp_diag.call_tool_raised",
+                            "timestamp": _timestamp(),
+                            "tool": name,
+                            "exc_type": f"{type(exc).__module__}.{type(exc).__name__}",
+                            "exc_message": _redact(str(exc))[:500],
+                        }
+                    )
                 )
-            )
             raise
-        if getattr(result, "is_error", False):
+        if want and getattr(result, "is_error", False):
             text = "\n".join(
                 getattr(block, "text", "") or "" for block in (getattr(result, "content", None) or [])
             )
@@ -140,7 +158,9 @@ def _install_call_tracer(logger: logging.Logger, secrets: tuple[str, ...]) -> No
     Client.call_tool = traced  # type: ignore[assignment]
 
 
-def _install_transport_tracer(logger: logging.Logger, secrets: tuple[str, ...]) -> None:
+def _install_transport_tracer(
+    logger: logging.Logger, secrets: tuple[str, ...], *, traced_only: bool = False
+) -> None:
     """Route the MCP SDK's own transport logs into our redacted diagnostic stream.
 
     The call tracer tells us `call_tool` raised `MCPError("SSE stream ended and reconnection
@@ -166,12 +186,17 @@ def _install_transport_tracer(logger: logging.Logger, secrets: tuple[str, ...]) 
     class _Relay(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
+                message = _redact(record.getMessage())
+                if traced_only and not _is_traced_tool(message):
+                    # Working stages (search/map/scrape) and the tool-less HTTP lifecycle lines are
+                    # dropped; only records that name a batch tool are relayed while batch is debugged.
+                    return
                 payload = {
                     "event": "mcp_diag.transport",
                     "timestamp": _timestamp(),
                     "src": record.name,
                     "level": record.levelname,
-                    "message": _redact(record.getMessage())[:600],
+                    "message": message[:600],
                 }
                 if record.exc_info and record.exc_info[0] is not None:
                     exc_type, exc_val = record.exc_info[0], record.exc_info[1]
@@ -268,11 +293,11 @@ def _print_records(collector: _RecordCollector) -> None:
 
 
 async def _stage_open(gateway, settings, collector: _RecordCollector) -> None:
-    _section("STAGE 1 — open, capability check and Firecrawl shape probe")
+    _section("STAGE 1 — open, capability check (no shape probe since iteration 5)")
     await gateway.open()
-    # open() raised nothing, so every required tool and argument is present on both servers and the
-    # probe confirmed the Firecrawl MCP server 3.x JSON output shape (see the mcp.probe_passed
-    # record below).
+    # open() raised nothing, so every required tool and argument is present on both servers. The
+    # connect-time shape probe was removed (R4); a wrong output shape would surface per-call as
+    # ToolFailure(unparseable). The mcp.tools_listed records below show each server's catalog.
     for name, key in (
         ("parallel", settings.parallel_api_key),
         ("firecrawl", settings.firecrawl_api_key),
@@ -301,6 +326,16 @@ async def _stage_open(gateway, settings, collector: _RecordCollector) -> None:
                 indent=2,
             )
         )
+    _print_records(collector)
+
+
+async def _stage_open_scrape_only(gateway, collector: _RecordCollector) -> None:
+    _section("STAGE 1 (scrape-only) — open (capability check only; free tools/list)")
+    # open() is itself free now (the shape probe was removed, R4): it only lists tools. This mode
+    # additionally skips the search/map/single-scrape/crawl stages below so the only billed calls
+    # are scrape_pages' own fan-out. The mcp.tools_listed diagnostics are in these records.
+    await gateway.open()
+    print("scrape-only: search/map/scrape/crawl stages skipped (only scrape_pages spends credits)")
     _print_records(collector)
 
 
@@ -353,17 +388,17 @@ async def _stage_scrape(gateway, page_url: str, collector: _RecordCollector) -> 
     return True
 
 
-async def _stage_batch(
+async def _stage_scrape_pages(
     gateway, page_urls: list[str], collector: _RecordCollector
 ) -> bool:
-    _section("STAGE 4b — batch_scrape (A4)")
+    _section("STAGE 4b — scrape_pages (M13: concurrent firecrawl_scrape fan-out)")
     print(f"request: urls={page_urls}")
-    result = await gateway.batch_scrape(page_urls)
+    result = await gateway.scrape_pages(page_urls)
     _print_records(collector)
     if isinstance(result, ToolFailure):
         print(f"ToolFailure: tool={result.tool} kind={result.kind} message={result.message}")
         return False
-    assert isinstance(result, BatchScrapeResult)
+    assert isinstance(result, ScrapeResults)
     print(f"total: {result.total} completed: {result.completed} failed: {len(result.failed_urls)}")
     print(f"retrieved_at: {result.retrieved_at}")
     for page in result.pages[:5]:
@@ -468,11 +503,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--trace-calls",
         action="store_true",
         help=(
-            "diagnostics: log each raw MCP call outcome (is_error body vs raised exception) AND the "
-            "SDK transport logs (SSE disconnect reason, reconnects, HTTP lifecycle), keys redacted"
+            "diagnostics (batch only): log the raw MCP call outcome and transport lines for the "
+            "batch tools, which are still under debugging; the working stages stay quiet. Keys redacted"
+        ),
+    )
+    parser.add_argument(
+        "--trace-transport",
+        action="store_true",
+        help=(
+            "diagnostics (whole run): the full SDK transport + httpx header relay for every call "
+            "(SSE disconnect reason, reconnects, HTTP lifecycle). Verbose; keys redacted"
         ),
     )
     parser.add_argument("--url", dest="url", default=None, help="site to map, scrape and crawl")
+    parser.add_argument(
+        "--scrape-only",
+        dest="scrape_only",
+        action="store_true",
+        help=(
+            "cost-saving (temporary): connect and verify capabilities (free tools/list only), then "
+            "run ONLY scrape_pages over the site. Skips the search/map/single-scrape/crawl stages so "
+            "the only billed calls are scrape_pages' fan-out. The full flow is unchanged without this flag"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -485,17 +538,17 @@ async def run_sample_mcp_gateway(argv: list[str]) -> int:
     logger.addHandler(collector)
 
     settings = get_settings()
-    if args.trace_calls:
+    if args.trace_calls or args.trace_transport:
         secrets = (settings.parallel_api_key, settings.firecrawl_api_key)
-        _install_call_tracer(logger, secrets)
-        _install_transport_tracer(logger, secrets)
-        _install_http_header_tracer(logger, secrets)
+        # --trace-transport is the full whole-run diagnostics; --trace-calls alone scopes the call
+        # and transport tracers to the scrape tool (the fan-out's call) and omits the httpx relay.
+        traced_only = not args.trace_transport
+        _install_call_tracer(logger, secrets, traced_only=traced_only)
+        _install_transport_tracer(logger, secrets, traced_only=traced_only)
+        if args.trace_transport:
+            _install_http_header_tracer(logger, secrets)
     name, website = _seed_amenity()
     site_url = args.url or website or _FALLBACK_SITE_URL
-    # For this run only, the connect-time probe targets the same site that is mapped and scraped,
-    # so the shape check is made on the page that matters. Production keeps FIRECRAWL_PROBE_URL
-    # because no amenity URL exists yet when the gateway opens.
-    settings = settings.model_copy(update={"firecrawl_probe_url": site_url})
 
     _section("INPUT STATE")
     print(
@@ -505,7 +558,6 @@ async def run_sample_mcp_gateway(argv: list[str]) -> int:
                 "objective": _OBJECTIVE,
                 "search_queries": list(_SEARCH_QUERIES),
                 "site_url": site_url,
-                "probe_url": settings.firecrawl_probe_url,
                 "crawl_enabled": args.crawl,
                 "crawl_limit": _CRAWL_LIMIT,
                 "crawl_depth": _CRAWL_DEPTH,
@@ -517,30 +569,36 @@ async def run_sample_mcp_gateway(argv: list[str]) -> int:
     gateway = create_mcp_tool_gateway(settings)
     degraded = False
     try:
-        await _stage_open(gateway, settings, collector)
-        if not await _stage_search(gateway, collector):
-            degraded = True
-        mapped = await _stage_map(gateway, site_url, collector)
-        if mapped is None:
-            degraded = True
-        # Scrape the first mapped page, or the site itself when the map is empty or failed.
-        page_url = mapped.links[0].url if mapped is not None and mapped.links else site_url
-        if not await _stage_scrape(gateway, page_url, collector):
-            degraded = True
-        # Batch-scrape the first few mapped pages (A4), or the site itself when the map is thin.
-        batch_urls = (
-            [link.url for link in mapped.links[:3]]
-            if mapped is not None and mapped.links
-            else [site_url]
-        )
-        if not await _stage_batch(gateway, batch_urls, collector):
-            degraded = True
-        if args.crawl and not await _stage_crawl(gateway, site_url, collector):
-            degraded = True
-        if args.v2a and not await _verify_v2a(gateway, collector):
-            degraded = True
-        if args.v2b and not await _verify_v2b(gateway, site_url, collector):
-            degraded = True
+        if args.scrape_only:
+            # Cost-saving path: open (capability check only), then just scrape_pages the site.
+            await _stage_open_scrape_only(gateway, collector)
+            if not await _stage_scrape_pages(gateway, [site_url], collector):
+                degraded = True
+        else:
+            await _stage_open(gateway, settings, collector)
+            if not await _stage_search(gateway, collector):
+                degraded = True
+            mapped = await _stage_map(gateway, site_url, collector)
+            if mapped is None:
+                degraded = True
+            # Scrape the first mapped page, or the site itself when the map is empty or failed.
+            page_url = mapped.links[0].url if mapped is not None and mapped.links else site_url
+            if not await _stage_scrape(gateway, page_url, collector):
+                degraded = True
+            # Fan out scrape_pages over the first few mapped pages (M13), or the site if the map is thin.
+            fanout_urls = (
+                [link.url for link in mapped.links[:3]]
+                if mapped is not None and mapped.links
+                else [site_url]
+            )
+            if not await _stage_scrape_pages(gateway, fanout_urls, collector):
+                degraded = True
+            if args.crawl and not await _stage_crawl(gateway, site_url, collector):
+                degraded = True
+            if args.v2a and not await _verify_v2a(gateway, collector):
+                degraded = True
+            if args.v2b and not await _verify_v2b(gateway, site_url, collector):
+                degraded = True
     except McpGatewayError as exc:
         _print_records(collector)
         print(f"\nMcpGatewayError: {type(exc).__name__} stage={exc.stage} message={exc}")

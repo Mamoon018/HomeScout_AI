@@ -37,12 +37,12 @@ from mcp.shared.exceptions import MCPError
 
 from src.clients import mcp_tools
 from src.clients.mcp_tools import (
-    BatchScrapeResult,
     CrawlResult,
     MapResult,
     McpServerConfig,
     McpToolGateway,
     ScrapeResult,
+    ScrapeResults,
     ToolFailure,
     WebSearchResult,
     _classify_failure,
@@ -264,11 +264,14 @@ def _gateway(
     firecrawl_timeout: float = 5.0,
     search_concurrency: int = 4,
     firecrawl_concurrency: int = 2,
+    firecrawl_rate_per_minute: int = 10_000,
     probe_url: str = _PROBE_URL,
     api_key: str | None = None,
     events: list | None = None,
     flaky: dict | None = None,
 ) -> McpToolGateway:
+    # Default the A7 per-minute bucket effectively unlimited so a multi-call test is not paced by
+    # real time; the bucket's pacing is covered directly by the `_TokenBucket` unit test.
     parallel = McpServerConfig("parallel", "http://parallel", api_key, parallel_timeout)
     firecrawl = McpServerConfig("firecrawl", "http://firecrawl", api_key, firecrawl_timeout)
     factory = _factory(
@@ -279,6 +282,7 @@ def _gateway(
         firecrawl,
         search_concurrency=search_concurrency,
         firecrawl_concurrency=firecrawl_concurrency,
+        firecrawl_rate_per_minute=firecrawl_rate_per_minute,
         firecrawl_probe_url=probe_url,
         client_factory=factory,
     )
@@ -380,76 +384,9 @@ async def test_t3_crawl_tools_are_not_required_and_fail_per_call(no_wait) -> Non
 
 
 # ===================================================================================== Probe
-async def test_t4_probe_maps_and_scrapes_the_configured_url_after_the_capability_check() -> None:
-    events: list[str] = []
-
-    async def map_handler(url):
-        events.append(f"map:{url}")
-        return _DEFAULT_MAP_BODY
-
-    async def scrape_handler(url, _formats, _only_main):
-        events.append(f"scrape:{url}")
-        return {"markdown": "text", "metadata": {"sourceURL": url}}
-
-    gateway = _gateway(
-        _parallel_server(),
-        _firecrawl_server(map_handler=map_handler, scrape_handler=scrape_handler),
-        probe_url="https://probe.test",
-    )
-    original = gateway.verify_capabilities
-
-    async def traced() -> None:
-        events.append("capabilities")
-        await original()
-
-    gateway.verify_capabilities = traced
-    await gateway.open()
-    await gateway.aclose()
-    assert events[0] == "capabilities"
-    assert sorted(events[1:]) == ["map:https://probe.test", "scrape:https://probe.test"]
-
-
-@pytest.mark.parametrize(
-    ("scrape_body", "map_body"),
-    [
-        ({"markdown": "text", "metadata": {}}, None),
-        ({"markdown": "text"}, None),
-        (
-            {"success": True, "data": {"markdown": "t", "metadata": {"sourceURL": _PROBE_URL}}},
-            None,
-        ),
-        ({"markdown": "   ", "metadata": {"sourceURL": _PROBE_URL}}, None),
-        (None, {"unexpected": 1}),
-    ],
-    ids=["blank_source_url", "no_metadata", "wrapped_envelope", "blank_page_text", "map_no_links"],
-)
-async def test_t5_probe_rejects_a_non_v3_shape_and_leaves_no_task(scrape_body, map_body) -> None:
-    before = _session_tasks()
-    gateway = _gateway(
-        _parallel_server(),
-        _firecrawl_server(
-            scrape_handler=_static(scrape_body or _DEFAULT_SCRAPE_BODY),
-            map_handler=_static(map_body or _DEFAULT_MAP_BODY),
-        ),
-    )
-    with pytest.raises(McpToolUnavailableError) as exc:
-        await gateway.open()
-    assert exc.value.stage == "verify_probe"
-    await _settle()
-    assert _session_tasks() == before
-
-
-async def test_t6_probe_that_cannot_complete_is_a_connection_error_not_a_shape_error(
-    no_wait,
-) -> None:
-    gateway = _gateway(
-        _parallel_server(), _firecrawl_server(scrape_handler=_rate_limited_after_probe())
-    )
-    with pytest.raises(McpConnectionError) as exc:
-        await gateway.open()
-    assert exc.value.stage == "verify_probe"
-    assert not isinstance(exc.value, McpToolUnavailableError)
-    assert no_wait == [30.0, 60.0]  # rate-limited probe retry uses the window-clearing backoff (M8)
+# (Iteration 5, R4) The connect-time Firecrawl shape probe was removed: `open()` runs the
+# capability check only. A wrong output shape now surfaces per-call as `ToolFailure(unparseable)`,
+# covered by the map/scrape parse tests below. The former probe tests (t4-t6) are retired.
 
 
 # ===================================================================================== Search
@@ -1437,115 +1374,82 @@ def test_t53_classifier_maps_mcp_error_and_wrapped_429() -> None:
     assert _classify_failure(MCPError(-32000, "tool blew up")) == "tool_error"
 
 
-# ============================================================ Iteration 3: batch scrape (A4)
-async def test_t54_batch_scrape_polls_a_job_to_completion_keyed_by_source_url() -> None:
-    gateway = _gateway(_parallel_server(), _firecrawl_server())
+# ================================================ Iteration 5: scrape_pages fan-out (M13) + rate (A7)
+async def test_t54_scrape_pages_fans_out_and_keys_each_page_by_source_url() -> None:
+    async def scrape_handler(url, _formats, _only_main):
+        return {"markdown": f"text {url}", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
     await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1", f"{_SITE}/2"])
+    result = await gateway.scrape_pages([f"{_SITE}/1", f"{_SITE}/2"])
     await gateway.aclose()
-    assert isinstance(result, BatchScrapeResult)
-    assert [(p.url, p.text) for p in result.pages] == [
-        ("https://x.test/1", "page one"),
-        ("https://x.test/2", "page two"),
-    ]
+    assert isinstance(result, ScrapeResults)
+    assert sorted(p.url for p in result.pages) == [f"{_SITE}/1", f"{_SITE}/2"]
     assert (result.total, result.completed, result.failed_urls) == (2, 2, ())
     assert result.retrieved_at
 
 
-async def test_t55_batch_scrape_follows_the_next_cursor(no_wait) -> None:
-    async def batch_status_handler(_id, skip):
-        if not skip:
-            return {
-                "status": "completed", "total": 2, "completed": 1, "next": 1,
-                "data": [{"markdown": "one", "metadata": {"sourceURL": "https://x.test/1"}}],
-            }
-        return {
-            "status": "completed", "total": 2, "completed": 2,
-            "data": [{"markdown": "two", "metadata": {"sourceURL": "https://x.test/2"}}],
-        }
-
-    gateway = _gateway(
-        _parallel_server(), _firecrawl_server(batch_status_handler=batch_status_handler)
-    )
-    await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1", f"{_SITE}/2"])
-    await gateway.aclose()
-    assert isinstance(result, BatchScrapeResult)
-    assert [p.url for p in result.pages] == ["https://x.test/1", "https://x.test/2"]
-
-
-async def test_t56_batch_partial_failure_rides_failed_urls_and_logs(caplog) -> None:
+async def test_t55_scrape_pages_partial_failure_rides_failed_urls_and_logs(caplog) -> None:
     caplog.set_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME)
-    body = {
-        "status": "completed", "total": 2, "completed": 1,
-        "data": [
-            {"markdown": "ok", "metadata": {"sourceURL": "https://x.test/1"}},
-            {"url": "https://x.test/2", "metadata": {}},  # no sourceURL -> a per-URL failure
-        ],
-    }
-    gateway = _gateway(
-        _parallel_server(), _firecrawl_server(batch_status_handler=_static(body))
-    )
+
+    async def scrape_handler(url, _formats, _only_main):
+        if url.endswith("/bad"):
+            return {"markdown": "x"}  # no metadata.sourceURL -> ToolFailure(unparseable) for this URL
+        return {"markdown": "ok", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
     await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1", f"{_SITE}/2"])
+    result = await gateway.scrape_pages([f"{_SITE}/ok", f"{_SITE}/bad"])
     await gateway.aclose()
-    assert isinstance(result, BatchScrapeResult)
-    assert [p.url for p in result.pages] == ["https://x.test/1"]
-    assert result.failed_urls == ("https://x.test/2",)
-    failed = _log_events(caplog, "mcp.batch_pages_failed")
-    assert len(failed) == 1 and failed[0]["failed"] == 1
+    assert isinstance(result, ScrapeResults)
+    assert [p.url for p in result.pages] == [f"{_SITE}/ok"]
+    assert result.failed_urls == (f"{_SITE}/bad",)
+    partial = _log_events(caplog, "mcp.scrape_pages_partial")
+    assert len(partial) == 1 and partial[0]["failed"] == 1 and partial[0]["completed"] == 1
 
 
-async def test_t57_unreadable_batch_status_is_unparseable() -> None:
-    gateway = _gateway(
-        _parallel_server(),
-        _firecrawl_server(batch_status_handler=_static({"status": "banana"})),
-    )
-    await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1"])
-    await gateway.aclose()
-    assert isinstance(result, ToolFailure)
-    assert (result.tool, result.kind) == ("firecrawl_check_batch_scrape_status", "unparseable")
-
-
-async def test_t58_batch_deadline_returns_timeout_carrying_the_job_id(short_wait, monkeypatch) -> None:
-    monkeypatch.setattr(mcp_tools, "BATCH_DEADLINE_SECONDS", 0.2)
-    gateway = _gateway(
-        _parallel_server(),
-        _firecrawl_server(
-            batch_handler=_static({"id": "batch-stuck"}),
-            batch_status_handler=_static({"status": "scraping"}),
-        ),
-    )
-    await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1"])
-    await gateway.aclose()
-    assert isinstance(result, ToolFailure)
-    assert (result.tool, result.kind) == ("firecrawl_check_batch_scrape_status", "timeout")
-    assert "batch-stuck" in result.message
-
-
-async def test_t59_bad_batch_input_raises_value_error() -> None:
+async def test_t56_scrape_pages_bad_input_raises_value_error() -> None:
     gateway = _gateway(_parallel_server(), _firecrawl_server())
     await gateway.open()
     try:
         with pytest.raises(ValueError):
-            await gateway.batch_scrape([])
+            await gateway.scrape_pages([])
         with pytest.raises(ValueError):
-            await gateway.batch_scrape([f"{_SITE}/ok", "ftp://x.test"])
+            await gateway.scrape_pages([f"{_SITE}/ok", "ftp://x.test"])
     finally:
         await gateway.aclose()
 
 
-async def test_t60_missing_batch_tool_fails_per_call_not_at_connect(no_wait) -> None:
-    # Batch is not capability-checked (user decision): open() still succeeds, and the gap shows
-    # only when batch_scrape is actually called, like the retained crawl path.
-    gateway = _gateway(_parallel_server(), _firecrawl_server(include_batch=False))
+async def test_t57_scrape_pages_concurrency_stays_within_the_firecrawl_pool() -> None:
+    # The fan-out gathers all URLs at once; the shared _firecrawl_sem caps in-flight scrapes at 2.
+    inflight = {"now": 0, "max": 0}
+
+    async def scrape_handler(url, _formats, _only_main):
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await asyncio.sleep(0.02)
+        inflight["now"] -= 1
+        return {"markdown": "t", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
     await gateway.open()
-    result = await gateway.batch_scrape([f"{_SITE}/1"])
+    result = await gateway.scrape_pages([f"{_SITE}/{i}" for i in range(6)])
     await gateway.aclose()
-    assert isinstance(result, ToolFailure)
-    assert result.tool == "firecrawl_batch_scrape"
+    assert isinstance(result, ScrapeResults)
+    assert result.completed == 6
+    assert inflight["max"] <= 2  # FIRECRAWL_CONCURRENCY
+
+
+async def test_t58_token_bucket_paces_acquisitions_to_capacity_per_window() -> None:
+    # A7 unit: the first `capacity` tokens are immediate; the next waits for a refill.
+    bucket = mcp_tools._TokenBucket(2, window_seconds=0.2)  # 10 tokens/sec
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await bucket.acquire()
+    await bucket.acquire()
+    assert loop.time() - start < 0.05  # capacity tokens are immediate
+    await bucket.acquire()  # over budget -> waits ~0.1 s for one refill
+    assert loop.time() - start >= 0.08
 
 
 # ============================================================ Iteration 3: slow stream (M5), real HTTP

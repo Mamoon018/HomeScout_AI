@@ -97,6 +97,11 @@ real loopback HTTP.
 
 ## 2. Firecrawl shape probe (`open` → `_probe_firecrawl_shape`)
 
+> **Retired in iteration 5 (R4).** The connect-time probe was removed; `open()` runs the capability
+> check only. Tests T4–T6 are deleted. A wrong output shape now surfaces per-call as
+> `ToolFailure(unparseable)`, covered by the map/scrape parse cases (T13–T19). See the Iteration 5
+> update at the end of this file.
+
 ### T4 — `test_t4_probe_maps_and_scrapes_the_configured_url_after_the_capability_check`
 1. **Target:** `open` ordering + probe.
 2. **Core behavior:** after the capability check, one `firecrawl_map` and one `firecrawl_scrape` of
@@ -609,6 +614,32 @@ rate-limit assertions in both suites were updated, while timeout/transport cases
 | T61 | M5 | real HTTP: a scrape whose body streams for ~6 s (past httpx's old 5 s read default) still completes, proving the factory sets `read=None` |
 
 **Deferred to a live runner pass (OV-8, OV-10):** the exact rate-limit window and the measured
-queue-inclusive timeout values; the starting values (30/60 s backoff, 60/60/300 s budgets) are in
-code. **Deferred to build-time (OV-11):** the exact batch MCP tool names (the fixtures use
-`firecrawl_batch_scrape` / `firecrawl_check_batch_scrape_status` as provisional names).
+queue-inclusive timeout values; the starting values (30/60 s backoff, 60/60 s budgets) are in code.
+
+## Iteration 5 updates (M13 fan-out, A7 rate limiter, R2/R3/R4 removals)
+
+The hosted `/v2` endpoint exposes no batch tool and the connect-time probe is removed, so:
+
+**Retired:** T4–T6 (probe); T54–T60 (the A4 batch-job cases); and the iteration-4 resolver unit
+tests (A5/M11), since `batch_scrape`/`BatchScrapeResult`/the resolver/the probe no longer exist.
+OV-11 (batch tool-name discovery) is retired with them.
+
+**Replaced / added** in `test_c3_1_1_mcp_tool_gateway.py` (the T54–T58 ids are reused):
+
+| Test | Point | Behavior proven |
+| --- | --- | --- |
+| T54 | M13 | `scrape_pages` fans out one `scrape_page` per URL; each page keyed by its own `metadata.sourceURL`; `total`/`completed` carried |
+| T55 | M13 | a per-URL failure rides `failed_urls` and logs `mcp.scrape_pages_partial` (degrade, not a whole-call failure); the rest complete |
+| T56 | M13 | bad input (empty list, non-http URL) raises `ValueError` before any call |
+| T57 | M13, M9 | the fan-out's in-flight scrapes never exceed `FIRECRAWL_CONCURRENCY` (the shared `_firecrawl_sem`) |
+| T58 | A7 | unit: `_TokenBucket(capacity)` admits the first `capacity` acquisitions immediately and paces the next until the window refills |
+| T61 | M5 | unchanged real-HTTP slow-stream test (probe-free `open()`) |
+
+The second suite (`tests/services/deep_search/test_mcp_tool_gateway.py`) carries the same
+replacements under descriptive names, plus `test_token_bucket_paces_acquisitions_to_capacity_per_window`.
+
+**A7 note:** both gates (≤2 concurrent via `_firecrawl_sem`, ≤10/min via the token bucket) apply to
+every Firecrawl call; `web_search` (Parallel) is excluded. The test `_gateway` helper defaults the
+bucket effectively unlimited so multi-call tests are not paced; the bucket's pacing is proven by the
+dedicated `_TokenBucket` unit test. The fixtures still register provisional `firecrawl_batch_scrape` /
+`firecrawl_check_batch_scrape_status` tools, now unused and harmless (the gateway calls neither).
