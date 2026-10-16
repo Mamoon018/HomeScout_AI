@@ -19,6 +19,11 @@ GROQ_PROVIDER_NAME = "groq"
 # Both SDKs report a body cut short by the token limit with this finish reason.
 _TRUNCATED_FINISH_REASON = "length"
 
+# A clean structured completion ends with this finish reason. Any other value (for example
+# "content_filter"), apart from the truncation case handled separately, means the provider
+# did not produce a usable body, so the structured funnel falls back (C3.1.2 iteration M1).
+_CLEAN_FINISH_REASON = "stop"
+
 # The shared caller's funnel emits these provider-attempt and raw-body records; the sample
 # runners read them back. They live here now that the funnel is shared across R1 and R2;
 # `requirement_interpretation` re-exports them so existing imports keep working.
@@ -126,12 +131,13 @@ class OpenAIStructuredProvider:
         except openai.OpenAIError as exc:
             raise LLMProviderError("OpenAI structured call failed") from exc
 
-        content, finish_reason = _read_first_choice(response)
+        content, finish_reason, refusal = _read_first_choice(response)
         return _decode_body(
             provider=self.name,
             model=self._model,
             content=content,
             finish_reason=finish_reason,
+            refusal=refusal,
         )
 
     async def generate_turn(
@@ -201,12 +207,13 @@ class GroqStructuredProvider:
         except groq.GroqError as exc:
             raise LLMProviderError("Groq structured call failed") from exc
 
-        content, finish_reason = _read_first_choice(response)
+        content, finish_reason, refusal = _read_first_choice(response)
         return _decode_body(
             provider=self.name,
             model=self._model,
             content=content,
             finish_reason=finish_reason,
+            refusal=refusal,
         )
 
     async def generate_turn(
@@ -256,12 +263,15 @@ def _build_response_format(json_schema: dict, schema_name: str) -> dict[str, Any
     }
 
 
-def _read_first_choice(response: Any) -> tuple[str | None, str | None]:
+def _read_first_choice(response: Any) -> tuple[str | None, str | None, str | None]:
     choices = getattr(response, "choices", None) or ()
     if not choices:
-        return None, None
+        return None, None, None
     choice = choices[0]
-    return choice.message.content, choice.finish_reason
+    # `refusal` is an OpenAI field set when the model declines; Groq has no such attribute,
+    # so `getattr` yields None there and the refusal check downstream is a no-op (M1, F1).
+    refusal = getattr(choice.message, "refusal", None)
+    return choice.message.content, choice.finish_reason, refusal
 
 
 def _read_turn_choice(response: Any) -> Any | None:
@@ -347,6 +357,7 @@ def _decode_body(
     model: str,
     content: str | None,
     finish_reason: str | None,
+    refusal: str | None = None,
 ) -> dict:
     logger.info(
         json.dumps(
@@ -374,6 +385,15 @@ def _decode_body(
     if finish_reason == _TRUNCATED_FINISH_REASON:
         raise LLMResponseTruncatedError(
             f"{provider} hit the token limit before completing the body"
+        )
+    # M1: a decline or a filtered/abnormal stop is a provider failure, so the funnel falls
+    # back even when partial content would otherwise decode. Refusal is checked first because
+    # a declined turn can still carry a non-`stop` finish reason.
+    if refusal:
+        raise LLMProviderError(f"{provider} returned a refusal instead of a body")
+    if finish_reason not in (None, _CLEAN_FINISH_REASON):
+        raise LLMProviderError(
+            f"{provider} returned an abnormal finish_reason {finish_reason!r}"
         )
     if not content:
         raise LLMProviderError(f"{provider} returned an empty body")

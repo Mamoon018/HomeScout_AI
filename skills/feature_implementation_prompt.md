@@ -18,8 +18,7 @@ For the better context, here is the file @backend\src\services\deep_search\featu
 3. Mechanisms of responsibility 2
 
 # Current Mechanism Implementation: 
-Now, we will be implementing the mechanism 3 component M3.1.1 subcomponents of responsibility 2
-
+Now, we will be implementing the mechanism 3 component C3.1.2 subcomponents of responsibility 2
 Note: We should not make classes for mechanisms of the responsibility (Until it is necessary to have it otherwise feature would break):  
 
 Here is the more precise definition of how the overall structure of the feature can look like:
