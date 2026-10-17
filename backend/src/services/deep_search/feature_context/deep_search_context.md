@@ -2753,7 +2753,7 @@ Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema c
 - **Firecrawl MCP.** `firecrawl_crawl` takes `url`, `limit`, `maxDiscoveryDepth` and `allowExternalLinks`.
   - The current server README says the tool polls internally and returns final data. Older versions returned a job id, which is polled with `firecrawl_check_crawl_status`.
   - Crawl responses can be very large and overflow the model's context. The README says to limit depth and page count.
-  - The keyless hosted endpoint exposes only 3 tools. An API key is needed for the crawl tool.
+  - Hosted endpoint and keys: Firecrawl's 3.29.1 changelog (2026-10-09) says hosted keyless access was removed and a request without a credential gets 401. Earlier, the keyless endpoint exposed only 3 tools and the crawl tool needed a key. Not verified live.
 - **MCP Python SDK.** The session pattern is `streamable_http_client(url, http_client=...)` with `ClientSession`, `list_tools()`, and `call_tool(name, args)`.
   - A tool that fails returns `is_error` in the result and does not raise.
   - Auth headers are supplied through a caller-owned `httpx` client.
@@ -2771,46 +2771,52 @@ Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema c
 
 
 ## C3.1.1 Sub-component `Build the MCP Tool Gateway for Parallel and Firecrawl`
+### Details of implemented version of C3.1.1 @C:\Users\Hp\Documents\HomeScout_AI\backend\src\services\deep_search\feature_context\r2_mechanism_3_c3_1_1_implementation_plan.md
 
-### Goal of Component
 
-The application can call `web_search` on the Parallel server and `firecrawl_crawl` on the Firecrawl server through two typed async operations, `search_web(objective, search_queries)` and `crawl_site(url, limit, depth)`. Each operation returns typed results or a typed failure. Sessions open and close in one async scope. The connect step verifies that the expected tools and argument names exist.
 
-### Problem It Aims to Solve
+### C3.1.1 — Build the MCP Tool Gateway for Parallel and Firecrawl
 
-- R2 has no MCP client. The repo has no `mcp` dependency and no server keys.
-- An MCP call returns generic content blocks, not typed data.
-- A session is stateful and must be opened and closed in the same async task.
-- A server can rename or remove a tool. Without a check at connect, the failure appears in the middle of a run.
+**Goal.** Typed async operations over the two hosted MCP servers: `search_web(objective, search_queries)` → Parallel `web_search`; and for Firecrawl, `map_site(url)` → `firecrawl_map`, `scrape_page(url)` → `firecrawl_scrape`, and `scrape_pages(urls)` → **a concurrent fan-out of `firecrawl_scrape` over the app-shortlisted URLs** (the hosted server exposes no batch tool) — the M3 uses — with `crawl_site(url, limit, depth)` → `firecrawl_crawl` **retained for future use but unused by M3**. Each returns typed results or a typed failure. Sessions open/close in one async scope. The connect step verifies the expected tools and argument names exist.
 
-### Finalized Approach
+**Problem.** R2 has no MCP client (no `mcp` dependency, no server keys). MCP returns generic content blocks, not typed data. A session is stateful and must open/close in the same async task. A server can rename/remove a tool; without a connect-time check, the failure surfaces mid-run.
 
-**High-level `Client` wrapper.** One `Client(transport)` per server, where the transport is built with `streamable_http_client(url, http_client=...)`. The wrapper owns the session, the handshake and the context management, and offers convenience methods for tools. The `httpx2` client that carries the `Authorization` header is still created and owned by the gateway.
+**Finalized approach.** High-level `Client` wrapper — one `Client(transport)` per server, transport built with `streamable_http_client(url, http_client=...)`. The wrapper owns the session, handshake, and context management, and offers convenience methods. The `httpx2` client carrying the `Authorization` header is created and owned by the gateway (mcp 2.2.0 depends on `httpx2`, not `httpx`). It is built with an explicit `httpx2.Timeout(connect=10, read=None, write=10, pool=10)`: `read=None` leaves the long-lived SSE response stream unbounded at the transport, so the per-call `asyncio.timeout` and SDK `read_timeout_seconds` are the single duration bound — httpx's 5 s read default must not sever a map/scrape/batch that streams for longer.
 
-**Cross-mechanism note (C3.1.1 build).** Checked against the real SDK (`mcp==2.2.0`, with `mcp-types==2.2.0`): `mcp.Client` is one-shot and not re-enterable (re-entering raises `RuntimeError`), and it holds an anyio task group, so it must be entered and exited on the same task. The gateway therefore runs one owner task per server (`_ServerSession`); `open()` and `aclose()` may be called from different tasks of the caller, but the context enter/exit always happen on the owner task. The caller-owned HTTP client is `httpx2.AsyncClient` (mcp 2.x depends on `httpx2`, not `httpx`). `verify_capabilities` lists tools with `cache_mode="bypass"` and reads `Tool.input_schema["properties"]` for the argument-name check; the in-process `MCPServer` serves the offline fixtures with no network. The in-process test confirmed that a timed-out call leaves the session fully usable for the next call, so there is no reconnect path (see the corrected session decision below). **Drift-remediation note:** the parsers *de-mask* unrecognised bodies — a search object with no known hit-list key, or a crawl-status body that is neither a recognised running nor terminal state and carries no pages, becomes `ToolFailure(unparseable)` rather than a confident empty result or a poll-to-deadline timeout; the parser key names and status vocabularies remain open-verification constants that will now fail loudly on first live contact. `open()` tears both sessions down on any non-local exit (including cancellation), and `search_web` rejects empty input with `ValueError`, matching `crawl_site`.
+**Decisions — generally mandatory**
+- **Session scope.** Sessions open at the start of `run_llm_metric_resolution` and close at its end, same task. Not opened in a constructor. `aclose()` closes a leaked session (as existing Google clients do).
+- **Authentication.** Bearer keys from `Settings` (`PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`). Keys never logged.
+- **Retry & timeouts.** Retry transient failures only (timeout, transport error, rate limit), backing off by kind: timeout/transport wait 2 s then 3 s; a rate limit waits a window-clearing 30 s then 60 s (or a response `Retry-After`), because two short waits fall inside the same throttled minute. Per-call timeouts are queue-inclusive (Firecrawl's clock runs submission→execution): map and scrape 60 s, search 30 s (`scrape_pages` has no job clock — each fanned-out page uses the 60 s scrape timeout). Firecrawl calls are also **paced proactively to ≤10/min by a token bucket** (see Rate limits & concurrency); an over-budget call waits for the window rather than firing and taking a `429`.
+- **Error typing.** `is_error` result → typed tool failure. A dropped SSE stream (`MCPError`, "SSE stream ended / reconnection attempts exhausted") is classified `transport`, so it retries on the same session; a `429` is classified `rate_limited` even when the SDK wraps it in an `MCPError` (checked before the transport branch). Connection/protocol failure at connect → MCP error family with `stage`.
+- **Test seam.** Gateway is a `Protocol` injected into `AmenitySearch`; a fake stands in for tests.
 
-### Critical Decision Choices
+**Decisions — problem-specific**
+- **Capability check.** `tools/list` must contain `web_search` (args `objective`, `search_queries`) on Parallel and **`firecrawl_map` (arg `url`) + `firecrawl_scrape` (args `url`, `formats`)** on Firecrawl. A miss raises `McpToolUnavailableError` before any amenity work. **No batch tool is checked or required — `scrape_pages` calls no MCP batch tool; it fans out `firecrawl_scrape`, which is already required.** **`firecrawl_crawl` is retained/driven but NOT checked** — a server missing it still opens, and the gap surfaces as a per-call `ToolFailure` on the first `crawl_site`. A server missing map/scrape still fails at connect. A missing Firecrawl key is not caught by this check: per Firecrawl's changelog the hosted endpoint answers 401 without a credential, so the session cannot open and `open()` raises `McpConnectionError` first (not verified live).
+- **Firecrawl map/scrape operations (M3 path).** `map_site(url)` calls `firecrawl_map` (app-injected homepage `url`) and returns the site's link set as a typed candidate list; `scrape_page(url)` calls `firecrawl_scrape` (`formats: ["markdown"]`, `onlyMainContent`) and returns one typed page. `scrape_pages(urls)` scrapes the app-shortlisted URLs by running one `scrape_page` per URL concurrently (`gather`), each bounded by the shared Firecrawl semaphore (`FIRECRAWL_CONCURRENCY = 2`) and the ≤10/min token bucket, so one failed URL does not fail the rest — the hosted server offers no batch tool, so there is no single job. `scrape_page` is kept for single-page use and is the building block of the fan-out. The LLM never supplies a URL (C3.1.3).
+  - *multi-page output shape.* `scrape_pages` returns a `ScrapeResults` whose `pages` are the successful `ScrapeResult`s (one per URL, keyed by its own `metadata.sourceURL`), with `total`/`completed` counts and the URLs that failed in `failed_urls` (a signalled degrade, logged, not a whole-call failure). Only the field shape is carried over from the former `BatchScrapeResult`; there is no job envelope, status polling, or `next` cursor.
+- **Result parsing — map/scrape (verified against the server source; both decode via the shared `_decode_body`).**
+  - *scrape:* the MCP result **unwraps** the REST `{success, data:{…}}` envelope — page text is top-level **`markdown`**, page URL is **`metadata.sourceURL`** (NOT `data.markdown`). Per Firecrawl's API docs `sourceURL` is the URL that was **requested**; the post-redirect URL is the separate `metadata.url` (not live-verified). `scrape_page`'s typed result carries `(url = metadata.sourceURL, text = markdown)`. A result with no non-empty `sourceURL` is a failure (M3 keys/provenances scrape evidence by URL).
+  - *map:* read **`links`** — an **array of objects** `{url, title?, description?}` on current Firecrawl; extract `url` (+ `title`/`description` when present to enrich the candidate list), and **tolerate a plain-string `links` form** defensively (older servers).
+- **MCP result wrapping & `structuredContent` decode.** Both servers return the payload **twice**: a `content:[{type:"text", text:<pretty JSON>}]` block **and** a native `structuredContent` object (same data). `_decode_body` prefers the structured object (read via the SDK's real attribute `structured_content`), then JSON-decodes the text block, so either wrapping yields the dict.
+- **Firecrawl output shape (no connect-time probe).** M3 requires **MCP server 3.x JSON output** from Firecrawl: a JSON body (as `structuredContent` or as JSON in the text block) with top-level `markdown` and `metadata.sourceURL` for scrape, and a `links` list for map. Firecrawl MCP server 1.x and 2.x (up to 2.1.0) are reported to return raw joined text rather than JSON for scrape and never read `sourceURL`, which breaks URL keying/provenance and `_decode_body`. (This "3.x" is the MCP server package version. It is not a Firecrawl REST API version, none exists, and it is not the `/v2/` segment of the hosted URL. Source: public GitHub and docs research; not live-verified.) **A live run confirmed the hosted `/v2` endpoint returns this shape, so `open()` runs the `tools/list` capability check only — the earlier connect-time map+scrape probe is removed** (it spent two billed calls per `open()` re-confirming a verified shape). A wrong shape, if it ever recurs, surfaces as a per-call `ToolFailure(unparseable)` from `_parse_scrape_result` / `_parse_map_result` on the first real call. The `FIRECRAWL_PROBE_URL` setting and the `_decode_body` / `_parse_*` handling are kept; we do **not** rely on a declared `outputSchema`.
+- **Parallel `web_search` result (verified).** The MCP result mirrors the REST payload for the fields we read — `results[]`, each with `url`, `title`, and **`excerpts` as a list of strings** — so the existing search parser (`_parse_search_result` + the `excerpts`-list fallback in `_excerpt_text`) handles it unchanged. (`usage` moves to the result's `_meta`; we don't read it.)
+- **Crawl result shape (retained crawl path — not used by M3).** Handle both shapes: final data after internal polling, and a job id polled via `firecrawl_check_crawl_status`. M3's map/scrape parsers are specified above; this applies only to the retained `crawl_site` op.
+- **Crawl read timeout (retained crawl path).** Crawl uses a longer timeout than search. On timeout, read the job via `firecrawl_check_crawl_status` — do not restart the crawl. Requires capturing the crawl job id. (M3 scrape uses its own per-call timeout.)
+- **Concurrent calls on one Client.** One `Client` per server, shared across amenity pipelines inside the single event loop; never across threads/loops. Concurrency capped by a per-server semaphore. Every call wrapped in an explicit timeout. The session is **never** replaced or reconnected: a timeout is our side giving up on one wait, so the open session serves the next call, and a transient failure (including a dropped SSE stream) is retried by reissuing the call as a new request stream on the same `Client`. A timed-out crawl job is re-read by its id, not repeated. `scrape_pages`' fan-out shares the same `_firecrawl_sem`, so N concurrent scrapes never exceed the 2-browser limit.
+- **Rate limits & concurrency.** Firecrawl is bounded on **two axes**, both as shared gateway-instance state (so one gateway paces all concurrent amenities) and **both applied to every Firecrawl call** (`firecrawl_map`, `firecrawl_scrape`, `firecrawl_crawl`): **concurrency** `FIRECRAWL_CONCURRENCY = 2` (the plan's concurrent-browser limit, `_firecrawl_sem`) **and throughput** `FIRECRAWL_RATE_PER_MINUTE = 10` (Free-plan limit, documented for `/scrape`, **per API key, shared across all team members** — a proactive token bucket over a 60 s window). In `_single_call` a Firecrawl call takes a slot **and** a token; over either limit it waits (queues on the slot / sleeps until the window refills), never dropped — so a `map_site` and a `scrape_pages` burst contend for the same 10/min. `SEARCH_CONCURRENCY = 4` (Parallel is a separate server/key, excluded from the Firecrawl bucket, reactive `429` handling only). The gateway caps its own submission concurrency and rate so it does not self-induce `429`s; the reactive `429` → `rate_limited` → 30/60 s backoff stays as the backstop for the **cross-process / team-wide** slice the in-process bucket cannot see (another process on the same key). Confirm the plan's figures before raising the defaults.
+- **Verification (split per server; if a test shows an issue, approach reviewed):**
+  - *V2a Parallel:* ~10 concurrent `web_search` calls on one `Client`; each result matches its request; one timeout doesn't fail the others.
+  - *V2b Firecrawl (M3 path):* several concurrent `scrape_page` calls on one `Client` after a `map_site`; each result matches its page; one scrape timeout doesn't fail the others; the session stays usable; `scrape_pages` is covered by the same fan-out path, and a fan-out wider than the per-minute budget is paced to ≤10/min (A7), not 429'd. (Crawl-interference checks apply only to the retained `crawl_site` path.)
 
-Generally mandatory decisions:
-- **Session scope.** Sessions open at the start of `run_llm_metric_resolution` and close at its end, in the same task. They are not opened in a constructor. `aclose()` closes a leaked session, as the existing Google clients do.
-- **Authentication.** Bearer keys come from `Settings` (`PARALLEL_API_KEY`, `FIRECRAWL_API_KEY`). Keys are never logged.
-- **Retry and timeouts.** Two retries with 2 s then 3 s backoff. `search_web` retries on timeout, transport error and rate limit; the `firecrawl_crawl` start retries on rate limit only (a timeout or transport error is never re-issued, since the job may already be billed); a timed-out status read is repeated with the same job id until the crawl deadline. Per-call timeouts are set per server, with an overall crawl deadline on top.
-- **Error typing.** A result with `is_error` becomes a typed tool failure. A connection or protocol failure raises an MCP error family with `stage`.
-- **Test seam.** The gateway is a `Protocol` injected into `AmenitySearch`, so a fake stands in for tests.
+### Iteration 6 implemented: raw tool definitions
 
-Problem-context-specific decisions:
-- **Capability check.** `tools/list` must contain `web_search` (arguments `objective`, `search_queries`) on the Parallel server, and on the Firecrawl server both `firecrawl_crawl` (arguments `url`, `limit`, `maxDiscoveryDepth`, `allowExternalLinks`) and `firecrawl_check_crawl_status` (its job-id argument `id`, provisional until the live capture). The status tool is required because every crawl result is read through it. A miss raises `McpToolUnavailableError` before any amenity work. The keyless Firecrawl endpoint does not list the crawl tool, so the check also detects a missing key.
-- **Crawl result shape.** The gateway handles both known shapes: final data returned after internal polling, and a job id that is polled with `firecrawl_check_crawl_status`. Open verification: record one real `tools/call` response from each server and fix the parser to it.
-- **Crawl read timeout.** The crawl call uses a longer timeout than search, since a crawl job can run for many seconds. When it times out, the gateway reads the job with `firecrawl_check_crawl_status` and does not start the crawl again. This needs the crawl job id, so the parser must capture it (see crawl result shape).
-- **Concurrent calls on one Client.** One `Client` per server, shared across amenity pipelines inside the single event loop. It is never shared across threads or loops. Concurrency is capped by the per-server semaphore, sized to the vendor's rate limit. Every call is wrapped in an explicit timeout. **(Corrected in the C3.1.1 build — the earlier "replaced by reconnecting" is dropped.)** The gateway never replaces or reconnects a session or `Client`: a timeout is our side giving up on one wait, and the open session stays in use for the next call; the in-process test and V2a/V2b judge this, and a real failure sends the shared-`Client` approach back for review, as locked. A timed-out crawl is re-read with `firecrawl_check_crawl_status` using the same job id on the same `Client`, and the crawl is not re-issued.
-- **Rate limits.** One semaphore per server, sized to the vendor's rate limit (see the decision above). Firecrawl limits depend on the plan and must be confirmed before raising the default.
-- **Verification of the shared Client, split per server.** If a test shows an issue, this approach is reviewed.
-  - **V2a, Parallel client.** Run about ten concurrent `web_search` calls on one `Client`. Confirm each result matches its own request, and that one call hitting a timeout does not fail the others.
-  - **V2b, Firecrawl client.** Start a slow `firecrawl_crawl` on one `Client`. While it runs, call `firecrawl_check_crawl_status` (or another fast Firecrawl tool the server lists) and start a second crawl. Confirm three things:
-    - The fast call returns while the first crawl is still running.
-    - The crawls do not interfere with each other's results.
-    - After forcing a timeout on one crawl, the other in-flight calls still succeed and the session is still usable.
+- **Tool-definition exposure.** `open()` retains every tool's name, nullable description and complete input schema from the initial paginated `tools/list` pass. `ToolGateway.get_tool_definitions()` returns a synchronous deep copy grouped under stable `parallel` and `firecrawl` keys. Frozen application-owned `RawToolDefinition` values carry `name`, `description`, and `input_schema`; no SDK objects cross the interface.
+- **Session lifetime.** Publish only after both listings and existing capability checks succeed. Repeated open/getter/verification calls reuse the snapshot. Before successful open, during setup, after failed/cancelled setup, and after close, the getter raises `McpConnectionError(stage="get_tool_definitions")`. Open and close are serialized; close invalidates before shutdown. A later session obtains a fresh snapshot.
+- **Caller handoff.** The later workflow orchestrator stores the returned grouped copy in workflow state before discovery. C3.1.3 selects a server/tool pair and derives restricted copies; it must fail explicitly for a missing selection. The gateway adds no workflow-state owner or catalog builder.
 
+#### Critical decision factors
+
+- **Keep raw tool definitions grouped by server (agreed).** Parallel and Firecrawl return separate `tools/list` responses. Preserve that separation in the gateway's exposed definitions and in workflow state: `raw_tool_definitions: dict[str, dict[str, RawToolDefinition]]`, with stable application-owned server keys (`parallel`, `firecrawl`) and MCP tool names as the inner keys. Retain all listed tool definitions under their source server; do not merge them into one dictionary keyed only by tool name. This preserves server provenance and allows identical tool names on different servers without overwriting definitions. C3.1.3's input contract accepts this grouped shape, and its application-owned context policy must select both the server and tool (for example, `parallel` / `web_search` for website discovery). A missing selected server or tool must fail catalog construction explicitly; do not search another server as a fallback.
 
 ## C3.1.2 Sub-component `Add a Tool-Turn Call to the Shared StructuredLLMCaller`
 
@@ -2829,20 +2835,22 @@ One `StructuredLLMCaller` holds the OpenAI-then-Groq chain and serves both R1 an
 
 **Extend the provider protocol.** Add `generate_turn(messages, tools, tool_choice)` to `StructuredLLMProvider` and both provider classes. The caller loops over providers for either method.
 
-**Cross-mechanism note (C3.1.2 build).** The provider-fallback funnel that was private to R1 (`UserRequirementsInterpretation._call_providers`) is **lifted** into a shared `StructuredLLMCaller` in `clients/llm_provider.py`. The caller exposes `call_structured` (the lifted funnel, same events/return) and the new `call_turn`, plus an idempotent `aclose`; `create_structured_llm_caller(settings)` builds it. R1's `_call_providers` is now a thin delegate to `call_structured` (signature, log events `llm_provider.attempt`/`llm_provider.raw_body`, and `(body, answered_by)` return all unchanged); the M1 inline `execute_and_validate` loop is left as-is. The two event-name constants moved to `clients/llm_provider.py` and are re-exported from `requirement_interpretation.py`, so the sample runners' imports keep working. `UserRequirementsInterpretation.__init__` now takes the caller plus `owns_caller`; `AmenitySearch.__init__` gains a keyword-only `llm_caller` (optional, `None`-tolerant in M1-only contexts, like the C3.1.1 gateway) plus `owns_caller`; each closes the caller only when it owns it. D6 is realized by a new `DeepSearch` feature class and `create_deep_search(settings)` composition root (`deep_search.py`): it builds the one shared caller first, injects it into R1 and R2 with `owns_caller=False`, and closes it once. The tool turn **receives** function tool definitions and a `tool_choice` as inputs and returns a typed `AssistantTurn` (content, `tool_calls`, and a provider-neutral re-appendable `message`); a truncated turn (`finish_reason="length"`) is a provider failure, not executed. Building the tool JSON schemas and the M6→MCP tool-name mapping is a **later** sub-component (C3.1.3+), not C3.1.2 — this corrects the C3.1.1 forward-guess that "mapping is C3.1.2's job." The typed `MetricResolutionProviderError` (with `stage`) is added to `exceptions/deep_search.py`; its `MetricResolutionValidationError` sibling is deferred to C3.1.3 (argument validation).
+**Cross-mechanism note (C3.1.2 build).** The provider-fallback funnel that was private to R1 (`UserRequirementsInterpretation._call_providers`) is **lifted** into a shared `StructuredLLMCaller` in `clients/llm_provider.py`. The caller exposes `call_structured` (the lifted funnel, same events/return) and the new `call_turn`, plus an idempotent `aclose`; `create_structured_llm_caller(settings)` builds it. R1's `_call_providers` is now a thin delegate to `call_structured` (signature, log events `llm_provider.attempt`/`llm_provider.raw_body`, and `(body, answered_by)` return all unchanged); the M1 inline `execute_and_validate` loop is left as-is. The two event-name constants moved to `clients/llm_provider.py` and are re-exported from `requirement_interpretation.py`, so the sample runners' imports keep working. `UserRequirementsInterpretation.__init__` now takes the caller plus `owns_caller`; `AmenitySearch.__init__` gains a keyword-only `llm_caller` (optional, `None`-tolerant in M1-only contexts, like the C3.1.1 gateway) plus `owns_caller`; each closes the caller only when it owns it. D6 is realized by a new `DeepSearch` feature class and `create_deep_search(settings)` composition root (`deep_search.py`): it builds the one shared caller first, injects it into R1 and R2 with `owns_caller=False`, and closes it once. The tool turn **receives** function tool definitions and a `tool_choice` as inputs and returns a typed `AssistantTurn` (content, `tool_calls`, and a provider-neutral re-appendable `message`); a truncated turn (`finish_reason="length"`) is a provider failure, not executed. Building the tool JSON schemas and the M6→MCP tool-name mapping is a **later** sub-component (C3.1.3+), not C3.1.2 — this corrects the C3.1.1 forward-guess that "mapping is C3.1.2's job." The typed `MetricResolutionProviderError` (with `stage`) is added to `exceptions/deep_search.py`; its `MetricResolutionValidationError` sibling stays deferred to C3.1.3 (tool-argument validation, the genuinely non-strict path), because strict-mode constrained decoding makes a schema-invalid structured body impossible here (see the strict-mode decision below). **Iteration M1:** the shared structured path (`_read_first_choice` / `_decode_body`, used by R1 and R2) now also rejects a populated OpenAI `refusal` and a non-`stop` / non-`length` `finish_reason` (e.g. `content_filter`) as an `LLMProviderError`, so a declined or filtered turn falls back and, on exhaustion, raises `MetricResolutionProviderError(stage)`; R1 inherits these checks (no per-call opt-out — one shared funnel, D6).
 
 ### Critical Decision Choices
 
 Generally mandatory decisions:
 - **Ownership.** The caller is built once at the composition root and passed to R1 and `AmenitySearch`. It is created and closed once.
-- **Fallback rule.** Fallback happens on `LLMProviderError`, including a response cut short by the token limit. It never happens for a returned invalid body.
-- **Typed error.** The M3 call raises a typed M3 error (`MetricResolutionProviderError`) with `stage`. R1 keeps its own error behavior.
+- **Fallback rule.** Fallback happens on `LLMProviderError` — a truncated response (cut short by the token limit) and a non-decodable body (empty / not JSON / not a JSON object) both count, because the provider did not actually produce a usable body. A returned, decodable, schema-valid body is a provider success; its schema contents never trigger fallback. (A structured turn additionally falls back on an OpenAI `refusal` or a non-`stop` `finish_reason` — see the strict-mode rule below.)
+- **Strict mode guarantees schema validity (structured turns).** Structured turns (`call_structured` — triage, resolution) use constrained decoding: both providers send `response_format` with `strict: true`, and the configured models support it (OpenAI strict models; Groq `openai/gpt-oss-120b`, with `gpt-oss-20b` the other strict-capable option). A decodable-but-schema-invalid body therefore cannot occur, so there is no schema retry and no schema-driven fallback. Per-call validation is `refusal` → `finish_reason` → defensive parse: a populated OpenAI `refusal` field is a decline → fall back to the other provider, and if it also declines the amenity's metrics end unresolved (D5); `finish_reason` of `length` (truncation) or a non-`stop` / `content_filter` stop is an `LLMProviderError` → fallback; the body is then parsed with its Pydantic model as a defensive backstop — under strict this always passes, so a parse failure is an unexpected provider anomaly that falls back (raising `MetricResolutionProviderError` if every provider is exhausted), never a same-provider retry. Semantic non-conformance (the per-metric `enum` / `unit` / `value_type` and `verification`-gate checks done in code, C3.2.3) is unchanged: a genuine resolution outcome (`null` / verification-failed), never a provider error.
+- **Config caveat (strict-capability).** This guarantee holds only while both models stay strict-capable. Pointing `GROQ_EXTRACTION_MODEL` at a non-strict-supporting model drops Groq to best-effort mode, which may `400` (→ fallback) or return syntactically valid but schema-invalid JSON — reopening the schema-retry question this decision closes. Changing the structured model must revisit this rule.
+- **Typed error.** The M3 structured call raises `MetricResolutionProviderError` (with `stage`) when every provider fails to return a usable body — a `refusal`, an abnormal `finish_reason`, or the unexpected defensive-parse anomaly above. `MetricResolutionValidationError` is not raised here; it belongs to C3.1.3 (tool-argument validation, the genuinely non-strict path). R1 keeps its own error behavior.
 - **Regression.** R1 behavior is unchanged. A test covers the lifted helper against the existing R1 cases.
 
 Problem-context-specific decisions:
 - **Message format.** The history uses the OpenAI chat format, which Groq also accepts. The history is provider-neutral, so a fallback provider receives the same messages, including prior `tool_calls` and `tool` messages with their `tool_call_id`s.
 - **No `strict` on function tools.** Groq does not support it, so tool arguments are validated in code (C3.1.3).
-- **Tools and structured output are separate requests.** Tool turns send `tools` and no `response_format`. The triage turn and the C3.2 resolution turn send `response_format` and no `tools`. Open verification: whether each provider accepts both in one request. The plan does not depend on it.
+- **Two request modes, never combined (tool turn vs structured turn).** A request is either tools-only or schema-only — the two are never merged. `call_turn` sends `tools` and `tool_choice` and no `response_format`; `call_structured` sends a strict `response_format` schema and no `tools`. When each mode fires and what it reads are owned elsewhere — structured turns are invoked by the triage turn (C3.1.6) and the resolution turn (C3.2.2), which resolve from the per-metric evidence store (`metrics_source_content`), not this caller's message thread; C3.1.2 guarantees only the mode separation. This invariant makes the former open question — whether a provider accepts `tools` and `response_format` in one request — moot by construction: the plan never issues such a request, so it never depends on the answer.
 - **Parallel calls.** `parallel_tool_calls` stays on, so the LLM may emit several calls in one turn.
 - **Truncated tool calls.** A response with `finish_reason` of `length` and partial tool arguments is treated as a provider failure, not executed.
 
@@ -2863,6 +2871,96 @@ For each phase, the LLM receives only the function tools valid in that phase: `w
 ### Finalized Approach
 
 **Derived with controlled fields removed.** Function schemas are built from the MCP schemas, with application-controlled fields removed from the exposed schema. The code injects those fields and adds `metric_label`.
+
+### Steps of sub-component
+
+#### Build LLM-Facing Tool Catalog
+
+Reusable C3.1.3 abstraction that builds an LLM-facing tool catalog for the caller's current workflow context. Any workflow caller preparing a tool turn can use it; it is not limited to website discovery or `web_search`. Application-owned context selects the permitted tools and schema policy. The step builds schemas, not search argument values, and does not call the LLM or execute tools.
+
+**First usage context — website discovery.** C3.1.7 coordinates discovery; C3.1.5 calls this abstraction when an existing website is missing or unsuitable. The discovery example below illustrates the shared abstraction using `website_discovery`; later evidence contexts use the same abstraction with their own tool and field policies.
+
+##### Input params
+
+| Param name | Format / type | Source and purpose |
+|---|---|---|
+| `raw_tool_definitions` | `dict[str, dict[str, RawToolDefinition]]`, keyed first by application-owned server key (`parallel`, `firecrawl`), then by MCP tool name. Each definition contains `name: str`, `description: str \| None`, and `input_schema: dict[str, Any]` holding the complete JSON Schema. | C3.1.1 retrieves definitions through `tools/list` during `open()` and exposes them through `get_tool_definitions()`. The workflow orchestrator stores them in workflow state as `raw_tool_definitions` before discovery starts. The current caller reads that state and passes the definitions. Must include the server/tool pair required by the selected context (`parallel` / `web_search` for discovery); these are complete schemas, not merely sets of argument names. |
+| `context` | Application-owned enum or literal union: `website_discovery`, `metric_web_search`, `site_map`, `metric_scrape`. | Selected by the caller according to workflow progress: C3.1.5 supplies `website_discovery`; C3.1.6 supplies the appropriate evidence context. Selects the allowed tool set and field policy. MCP and the LLM do not choose this value. |
+
+`RawToolDefinition` and `RawToolDefinitions` are implemented in `clients/mcp_tools.py`; the context type and workflow-state field remain later-component work. Definitions are fetched once per gateway session and reused. Preserve server grouping in workflow state; do not flatten definitions or fall back to a different server. The context policy selects both server and tool. For discovery, read `raw_tool_definitions["parallel"]["web_search"]`; a missing selected server or tool is an explicit catalog-construction failure. In the discovery context, amenity identity, address, actual queries, official URL, metric labels, and conversation history are not inputs to catalog construction. C3.1.5 supplies amenity identity and search instructions separately when constructing the subsequent LLM request. Candidate-ID and metric-label membership checks belong to the separate guard step.
+
+| Context | Selected server / tool | LLM-facing field policy |
+|---|---|---|
+| `website_discovery` | `parallel` / `web_search` | `objective`, `search_queries`; no `metric_label`. |
+| `metric_web_search` | `parallel` / `web_search` | `objective`, `search_queries`, `metric_label`. |
+| `site_map` | `firecrawl` / `firecrawl_map` | No LLM-settable arguments; homepage URL is injected after admission. |
+| `metric_scrape` | `firecrawl` / `firecrawl_scrape` | Candidate `id` and required `metric_label`(s); URL and scrape settings remain application-owned. |
+
+##### Process flow of step
+
+```text
+BUILD LLM-FACING TOOL CATALOG — C3.1.3
+Example invocation: website discovery
+══════════════════════════════════════════════════════════════════════════
+
+ BEFORE — workflow setup and C3.1.5 discovery decision
+ ────────────────────────────────────────────────────────────────────────
+ C3.1.1 opens → retrieves and exposes complete raw MCP definitions.
+ Workflow orchestrator stores definitions in workflow state.
+ C3.1.5 determines that the existing website is missing or unsuitable.
+ It reads the definitions and selects context = website_discovery.
+   │
+   │ Inputs: raw_tool_definitions + context=website_discovery
+   ▼
+ ┌─ REUSABLE CATALOG BUILDER — C3.1.3 ──────────────────────────────────┐
+ │                                                                      │
+ │  1. Select server + tool using the supplied context policy.           │
+ │     For website_discovery: parallel → web_search only.                │
+ │     Missing server/tool → report a catalog-construction failure;     │
+ │     do not use another server, invent a schema, or ask the LLM.       │
+ │                                                                      │
+ │  2. Derive a restricted copy of its input schema.                     │
+ │     Preserve relevant field types and descriptions.                  │
+ │     Preserve retained fields' $ref references and the $defs they     │
+ │     depend on, including transitive dependencies. Do not inline     │
+ │     referenced definitions. Validate that references resolve; fail   │
+ │     catalog construction explicitly if they cannot be preserved.    │
+ │     Apply the context's field policy. For discovery:                 │
+ │     expose objective + search_queries as required arguments.         │
+ │     Require at least one search query; disallow extra arguments.     │
+ │     Omit application-controlled fields; do not add metric_label.     │
+ │     Leave the raw definition in workflow state unchanged.            │
+ │                                                                      │
+ │  3. Adapt to C3.1.2's function-tool format:                            │
+ │     type = function                                                  │
+ │     function = {name, description, parameters: restricted schema}     │
+ │                                                                      │
+ │  4. Return the selected, restricted function-tool definitions.        │
+ │     In this example: a list containing only web_search.              │
+ └──────────────────────────────────────────────────────────────────────┘
+   │
+   │ Output: tool_catalog: list[dict[str, Any]]
+   ▼
+ C3.1.5 receives the catalog.
+ It passes the catalog as tools to C3.1.2's call_turn(), alongside
+ separately constructed messages and the other caller parameters.
+
+ EXIT — catalog construction is complete.
+ The LLM generates actual argument values in the subsequent tool turn.
+ Guarding those proposed calls is a separate C3.1.3 step.
+```
+
+##### Agreed decisions for the traceflow
+
+| Decision | Agreed rule |
+|---|---|
+| How to restrict fields | Use an explicit allowlist per context. For discovery: only `objective` and `search_queries`. |
+| What to preserve | Preserve permitted fields' types, descriptions, and compatible constraints. Apply application rules explicitly. |
+| What if the raw schema conflicts with our expectations? | Fail catalog construction before making an LLM call, with a clear error—for example, if `search_queries` is missing or has a type incompatible with the guard or execution interface. Do not silently invent a replacement schema. |
+| How to handle schema dependencies | Preserve references needed by retained fields and their required `$defs`, including transitive dependencies; do not inline referenced definitions. Remove schema references or requirements that depend on excluded fields, where safe. Validate that retained references resolve. If safe transformation or reference preservation is unsupported, fail explicitly before making an LLM call. |
+| What counts as a valid query? | Require at least one nonblank string. `minItems: 1` alone still permits `[""]`; the guard must reject blank or whitespace-only queries. Catalog construction defines the constraints; the separate guard step checks actual argument values. |
+
+For every context, the output is the Chat Completions function-tool list already accepted by C3.1.2 (`tools: list[dict]`), not the raw MCP definition format. Its selected tools and schemas vary by context. The discovery catalog (catalog of websearch for website discovery) has no `metric_label`; the metric-label requirements below apply to metric evidence acquisition.
 
 ### Critical Decision Choices
 
