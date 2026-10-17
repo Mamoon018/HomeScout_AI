@@ -298,19 +298,22 @@ async def _stage_open(gateway, settings, collector: _RecordCollector) -> None:
     # open() raised nothing, so every required tool and argument is present on both servers. The
     # connect-time shape probe was removed (R4); a wrong output shape would surface per-call as
     # ToolFailure(unparseable). The mcp.tools_listed records below show each server's catalog.
+    workflow_state = {"raw_tool_definitions": gateway.get_tool_definitions()}
     for name, key in (
         ("parallel", settings.parallel_api_key),
         ("firecrawl", settings.firecrawl_api_key),
     ):
-        session = gateway._parallel if name == "parallel" else gateway._firecrawl
-        listing = await session.client().list_tools(cache_mode="bypass")
-        tool_names = [tool.name for tool in listing.tools]
+        definitions = workflow_state["raw_tool_definitions"][name]
+        tool_names = list(definitions)
         print(
             json.dumps(
                 {
                     "server": name,
                     "connected": True,
                     "tool_count": len(tool_names),
+                    "tool_names": tool_names,
+                    "schema_fields": {tool: list(definition.input_schema.get("properties", {}))
+                                      for tool, definition in definitions.items()},
                     "required_tools_and_args_found": True,
                     "map_tool_present": "firecrawl_map" in tool_names
                     if name == "firecrawl"
@@ -335,6 +338,10 @@ async def _stage_open_scrape_only(gateway, collector: _RecordCollector) -> None:
     # additionally skips the search/map/single-scrape/crawl stages below so the only billed calls
     # are scrape_pages' own fan-out. The mcp.tools_listed diagnostics are in these records.
     await gateway.open()
+    workflow_state = {"raw_tool_definitions": gateway.get_tool_definitions()}
+    print("definition handoff:", {server: {name: list(tool.input_schema.get("properties", {}))
+          for name, tool in tools.items()}
+          for server, tools in workflow_state["raw_tool_definitions"].items()})
     print("scrape-only: search/map/scrape/crawl stages skipped (only scrape_pages spends credits)")
     _print_records(collector)
 

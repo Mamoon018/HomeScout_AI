@@ -1,11 +1,9 @@
 """Gateway-level failures for R2 Mechanism 3 Component C3.1.1 (MCP tool gateway).
 
-Only three conditions raise out of the gateway: it cannot connect a server session, a required
-tool or argument is missing at connect, and the Firecrawl output shape cannot be confirmed by the
-connect-time probe. Everything a single tool call can do wrong later degrades to a returned
-`ToolFailure` (see `clients.mcp_tools`) so one failed call never aborts a gather. Each exception
-carries the `stage` it exited from (`open`, `verify_capabilities`, `verify_probe`), matching the
-stage convention used across `exceptions.deep_search`.
+Setup failures (connection/listing, missing required capabilities or invalid definition shapes)
+raise this family. Definition access outside a successfully open session raises McpConnectionError
+with stage="get_tool_definitions". Per-call execution failures return ToolFailure. The former
+connection-time shape probe has been removed; response parsing failures are per-call failures.
 """
 
 from typing import ClassVar
@@ -27,7 +25,7 @@ class McpGatewayError(Exception):
 
 
 class McpConnectionError(McpGatewayError):
-    """Raised when a server session cannot be started, or a capability read cannot reach it.
+    """Raised when setup cannot reach a server or definitions are unavailable for this lifecycle.
 
     A timeout on an in-flight tool call is NOT this: that is our side giving up on one wait, and
     the open session stays in use. This is only a genuine failure to establish or query a session.
@@ -41,12 +39,6 @@ class McpConnectionError(McpGatewayError):
 
 
 class McpToolUnavailableError(McpGatewayError):
-    """Raised when a required tool or argument is absent, or the output is not MCP server 3.x JSON.
-
-    The first case uses `stage="verify_capabilities"`; a probe whose map or scrape body is not the
-    expected shape (for example the plain text returned by MCP server 1.x or 2.x) uses
-    `stage="verify_probe"`. A missing Firecrawl key is not reported here: the session cannot open
-    at all, which is `McpConnectionError`.
-    """
+    """Required tool/argument or valid input-schema mapping missing during capability checks."""
 
     stage: ClassVar[str] = "verify_capabilities"

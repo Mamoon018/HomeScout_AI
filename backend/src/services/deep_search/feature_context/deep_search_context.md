@@ -2808,6 +2808,16 @@ Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema c
   - *V2a Parallel:* ~10 concurrent `web_search` calls on one `Client`; each result matches its request; one timeout doesn't fail the others.
   - *V2b Firecrawl (M3 path):* several concurrent `scrape_page` calls on one `Client` after a `map_site`; each result matches its page; one scrape timeout doesn't fail the others; the session stays usable; `scrape_pages` is covered by the same fan-out path, and a fan-out wider than the per-minute budget is paced to ≤10/min (A7), not 429'd. (Crawl-interference checks apply only to the retained `crawl_site` path.)
 
+### Iteration 6 implemented: raw tool definitions
+
+- **Tool-definition exposure.** `open()` retains every tool's name, nullable description and complete input schema from the initial paginated `tools/list` pass. `ToolGateway.get_tool_definitions()` returns a synchronous deep copy grouped under stable `parallel` and `firecrawl` keys. Frozen application-owned `RawToolDefinition` values carry `name`, `description`, and `input_schema`; no SDK objects cross the interface.
+- **Session lifetime.** Publish only after both listings and existing capability checks succeed. Repeated open/getter/verification calls reuse the snapshot. Before successful open, during setup, after failed/cancelled setup, and after close, the getter raises `McpConnectionError(stage="get_tool_definitions")`. Open and close are serialized; close invalidates before shutdown. A later session obtains a fresh snapshot.
+- **Caller handoff.** The later workflow orchestrator stores the returned grouped copy in workflow state before discovery. C3.1.3 selects a server/tool pair and derives restricted copies; it must fail explicitly for a missing selection. The gateway adds no workflow-state owner or catalog builder.
+
+#### Critical decision factors
+
+- **Keep raw tool definitions grouped by server (agreed).** Parallel and Firecrawl return separate `tools/list` responses. Preserve that separation in the gateway's exposed definitions and in workflow state: `raw_tool_definitions: dict[str, dict[str, RawToolDefinition]]`, with stable application-owned server keys (`parallel`, `firecrawl`) and MCP tool names as the inner keys. Retain all listed tool definitions under their source server; do not merge them into one dictionary keyed only by tool name. This preserves server provenance and allows identical tool names on different servers without overwriting definitions. C3.1.3's input contract accepts this grouped shape, and its application-owned context policy must select both the server and tool (for example, `parallel` / `web_search` for website discovery). A missing selected server or tool must fail catalog construction explicitly; do not search another server as a fallback.
+
 ## C3.1.2 Sub-component `Add a Tool-Turn Call to the Shared StructuredLLMCaller`
 
 ### Goal of Component
@@ -2861,6 +2871,96 @@ For each phase, the LLM receives only the function tools valid in that phase: `w
 ### Finalized Approach
 
 **Derived with controlled fields removed.** Function schemas are built from the MCP schemas, with application-controlled fields removed from the exposed schema. The code injects those fields and adds `metric_label`.
+
+### Steps of sub-component
+
+#### Build LLM-Facing Tool Catalog
+
+Reusable C3.1.3 abstraction that builds an LLM-facing tool catalog for the caller's current workflow context. Any workflow caller preparing a tool turn can use it; it is not limited to website discovery or `web_search`. Application-owned context selects the permitted tools and schema policy. The step builds schemas, not search argument values, and does not call the LLM or execute tools.
+
+**First usage context — website discovery.** C3.1.7 coordinates discovery; C3.1.5 calls this abstraction when an existing website is missing or unsuitable. The discovery example below illustrates the shared abstraction using `website_discovery`; later evidence contexts use the same abstraction with their own tool and field policies.
+
+##### Input params
+
+| Param name | Format / type | Source and purpose |
+|---|---|---|
+| `raw_tool_definitions` | `dict[str, dict[str, RawToolDefinition]]`, keyed first by application-owned server key (`parallel`, `firecrawl`), then by MCP tool name. Each definition contains `name: str`, `description: str \| None`, and `input_schema: dict[str, Any]` holding the complete JSON Schema. | C3.1.1 retrieves definitions through `tools/list` during `open()` and exposes them through `get_tool_definitions()`. The workflow orchestrator stores them in workflow state as `raw_tool_definitions` before discovery starts. The current caller reads that state and passes the definitions. Must include the server/tool pair required by the selected context (`parallel` / `web_search` for discovery); these are complete schemas, not merely sets of argument names. |
+| `context` | Application-owned enum or literal union: `website_discovery`, `metric_web_search`, `site_map`, `metric_scrape`. | Selected by the caller according to workflow progress: C3.1.5 supplies `website_discovery`; C3.1.6 supplies the appropriate evidence context. Selects the allowed tool set and field policy. MCP and the LLM do not choose this value. |
+
+`RawToolDefinition` and `RawToolDefinitions` are implemented in `clients/mcp_tools.py`; the context type and workflow-state field remain later-component work. Definitions are fetched once per gateway session and reused. Preserve server grouping in workflow state; do not flatten definitions or fall back to a different server. The context policy selects both server and tool. For discovery, read `raw_tool_definitions["parallel"]["web_search"]`; a missing selected server or tool is an explicit catalog-construction failure. In the discovery context, amenity identity, address, actual queries, official URL, metric labels, and conversation history are not inputs to catalog construction. C3.1.5 supplies amenity identity and search instructions separately when constructing the subsequent LLM request. Candidate-ID and metric-label membership checks belong to the separate guard step.
+
+| Context | Selected server / tool | LLM-facing field policy |
+|---|---|---|
+| `website_discovery` | `parallel` / `web_search` | `objective`, `search_queries`; no `metric_label`. |
+| `metric_web_search` | `parallel` / `web_search` | `objective`, `search_queries`, `metric_label`. |
+| `site_map` | `firecrawl` / `firecrawl_map` | No LLM-settable arguments; homepage URL is injected after admission. |
+| `metric_scrape` | `firecrawl` / `firecrawl_scrape` | Candidate `id` and required `metric_label`(s); URL and scrape settings remain application-owned. |
+
+##### Process flow of step
+
+```text
+BUILD LLM-FACING TOOL CATALOG — C3.1.3
+Example invocation: website discovery
+══════════════════════════════════════════════════════════════════════════
+
+ BEFORE — workflow setup and C3.1.5 discovery decision
+ ────────────────────────────────────────────────────────────────────────
+ C3.1.1 opens → retrieves and exposes complete raw MCP definitions.
+ Workflow orchestrator stores definitions in workflow state.
+ C3.1.5 determines that the existing website is missing or unsuitable.
+ It reads the definitions and selects context = website_discovery.
+   │
+   │ Inputs: raw_tool_definitions + context=website_discovery
+   ▼
+ ┌─ REUSABLE CATALOG BUILDER — C3.1.3 ──────────────────────────────────┐
+ │                                                                      │
+ │  1. Select server + tool using the supplied context policy.           │
+ │     For website_discovery: parallel → web_search only.                │
+ │     Missing server/tool → report a catalog-construction failure;     │
+ │     do not use another server, invent a schema, or ask the LLM.       │
+ │                                                                      │
+ │  2. Derive a restricted copy of its input schema.                     │
+ │     Preserve relevant field types and descriptions.                  │
+ │     Preserve retained fields' $ref references and the $defs they     │
+ │     depend on, including transitive dependencies. Do not inline     │
+ │     referenced definitions. Validate that references resolve; fail   │
+ │     catalog construction explicitly if they cannot be preserved.    │
+ │     Apply the context's field policy. For discovery:                 │
+ │     expose objective + search_queries as required arguments.         │
+ │     Require at least one search query; disallow extra arguments.     │
+ │     Omit application-controlled fields; do not add metric_label.     │
+ │     Leave the raw definition in workflow state unchanged.            │
+ │                                                                      │
+ │  3. Adapt to C3.1.2's function-tool format:                            │
+ │     type = function                                                  │
+ │     function = {name, description, parameters: restricted schema}     │
+ │                                                                      │
+ │  4. Return the selected, restricted function-tool definitions.        │
+ │     In this example: a list containing only web_search.              │
+ └──────────────────────────────────────────────────────────────────────┘
+   │
+   │ Output: tool_catalog: list[dict[str, Any]]
+   ▼
+ C3.1.5 receives the catalog.
+ It passes the catalog as tools to C3.1.2's call_turn(), alongside
+ separately constructed messages and the other caller parameters.
+
+ EXIT — catalog construction is complete.
+ The LLM generates actual argument values in the subsequent tool turn.
+ Guarding those proposed calls is a separate C3.1.3 step.
+```
+
+##### Agreed decisions for the traceflow
+
+| Decision | Agreed rule |
+|---|---|
+| How to restrict fields | Use an explicit allowlist per context. For discovery: only `objective` and `search_queries`. |
+| What to preserve | Preserve permitted fields' types, descriptions, and compatible constraints. Apply application rules explicitly. |
+| What if the raw schema conflicts with our expectations? | Fail catalog construction before making an LLM call, with a clear error—for example, if `search_queries` is missing or has a type incompatible with the guard or execution interface. Do not silently invent a replacement schema. |
+| How to handle schema dependencies | Preserve references needed by retained fields and their required `$defs`, including transitive dependencies; do not inline referenced definitions. Remove schema references or requirements that depend on excluded fields, where safe. Validate that retained references resolve. If safe transformation or reference preservation is unsupported, fail explicitly before making an LLM call. |
+| What counts as a valid query? | Require at least one nonblank string. `minItems: 1` alone still permits `[""]`; the guard must reject blank or whitespace-only queries. Catalog construction defines the constraints; the separate guard step checks actual argument values. |
+
+For every context, the output is the Chat Completions function-tool list already accepted by C3.1.2 (`tools: list[dict]`), not the raw MCP definition format. Its selected tools and schemas vary by context. The discovery catalog (catalog of websearch for website discovery) has no `metric_label`; the metric-label requirements below apply to metric evidence acquisition.
 
 ### Critical Decision Choices
 

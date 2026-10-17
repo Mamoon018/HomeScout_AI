@@ -15,8 +15,8 @@ Ownership notes fixed against the real SDK (`mcp==2.2.0`):
 - The caller-owned HTTP client is `httpx2.AsyncClient`; the default factory attaches the bearer
   header there and omits it when the key is `None`.
 
-Only two conditions raise (`McpConnectionError`, `McpToolUnavailableError`): a session cannot be
-opened, or a required tool or argument is missing at connect. Every per-call problem is returned as
+Setup and lifecycle failures raise `McpConnectionError` or `McpToolUnavailableError`: a session
+cannot be opened, required capabilities are missing, or definitions are read outside an open session. Every per-call problem is returned as
 a `ToolFailure`, so one failed call never aborts a concurrent gather. A wrong Firecrawl output shape,
 if it ever recurs, surfaces per-call as `ToolFailure(unparseable)` on the first real map/scrape.
 """
@@ -29,9 +29,11 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 import httpx2
 from mcp import Client
@@ -255,10 +257,24 @@ class _UnparseableResult(Exception):
 # --------------------------------------------------------------------------------------------------
 # Supporting interfaces.
 # --------------------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RawToolDefinition:
+    """SDK-independent, complete definition; nested schemas remain caller-editable."""
+
+    name: str
+    description: str | None
+    input_schema: dict[str, Any]
+
+
+RawToolDefinitions = dict[str, dict[str, RawToolDefinition]]
+
+
 class ToolGateway(Protocol):
     """The narrow contract `AmenitySearch` and tests depend on; no MCP types leak through it."""
 
     async def open(self) -> None: ...
+
+    def get_tool_definitions(self) -> RawToolDefinitions: ...
 
     async def search_web(
         self, objective: str, search_queries: Sequence[str]
@@ -338,6 +354,9 @@ class _ServerSession:
         """Launch the owner task and wait until the `Client` is ready or the start failed."""
         if self._task is not None:
             return
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._start_error = None
         self._task = asyncio.create_task(
             self._run(), name=f"mcp-session-{self._config.name}"
         )
@@ -461,6 +480,9 @@ class McpToolGateway:
         firecrawl_probe_url: str = FIRECRAWL_PROBE_URL_DEFAULT,
         client_factory: ClientFactory = _streamable_http_factory,
     ) -> None:
+        self._raw_tool_definitions: RawToolDefinitions | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._gateway_session_id: str | None = None
         self._parallel_config = parallel
         self._firecrawl_config = firecrawl
         self._parallel = _ServerSession(parallel, client_factory)
@@ -483,12 +505,40 @@ class McpToolGateway:
         iteration 5, R4: a live run confirmed the 3.x JSON shape, so `open()` runs the capability
         check only; a wrong shape would surface per-call as `ToolFailure(unparseable)`.)
         """
-        try:
-            await self._start_sessions()
-            await self.verify_capabilities()
-        except BaseException:
-            await self.aclose()
-            raise
+        async with self._lifecycle_lock:
+            if self._raw_tool_definitions is not None:
+                return
+            self._gateway_session_id = uuid4().hex
+            try:
+                await self._start_sessions()
+                candidate = await self._verify_capabilities()
+                self._raw_tool_definitions = candidate
+                self._log_definitions_state(candidate, available=True, reason="open")
+            except BaseException:
+                self._raw_tool_definitions = None
+                await asyncio.gather(self._parallel.stop(), self._firecrawl.stop())
+                raise
+
+    def get_tool_definitions(self) -> RawToolDefinitions:
+        """Read an isolated snapshot locally, only during a successfully open session."""
+        if self._raw_tool_definitions is None:
+            raise McpConnectionError(
+                "tool definitions require a successfully open gateway",
+                stage="get_tool_definitions",
+            )
+        return deepcopy(self._raw_tool_definitions)
+
+    def _log_definitions_state(
+        self, definitions: RawToolDefinitions, *, available: bool, reason: str
+    ) -> None:
+        logger.info(json.dumps({
+            "event": "mcp.tool_definitions_state",
+            "timestamp": _timestamp(),
+            "gateway_session_id": self._gateway_session_id,
+            "available": available,
+            "counts_by_server": {key: len(tools) for key, tools in definitions.items()},
+            "reason": reason,
+        }))
 
     async def _start_sessions(self) -> None:
         results = await asyncio.gather(
@@ -504,18 +554,28 @@ class McpToolGateway:
                 "could not open one or more MCP sessions", stage="open"
             ) from first
 
-    async def verify_capabilities(self) -> None:
-        """List tools on both servers (cache bypassed) and match the required names and arguments.
+    async def verify_capabilities(self) -> RawToolDefinitions:
+        """Verify without refreshing a successful session's definition snapshot."""
+        async with self._lifecycle_lock:
+            return await self._verify_capabilities()
 
-        Search, map and scrape are required by exact name. No batch tool is checked or required:
-        `scrape_pages` calls no MCP batch tool (it fans out `firecrawl_scrape`, already required).
-        The crawl and status tools stay available through `crawl_site` but are not checked: a later
-        crawl call would surface a missing one as a per-call `ToolFailure`.
-        """
-        parallel_tools, firecrawl_tools = await asyncio.gather(
-            self._list_tools(self._parallel),
-            self._list_tools(self._firecrawl),
-        )
+    async def _verify_capabilities(self) -> RawToolDefinitions:
+        if self._raw_tool_definitions is not None:
+            return self.get_tool_definitions()
+        # Settle both outcomes before teardown, including when the caller is cancelled.
+        tasks = [asyncio.create_task(self._list_tools(session))
+                 for session in (self._parallel, self._firecrawl)]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        parallel_tools, firecrawl_tools = results
         self._require(
             parallel_tools, PARALLEL_SEARCH_TOOL, PARALLEL_SEARCH_ARGS, self._parallel_config.name
         )
@@ -529,9 +589,30 @@ class McpToolGateway:
             self._firecrawl_config.name,
         )
 
-    async def _list_tools(self, session: _ServerSession) -> dict[str, set[str]]:
+        return {"parallel": parallel_tools, "firecrawl": firecrawl_tools}
+
+    async def _list_tools(self, session: _ServerSession) -> dict[str, RawToolDefinition]:
+        catalog: dict[str, RawToolDefinition] = {}
+        cursor = None
         try:
-            listing = await session.client().list_tools(cache_mode="bypass")
+            while True:
+                # SDK 2.2.0 returns one page and exposes next_cursor.
+                listing = await session.client().list_tools(
+                    cache_mode="bypass", **({"cursor": cursor} if cursor is not None else {})
+                )
+                for tool in listing.tools:
+                    schema = getattr(tool, "input_schema", None)
+                    if not isinstance(schema, dict):
+                        raise McpToolUnavailableError(
+                            f"tool '{tool.name}' on server '{session._config.name}' has no mapping input schema",
+                            stage="verify_capabilities",
+                        )
+                    catalog[tool.name] = RawToolDefinition(
+                        tool.name, tool.description, deepcopy(schema)
+                    )
+                cursor = listing.next_cursor
+                if cursor is None:
+                    break
         except McpConnectionError:
             raise
         except _TRANSPORT_ERRORS as exc:
@@ -539,32 +620,22 @@ class McpToolGateway:
                 f"could not list tools on server '{session._config.name}'",
                 stage="verify_capabilities",
             ) from exc
-        catalog: dict[str, set[str]] = {}
-        for tool in listing.tools:
-            schema = getattr(tool, "input_schema", None) or {}
-            properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-            catalog[tool.name] = set(properties)
-        # Boundary crossing: the exact catalog the server returned is external, non-deterministic,
-        # and unrecoverable after the fact, so it is recorded. It answers "which tools exist here,
-        # and is a batch tool among them?" without re-running. `tools` lists every name; `args`
-        # carries each tool's argument names so a name/arg mismatch is visible in one line.
-        logger.info(
-            json.dumps(
-                {
-                    "event": "mcp.tools_listed",
-                    "timestamp": _timestamp(),
-                    "server": session._config.name,
-                    "tool_count": len(catalog),
-                    "tools": sorted(catalog),
-                    "args": {name: sorted(catalog[name]) for name in sorted(catalog)},
-                }
-            )
-        )
+        logger.info(json.dumps({
+            "event": "mcp.tools_listed",
+            "timestamp": _timestamp(),
+            "server": session._config.name,
+            "server_key": "parallel" if session is self._parallel else "firecrawl",
+            "gateway_session_id": self._gateway_session_id,
+            "tool_count": len(catalog),
+            "tools": sorted(catalog),
+            "args": {name: sorted(catalog[name].input_schema.get("properties", {}))
+                     for name in sorted(catalog)},
+        }))
         return catalog
 
     @staticmethod
     def _require(
-        catalog: dict[str, set[str]],
+        catalog: dict[str, RawToolDefinition],
         tool: str,
         arguments: Sequence[str],
         server: str,
@@ -574,7 +645,7 @@ class McpToolGateway:
                 f"server '{server}' is missing required tool '{tool}'",
                 stage="verify_capabilities",
             )
-        missing = [arg for arg in arguments if arg not in catalog[tool]]
+        missing = [arg for arg in arguments if arg not in catalog[tool].input_schema.get("properties", {})]
         if missing:
             raise McpToolUnavailableError(
                 f"tool '{tool}' on server '{server}' is missing arguments {sorted(missing)}",
@@ -761,7 +832,12 @@ class McpToolGateway:
 
     async def aclose(self) -> None:
         """Idempotent: end every owner task in its own task."""
-        await asyncio.gather(self._parallel.stop(), self._firecrawl.stop())
+        async with self._lifecycle_lock:
+            definitions = self._raw_tool_definitions
+            self._raw_tool_definitions = None
+            if definitions is not None:
+                self._log_definitions_state(definitions, available=False, reason="close")
+            await asyncio.gather(self._parallel.stop(), self._firecrawl.stop())
 
     # ---- internal ----------------------------------------------------------------------------
     async def _call_with_retry(

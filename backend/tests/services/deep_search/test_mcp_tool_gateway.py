@@ -1115,3 +1115,154 @@ async def test_a_slow_stream_is_not_severed_by_the_read_timeout() -> None:
         for uv, thread in running:
             uv.should_exit = True
             thread.join(timeout=10)
+
+
+# Iteration 6: definition handoff and successful-session lifetime.
+class _DefinitionClient:
+    def __init__(self, tools, *, gate=None, failure=None):
+        self.tools = tools
+        self.calls = []
+        self.gate = gate
+        self.failure = failure
+        self.settled = False
+
+    async def list_tools(self, *, cursor=None, cache_mode=None):
+        from types import SimpleNamespace
+        self.calls.append(cursor)
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            if self.failure is not None:
+                raise self.failure
+            if cursor is None:
+                return SimpleNamespace(tools=self.tools[:-1], next_cursor="last")
+            return SimpleNamespace(tools=self.tools[-1:], next_cursor=None)
+        finally:
+            self.settled = True
+
+
+def _definition_gateway(*, gate=None, failure=None):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    def tool(name, schema, description=None):
+        return SimpleNamespace(name=name, description=description, input_schema=schema)
+
+    nested = {"type": "object", "properties": {"choice": {"$ref": "#/$defs/Choice"}},
+              "$defs": {"Choice": {"$ref": "#/$defs/Values"},
+                        "Values": {"type": "array", "minItems": 1,
+                                   "items": {"enum": ["a", "b"]}}},
+              "required": ["choice"], "additionalProperties": False}
+    parallel = _DefinitionClient([
+        tool("web_search", {"properties": {"objective": {}, "search_queries": {}}}),
+        tool("shared", nested, "unused nested tool")], gate=gate, failure=failure)
+    firecrawl = _DefinitionClient([
+        tool("firecrawl_map", {"properties": {"url": {}}}),
+        tool("firecrawl_scrape", {"properties": {"url": {}, "formats": {}}}),
+        tool("shared", {})], gate=gate)
+    clients = {"custom-search": parallel, "custom-pages": firecrawl}
+
+    @asynccontextmanager
+    async def factory(config):
+        yield clients[config.name]
+
+    gateway = McpToolGateway(
+        McpServerConfig("custom-search", "unused", None, 1),
+        McpServerConfig("custom-pages", "unused", None, 1), client_factory=factory)
+    return gateway, parallel, firecrawl, nested
+
+
+def _assert_definitions_unavailable(gateway):
+    with pytest.raises(McpConnectionError) as exc:
+        gateway.get_tool_definitions()
+    assert exc.value.stage == "get_tool_definitions"
+
+
+async def test_iteration6_grouped_paginated_snapshot_is_isolated_and_reused(caplog):
+    from copy import deepcopy
+    gateway, parallel, firecrawl, source = _definition_gateway()
+    expected = deepcopy(source)
+    _assert_definitions_unavailable(gateway)
+    with caplog.at_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME):
+        await gateway.open()
+        try:
+            first = gateway.get_tool_definitions()
+            assert set(first) == {"parallel", "firecrawl"}
+            assert first["parallel"]["shared"].input_schema == expected
+            assert first["firecrawl"]["shared"].input_schema == {}
+            assert first["firecrawl"]["shared"].description is None
+            assert first["parallel"]["shared"].description == "unused nested tool"
+            source["$defs"]["Values"]["items"]["enum"].append("source edit")
+            first["parallel"]["shared"].input_schema["$defs"]["Values"]["items"]["enum"].clear()
+            first["firecrawl"].clear()
+            await gateway.open()
+            verified = await gateway.verify_capabilities()
+            assert verified["parallel"]["shared"].input_schema == expected
+            verified.clear()
+            assert gateway.get_tool_definitions()["parallel"]["shared"].input_schema == expected
+            assert parallel.calls == firecrawl.calls == [None, "last"]
+        finally:
+            await gateway.aclose()
+        await gateway.aclose()
+    _assert_definitions_unavailable(gateway)
+    events = [json.loads(r.message) for r in caplog.records if r.message.startswith("{")]
+    states = [e for e in events if e.get("event") == "mcp.tool_definitions_state"]
+    assert [e["available"] for e in states] == [True, False]
+    boundaries = [e for e in events if e.get("event") == "mcp.tools_listed"]
+    assert len(boundaries) == 2
+    assert len({e["gateway_session_id"] for e in states + boundaries}) == 1
+    assert {e["server_key"] for e in boundaries} == {"parallel", "firecrawl"}
+
+
+@pytest.mark.parametrize("failure_kind", ["listing", "capability", "schema"])
+async def test_iteration6_failed_setup_never_publishes(failure_kind):
+    gateway, parallel, firecrawl, _ = _definition_gateway()
+    if failure_kind == "listing":
+        parallel.failure = McpConnectionError("listing failed")
+    elif failure_kind == "capability":
+        parallel.tools = parallel.tools[1:]
+    else:
+        parallel.tools[-1].input_schema = None
+    with pytest.raises((McpConnectionError, McpToolUnavailableError)):
+        await gateway.open()
+    assert parallel.settled and firecrawl.settled
+    _assert_definitions_unavailable(gateway)
+    assert gateway._parallel._task is gateway._firecrawl._task is None
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_iteration6_open_cancellation_or_queued_close_leaves_no_snapshot(cancel):
+    gate = asyncio.Event()
+    gateway, parallel, firecrawl, _ = _definition_gateway(gate=gate)
+    opening = asyncio.create_task(gateway.open())
+    while not (parallel.calls and firecrawl.calls):
+        await asyncio.sleep(0)
+    _assert_definitions_unavailable(gateway)
+    if cancel:
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+    else:
+        closing = asyncio.create_task(gateway.aclose())
+        await asyncio.sleep(0)
+        gate.set()
+        await opening
+        await closing
+    assert parallel.settled and firecrawl.settled
+    _assert_definitions_unavailable(gateway)
+    assert gateway._parallel._task is gateway._firecrawl._task is None
+
+
+async def test_iteration6_reopen_uses_new_session_snapshot():
+    gateway, parallel, firecrawl, _ = _definition_gateway()
+    await gateway.open()
+    old = gateway.get_tool_definitions()
+    await gateway.aclose()
+    parallel.tools[-1].description = "new session"
+    await gateway.open()
+    try:
+        assert gateway.get_tool_definitions()["parallel"]["shared"].description == "new session"
+        assert old["parallel"]["shared"].description == "unused nested tool"
+        assert parallel.calls == firecrawl.calls == [None, "last", None, "last"]
+    finally:
+        await gateway.aclose()

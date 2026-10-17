@@ -643,3 +643,21 @@ every Firecrawl call; `web_search` (Parallel) is excluded. The test `_gateway` h
 bucket effectively unlimited so multi-call tests are not paced; the bucket's pacing is proven by the
 dedicated `_TokenBucket` unit test. The fixtures still register provisional `firecrawl_batch_scrape` /
 `firecrawl_check_batch_scrape_status` tools, now unused and harmless (the gateway calls neither).
+
+
+## Iteration 6 — raw tool-definition snapshot
+
+Both gateway suites include `test_iteration6_*` contract cases using recording listing clients
+through the existing session-owner seam. No external services or API keys are required.
+
+- Paginated listings preserve all tools, nullable descriptions, empty schemas, nested constraints,
+  `$ref` chains and `$defs`; identical names on different servers retain distinct definitions.
+- Editing an SDK fixture or a returned nested schema does not alter the retained snapshot.
+- Repeated getter/open/explicit verification reads make no additional listing requests.
+- Listing, capability and invalid-schema failures settle sibling work and publish nothing.
+- Before/during open, after failed/cancelled setup and after close, access raises
+  `McpConnectionError(stage="get_tool_definitions")`.
+- A close queued during opening serializes correctly; reopening gets a fresh snapshot while old
+  caller copies remain independent. Existing required search/map/scrape checks still apply.
+- Listing and availability events share a setup ID; only publication and invalidation emit state
+  transitions. Repeated local reads and no-op close emit no extra state transitions.
