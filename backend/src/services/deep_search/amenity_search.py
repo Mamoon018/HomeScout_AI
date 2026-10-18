@@ -18,10 +18,6 @@ from src.clients.llm_provider import (
     StructuredLLMCaller,
     create_structured_llm_caller,
 )
-from src.clients.mcp_tools import (
-    ToolGateway,
-    create_mcp_tool_gateway,
-)
 from src.core.config import Settings
 from src.core.logging import PLACES_LOGGER_NAME
 from src.exceptions.deep_search import (
@@ -108,7 +104,6 @@ class AmenitySearch:
         places_client: GooglePlacesAsyncClient,
         routes_client: GoogleRoutesAsyncClient,
         *,
-        tool_gateway: ToolGateway,
         llm_caller: StructuredLLMCaller | None = None,
         owns_caller: bool = True,
         places_concurrency: int = DEFAULT_DISCOVERY_CONCURRENCY,
@@ -116,14 +111,12 @@ class AmenitySearch:
     ) -> None:
         self._places_client = places_client
         self._routes_client = routes_client
-        # Mechanism 3 (C3.1.1) injects the MCP tool gateway here. It is the locked test seam, so the
-        # service never sees MCP types. M1 workflows never touch it; `run_llm_metric_resolution`
-        # (built later) will `open()` it first and `aclose()` it last.
-        self._tool_gateway = tool_gateway
-        # Mechanism 3 (C3.1.2) injects the shared LLM caller here for the tool-turn metric
-        # resolution. It is None only in the M1-only contexts that make no LLM call. When the
-        # DeepSearch feature injects a shared caller, `owns_caller` is False and the feature
-        # closes it; standalone construction owns and closes its own.
+        # Metric resolution (the MCP tool gateway + tool-turn metric loop) was promoted to
+        # Responsibility 3 (`SpecificMetricResolution`), which now owns the gateway. The shared LLM
+        # caller is retained here for R2's own future LLM-driven work (relevance filtering /
+        # narrowing); M1 makes no LLM call, so it is None in M1-only contexts. When the DeepSearch
+        # feature injects a shared caller, `owns_caller` is False and the feature closes it;
+        # standalone construction owns and closes its own.
         self._llm_caller = llm_caller
         self._owns_caller = owns_caller
         # Places (discovery + routing re-search) and Routes (transit) hit two services with
@@ -701,13 +694,9 @@ class AmenitySearch:
         return records
 
     async def aclose(self) -> None:
-        """Close the async Places and Routes transports, the MCP gateway, and the caller."""
+        """Close the async Places and Routes transports and the caller."""
         await self._places_client.aclose()
         await self._routes_client.aclose()
-        # The gateway closes any leaked session even if `run_llm_metric_resolution` already did. It
-        # is None only in the M1.3-only contexts that never build or open it.
-        if self._tool_gateway is not None:
-            await self._tool_gateway.aclose()
         # Close the shared caller only when this instance owns it; the DeepSearch feature
         # closes an injected caller itself. It is None in M1-only contexts.
         if self._owns_caller and self._llm_caller is not None:
@@ -732,11 +721,10 @@ def create_amenity_search(
     *,
     llm_caller: StructuredLLMCaller | None = None,
 ) -> AmenitySearch:
-    """Composition root: build the async Places and Routes clients, the MCP gateway, and the caller.
+    """Composition root: build the async Places and Routes clients and the caller.
 
-    The gateway opens no session here (no I/O at construction); a later mechanism opens and closes it.
     Standalone (no `llm_caller`) builds its own caller and owns it; the DeepSearch feature injects a
-    shared caller it closes itself.
+    shared caller it closes itself. The MCP tool gateway moved to `SpecificMetricResolution` (R3).
     """
     if llm_caller is None:
         caller = create_structured_llm_caller(settings)
@@ -747,7 +735,6 @@ def create_amenity_search(
     return AmenitySearch(
         create_places_async_client(settings),
         create_routes_async_client(settings),
-        tool_gateway=create_mcp_tool_gateway(settings),
         llm_caller=caller,
         owns_caller=owns_caller,
     )

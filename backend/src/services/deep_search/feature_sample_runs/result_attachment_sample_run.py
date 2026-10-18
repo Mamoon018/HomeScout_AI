@@ -229,8 +229,8 @@ def run_sample_result_attachment() -> AmenitySearchState:
     collector = _RecordCollector()
     places_logger.addHandler(collector)
 
-    # M1.3 uses no client and no MCP gateway, so none are built.
-    search = AmenitySearch(places_client=None, routes_client=None, tool_gateway=None)
+    # M1.3 uses no client, so none are built.
+    search = AmenitySearch(places_client=None, routes_client=None)
     state = _build_sample_state()
 
     _section("INPUT STATE (seeded as after M1.2)")
