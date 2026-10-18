@@ -19,6 +19,10 @@ from src.services.deep_search.requirement_interpretation import (
     UserRequirementsInterpretation,
     create_requirement_interpretation,
 )
+from src.services.deep_search.specific_metric_resolution import (
+    SpecificMetricResolution,
+    create_specific_metric_resolution,
+)
 
 logger = logging.getLogger(DEEP_SEARCH_LOGGER_NAME)
 
@@ -34,8 +38,8 @@ class DeepSearch:
     """The Deep Search feature: it owns the one shared LLM caller and sequences R1 then R2.
 
     D6 is realized here. The caller is built once at the composition root and injected into
-    both `UserRequirementsInterpretation` (R1) and `AmenitySearch` (R2) with `owns_caller`
-    False, so this feature is the single owner that closes it once.
+    `UserRequirementsInterpretation` (R1), `AmenitySearch` (R2), and `SpecificMetricResolution`
+    (R3) with `owns_caller` False, so this feature is the single owner that closes it once.
     """
 
     def __init__(
@@ -43,10 +47,12 @@ class DeepSearch:
         *,
         interpretation: UserRequirementsInterpretation,
         amenity_search: AmenitySearch,
+        specific_metric_resolution: SpecificMetricResolution,
         llm_caller: StructuredLLMCaller,
     ) -> None:
         self._interpretation = interpretation
         self._amenity_search = amenity_search
+        self._specific_metric_resolution = specific_metric_resolution
         self._llm_caller = llm_caller
 
     async def interpret(self, raw_input: str) -> RequirementInterpretationState:
@@ -56,10 +62,11 @@ class DeepSearch:
     async def run(self, raw_input: str) -> RequirementInterpretationState:
         """Sequence the responsibilities in order: R1 first, then R2.
 
-        R1 turns the raw text into the per-category specification. R2's metric-resolution
-        stages run next, over the same injected caller's tool turn; that step and the R1 to R2
-        data handoff are attached here as later sub-components build them, so this method does
-        not yet invoke R2. It returns R1's state.
+        R1 turns the raw text into the per-category specification. The R2 (amenity discovery /
+        baseline profiling) and R3 (specific metric resolution) stages run next; the R1 -> R2 -> R3
+        sequencing and the data handoffs are attached here as those workflows are built (R3's entry
+        is a promotion skeleton for now), so this method does not yet invoke R2 or R3. It returns
+        R1's state.
         """
         logger.info(
             json.dumps(
@@ -82,9 +89,10 @@ class DeepSearch:
         return state
 
     async def aclose(self) -> None:
-        """Close R1 and R2 owned resources, then the shared caller once."""
+        """Close R1, R2, and R3 owned resources, then the shared caller once."""
         await self._interpretation.aclose()
         await self._amenity_search.aclose()
+        await self._specific_metric_resolution.aclose()
         await self._llm_caller.aclose()
 
 
@@ -98,8 +106,12 @@ def create_deep_search(settings: Settings) -> DeepSearch:
     llm_caller = create_structured_llm_caller(settings)
     interpretation = create_requirement_interpretation(settings, llm_caller=llm_caller)
     amenity_search = create_amenity_search(settings, llm_caller=llm_caller)
+    specific_metric_resolution = create_specific_metric_resolution(
+        settings, llm_caller=llm_caller
+    )
     return DeepSearch(
         interpretation=interpretation,
         amenity_search=amenity_search,
+        specific_metric_resolution=specific_metric_resolution,
         llm_caller=llm_caller,
     )

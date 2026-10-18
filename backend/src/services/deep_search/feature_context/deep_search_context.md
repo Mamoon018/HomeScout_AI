@@ -2092,7 +2092,7 @@ Context-specific: whether cross-category consistency is checked automatically at
 
 # Responsibility‑2: Amenity Search & Factual Data Extraction
 
-> **Scope boundary:** R2 consumes Responsibility‑1's per‑category specification (the `predefined_metrics` + `specific_metrics` object) as its only input. It finds the real amenities in the user‑defined neighborhood, keeps only the ones that truly belong to each category, and retrieves the single‑point factual value for each metric using the tool that metric's `resolution_source` dictates. It stops at facts — it does **not** interpret requirements (R1) and does **not** judge, score, or assess amenities (the later responsibility).
+> **Scope boundary:** R2 consumes Responsibility‑1's per‑category specification (the `predefined_metrics` + `specific_metrics` object) as its only input. It finds the real amenities in the user‑defined neighborhood, keeps only the ones that truly belong to each category, and retrieves the single‑point factual value for each metric using the tool that metric's `resolution_source` dictates. It stops at facts — it does **not** interpret requirements (R1) and does **not** judge, score, or assess amenities (the later responsibility). **(R3 promotion:** the deeper LLM-defined (`specific_metrics`) resolution and the combined-record assembly this boundary formerly implied now belong to **Responsibility-3 (Specific Metric Resolution)**. R2 ends at discovered places, relevance filtering, predefined/baseline metrics, accessibility, and narrowing — emitting one `PredefinedMetricsRecord` per amenity per category.**)
 
 ## User
 
@@ -2184,6 +2184,8 @@ If the amenities returned aren't genuinely the categories the user asked for, or
 
 Taking the per‑category specification produced by Responsibility‑1 (categories, their assigned depth, and their predefined and LLM‑defined metrics) as its only input, this responsibility must first search for amenities in each category within the user‑defined radius using the Google Places New API, then filter the raw results against category‑relevance criteria so that only places genuinely belonging to that category survive and adjacent or mislabeled ones are dropped. For each surviving amenity it must retrieve the baseline predefined metrics by parsing the structured Google Places fields directly and must compute travel‑based accessibility (mode, route, and time) rather than relying on straight‑line distance alone; and, only where the category's assigned depth calls for it, it must resolve the deeper LLM‑defined metrics through the tool each metric's `resolution_source` dictates — parallel web search and page scraping — routing every metric to the source suited to it so structured facts are never scraped wastefully and unstructured facts are never demanded from an API that cannot hold them. It must then narrow each category to a representative set rather than returning every instance found. For every metric of every retained amenity it must return the true, as‑of‑fetch‑time value complete with its unit, scale, and working link where applicable and verified per the metric's verification rule, and where no source yields a value it must mark that metric unknown under its null policy rather than fabricating one. Finally, it must assemble all retrieved facts into a single structured record per amenity, organized by category and metric and shaped so the deeper facts merge cleanly onto the baseline record and the result is ready for downstream display and assessment. All of this must operate within cost and latency bounds for a single search run, using bounded parallelism across independent amenity and metric fetches, and produces factual data only — it performs no requirement interpretation and no assessment or scoring of amenities.
 
+> **Promotion note (R3).** The clauses above that resolve the deeper LLM-defined metrics through web search and page scraping, and that assemble the deeper facts into one merged record, have moved to **Responsibility-3 (Specific Metric Resolution)**. Read R2's statement as scoped to discovery, relevance filtering, predefined/baseline metrics, travel-based accessibility, and narrowing to a representative set — emitting one `PredefinedMetricsRecord` per amenity per category. The `specific_metrics` resolution and the combined, versioned `AmenityMetricsSet` are R3 (see `R3_Specific_Metric_Resolution_spec.md`).
+
 *Filter check (problem relevance):* every clause traces back to producing relevant amenities and correct, complete, appropriately‑deep, honestly‑sourced factual data within cost/latency bounds. No clause interprets requirements (Responsibility‑1) or judges/scores amenities (the later responsibility).
 
 
@@ -2237,7 +2239,7 @@ Predefined‑metric catalog unchanged from the last table (reachability removed;
 
 #### Mechanism goal (ordered): (1) discover the canonical places per category → (2) enrich them with routing + transit → (3) deterministically attach and emit one typed record per amenity per category.
 
-R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_metric_plans.
+R2 is its own class with AmenitySearchState receiving origin and radius as inputs (D2), alongside R1's category_metric_plans. **(R3 promotion:** R2 no longer owns metric resolution. The MCP tool gateway and the LLM tool-turn used for `specific_metrics` moved to the new `SpecificMetricResolution` class (R3); R2 retains the shared caller only for its own future relevance/narrowing use. The feature coordinator sequences **R1 -> R2 -> R3**, and R3 owns the combined `AmenityMetricsSet`.**)
 
 ### Component M1.1 — Place Discovery 
 
@@ -2502,7 +2504,117 @@ radius input in km (default 2 km) → meters for APIs; all output distances km, 
 ---
 
 
-# Final R2 Mechanism 3: LLM-driven tool resolution (component level)
+# Responsibility-3: Specific Metric Resolution
+
+> **Promoted from "R2 Mechanism 3".** The LLM-defined (`specific_metrics`) resolution formerly
+> framed inside R2 is its own responsibility, implemented by the `SpecificMetricResolution` class.
+> The feature coordinator sequences **R1 -> R2 -> R3**; R3 owns the combined, versioned
+> `AmenityMetricsSet`. Its two mechanisms and their stage methods are specified in
+> `R3_Specific_Metric_Resolution_spec.md` (R3.M1 - Evidence Acquisition; R3.M2 - Resolution).
+> `C3.1.1` (MCP gateway) and `C3.1.2` (shared-caller tool turn) are already-built **client
+> prerequisites**, not R3 stages.
+
+## Scope boundary
+
+R3 consumes R2's discovered places and baseline `PredefinedMetricsRecord`s plus R1's
+`specific_metrics` plans. It resolves the LLM-defined metrics from live web-search and scrape
+evidence (with Google reviews as a verification-gated fallback), commits a verified value or an
+honest unresolved reason per metric, and assembles the combined versioned `AmenityMetricsSet`. It
+does **not** find, profile, filter, or narrow amenities (R2), and it does **not** score them (the
+later responsibility).
+
+## User
+
+### Stakeholder 1: Customer (End User)
+
+- **Metric-Level Factual Correctness (LLM-defined metrics):** the deeper per-metric value is the
+  true value, verified per the metric's verification rule, not a guess.
+- **Data-Point Completeness (specific values):** each specific value arrives whole — number with
+  unit/scale, working link where applicable.
+- **Honest Absence:** a specific metric that cannot be verified is marked unresolved with a reason,
+  never fabricated.
+- **Currency of Facts:** each specific value is correct as-of its fetch time (tool evidence carries
+  `retrieved_at`; the metric carries `as_of`).
+- **Display-Ready / Mergeable Output:** specific facts land already merged with the baseline record
+  into one combined, versioned set per place.
+
+### Stakeholder 2: Developer
+
+- **Source-Appropriate Routing (unstructured path):** each LLM-defined metric is resolved through
+  the tool its `resolution_source` names — Parallel web search first, Firecrawl scrape for what web
+  leaves unresolved.
+- **Cost-Bounded Extraction:** tool spend is bounded by construction (phase/round/scrape caps per
+  amenity), because unstructured resolution is where cost compounds.
+- **Controlled Parallelism:** independent amenities and metrics resolve concurrently under the
+  gateway's per-server semaphores and a per-amenity scrape ceiling.
+- **Mergeable Output:** R3 owns the merge — it pairs its `SpecificMetricsRecord`s with R2's
+  `PredefinedMetricsRecord`s into the versioned `AmenityMetricsSet`.
+
+## Environment
+
+- Not every metric value is published anywhere retrievable, so "found" can never be guaranteed for
+  every LLM-defined metric.
+- LLM-defined metrics have no structured source; their values must be assembled from free-text
+  search results and scraped pages.
+- The resolution spans many amenities x categories x metrics within one run, so per-call cost and
+  latency compound across that run.
+- Each tool (Parallel Web Search, Firecrawl) has its own rate limits, cost, and coverage boundary.
+- Amenity facts change over time (hours, prices, ratings), so a retrieved value is correct as-of
+  the moment it was fetched.
+
+## Problem relevance
+
+Every capability in R3 traces to producing correct, complete, honestly-sourced **specific-metric**
+values within cost/latency bounds, and to assembling them with the baseline records into one
+merge-ready set. No clause discovers, profiles, filters, or narrows amenities (R2), and none scores
+them (the later responsibility).
+
+## Actual Problem Statement
+
+Taking the per-category specification's LLM-defined `specific_metrics`, the discovered amenity set,
+and the baseline `PredefinedMetricsRecord`s produced by Responsibility-2 as its input, this
+responsibility resolves each LLM-defined metric to a committed factual value. For each eligible
+amenity (a category with >= 1 `specific_metrics` entry) it must first resolve the amenity's official
+website, then acquire evidence through the tools each metric's `resolution_source` dictates -
+Parallel web search first, Firecrawl page scraping for what web search leaves unresolved - deciding
+per metric when the cheaper source suffices so scraping cost is incurred only where it adds value.
+It must then commit, per metric, the true as-of-fetch-time value complete with unit and scale,
+verified against that metric's verification rule, conformed to its value type and enum, and
+provenance-checked against the evidence actually retrieved; where no source yields a verifiable
+value it must mark the metric unresolved with a reason rather than fabricate one. Finally it must
+assemble its per-amenity specific records together with Responsibility-2's predefined records into
+the single versioned `AmenityMetricsSet`, organized by category and metric, ready for downstream
+null-policy application and assessment. It operates within cost and latency bounds using bounded
+parallelism across independent amenities and metrics, and produces factual values only - it performs
+no requirement interpretation (R1), no amenity discovery or baseline profiling (R2), and no scoring
+or assessment (the later responsibility).
+
+## Workflow - Responsibility-3: Specific Metric Resolution
+
+1. Resolve each eligible amenity's official website before the loop (R3.M1.3).
+2. Phase 1: web-search every LLM-defined metric, then triage each metric sufficient/unresolved
+   (R3.M1.4).
+3. Phase 2 (only for unresolved metrics with a website): map -> select -> scrape (R3.M1.4), with
+   evidence shaped into the per-metric `metrics_source_content` store (R3.M1.2).
+4. Resolve each metric from its evidence: verification gate, value-type/enum conformance, and
+   provenance check against the retrieved evidence (R3.M2.2 - R3.M2.4).
+5. Combine the per-amenity `SpecificMetricsRecord`s with R2's `PredefinedMetricsRecord`s into the
+   versioned `AmenityMetricsSet` (R3.M2.5).
+
+## Mechanisms of Responsibility-3
+
+- **R3.M1 - Evidence Acquisition** (stages R3.M1.1 - R3.M1.5): tool catalog + call guard, tool-result
+  shaping, website discovery, phase loop + triage, work-item planning + amenity pipelines.
+- **R3.M2 - Resolution** (stages R3.M2.1 - R3.M2.5): resolution schema + instruction, resolution turn
+  + body validation, conform + verification gate, provenance verification, combine -> AmenityMetricsSet.
+
+Full component and sub-component specs (including carried-forward open decisions) live in
+`R3_Specific_Metric_Resolution_spec.md`. The component detail below is retained as R3's mechanism
+specification.
+
+---
+
+# R3 mechanism detail (promoted from R2 Mechanism 3): LLM-driven tool resolution (component level)
 
 
 ## Component C3.1: Multi-Source Evidence Acquisition (LLM-Driven Tool Loop)
@@ -2747,6 +2859,18 @@ Locked decisions carried in and not reopened:
 
 Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema change that gives every LLM-defined metric both sources (RC10).
 
+### Open decisions carried forward (R3 promotion)
+
+This mechanism is being promoted to its own responsibility, **R3 — Specific Metric Resolution**
+(see `R3_Specific_Metric_Resolution_proposal.md`). The promotion closes **none** of the
+sub-component decisions still open; each remains open at its sub-component:
+
+- **C3.1.5 — postal-code degrade path:** inject the postal code into the objective deterministically (hard grounding) vs instruct the LLM (soft); plus the `postal code → locality/city → name-only` degrade when Google returns no postal code. Unchanged by the split.
+- **C3.2.2 — resolution body validation:** whole-body reject vs per-entry vs hand-written dict validator (default favours whole-body reject).
+- **C3.2.3 — value conformer:** ordered guard functions vs dynamic per-metric Pydantic model vs table-driven registry.
+- **C3.2.4 — provenance match:** normalized substring vs fuzzy vs span references (draft decisions describe substring).
+- **ID-rename (planned task, not a reopened decision):** on promotion the `C3.x` sub-component IDs are renamed to the R3 mechanism IDs — evidence acquisition → `R3.M1.x`, resolution → `R3.M2.x` — as a mechanical sweep before implementation, so references stay consistent across this doc and `R2_Mechanism_3_draft_spec.md`.
+
 ### Research that shapes the sub-components
 
 - **Parallel Search MCP.** `web_search` takes `objective` (string), `search_queries` (3 to 6 word queries, at least one, 2 to 3 recommended, operators allowed) and an optional `session_id` (up to 100 characters, reused within a conversation). A bearer key goes in the `Authorization` header.
@@ -2859,18 +2983,18 @@ Problem-context-specific decisions:
 
 ### Goal of Component
 
-For each phase, the LLM receives only the function tools valid in that phase: `web_search` in phase 1 and `firecrawl_crawl` in phase 2. Every tool call the LLM returns passes a guard before it reaches the gateway. The guard checks the tool name, validates arguments, attributes the call to a metric, and sets every argument the application controls.
+Application-owned context selects the permitted function tools: `web_search` for discovery and metric searches, and `firecrawl_map` then `firecrawl_scrape` for Phase 2. The generic guard validates the entire proposed tool-call message against the exact offered catalog and applicable additional validators before any call reaches the gateway. Downstream preparation attributes admitted calls to metrics where applicable and sets application-controlled arguments.
 
 ### Problem It Aims to Solve
 
-- The MCP tool schemas let the caller set fields such as crawl `limit`, `maxDiscoveryDepth` and `allowExternalLinks`. The application must control these.
+- The MCP tool schemas let the caller set fields such as map/scrape `url` and scrape settings. The application must control these.
 - Phase order is enforced by the application. An instruction alone does not stop the LLM from calling a tool from the wrong phase.
 - Evidence must be attributed to a metric so the application can check that all metrics are covered. The MCP `web_search` schema has no metric field.
 - Groq does not enforce function argument schemas, so arguments must be validated in code.
 
 ### Finalized Approach
 
-**Derived with controlled fields removed.** Function schemas are built from the MCP schemas, with application-controlled fields removed from the exposed schema. The code injects those fields and adds `metric_label`.
+**Derived with controlled fields removed.** Function schemas are built from the MCP schemas using context-specific field allowlists. Metric evidence contexts add `metric_label`; website discovery does not. The guard validates proposed calls without modifying arguments. Application-controlled fields are injected during downstream admitted-call preparation.
 
 ### Steps of sub-component
 
@@ -2958,44 +3082,156 @@ Example invocation: website discovery
 | What to preserve | Preserve permitted fields' types, descriptions, and compatible constraints. Apply application rules explicitly. |
 | What if the raw schema conflicts with our expectations? | Fail catalog construction before making an LLM call, with a clear error—for example, if `search_queries` is missing or has a type incompatible with the guard or execution interface. Do not silently invent a replacement schema. |
 | How to handle schema dependencies | Preserve references needed by retained fields and their required `$defs`, including transitive dependencies; do not inline referenced definitions. Remove schema references or requirements that depend on excluded fields, where safe. Validate that retained references resolve. If safe transformation or reference preservation is unsupported, fail explicitly before making an LLM call. |
-| What counts as a valid query? | Require at least one nonblank string. `minItems: 1` alone still permits `[""]`; the guard must reject blank or whitespace-only queries. Catalog construction defines the constraints; the separate guard step checks actual argument values. |
+| What counts as a valid query? | Require at least one string through the discovery schema. Do not introduce blank-string or whitespace-only checks. The generic guard validates the offered schema without modifying values. |
 
 For every context, the output is the Chat Completions function-tool list already accepted by C3.1.2 (`tools: list[dict]`), not the raw MCP definition format. Its selected tools and schemas vary by context. The discovery catalog (catalog of websearch for website discovery) has no `metric_label`; the metric-label requirements below apply to metric evidence acquisition.
 
-### Critical Decision Choices
+#### Guard Proposed Calls
 
-Generally mandatory decisions:
-- **LLM-settable fields.** For `web_search`: `objective`, `search_queries` and `metric_label`. For `firecrawl_crawl`: only a start URL and an optional `metric_label` list.
-- **Guard failure handling.** An invalid call is returned to the LLM as a `tool` message with the error text. It is not executed, and it does not count against the call cap, because it never hits the gateway. The run continues (D5). A guard rejection is still a failed attempt, so the one retry for that metric (phase 1) or that amenity's crawl (phase 2) remains allowed.
-- **Unexposed tools.** Every MCP tool on either server other than `web_search` and `firecrawl_crawl` is never exposed.
+Reusable Step 2 of C3.1.3. Validate the entire LLM tool-call message against the exact catalog supplied for that turn and applicable application checks. Tool names, schemas, and additional validators are supplied separately; the guard is not specific to website discovery or any particular tool.
 
-Problem-context-specific decisions:
-- **Query rules in the tool description.** Concise related keyword queries of 3 to 6 words, at least one per call, 2 to 3 diverse queries recommended, search operators allowed. The guard rejects a call with no queries.
-- **metric_label rule.** It must belong to the amenity's metric set. It is removed before the MCP call. A label outside the set is rejected.
-- **Crawl clamps.** The start URL must be on the resolved website's host. `limit` and `maxDiscoveryDepth` are fixed configurable values. `allowExternalLinks` is false. The guard overrides any value the LLM supplies.
-- **Caps.** The phase loop (C3.1.6) enforces one real attempt plus one retry. The guard does not. The cap counts only MCP calls that hit the gateway. Phase 1 is one `web_search` plus one retry per metric, because each search targets one metric. Phase 2 is one `firecrawl_crawl` plus one retry per amenity, of that single site crawl, not per metric. The retry is allowed only when attempt 1 failed, timed out, or was guard-rejected. A successful attempt 1 is not retried, including when metrics remain unresolved. A crawl timeout that C3.1.1 recovers by re-reading the same job is still attempt 1. The worst case is bounded by construction: up to two gateway searches per metric and up to two gateway crawls per amenity, and a guard rejection spends neither.
-- **Phase 2 availability.** The crawl tool is offered only when a URL exists and at least one metric is unresolved.
+Accept only a message containing at least one call where every call passes. Any validation error rejects the entire message; no valid sibling calls are admitted independently.
 
+##### Input params
 
+| Param name | Format / type | Source and purpose |
+|---|---|---|
+| `proposed_tool_calls` | Ordered sequence of calls with `id`, tool `name`, and `arguments` as a JSON string. | Extracted from the assistant response returned through C3.1.2 and passed by the caller. Empty sequences are rejected. |
+| `tool_catalog` | `list[dict[str, Any]]` in C3.1.2 function-tool format. | Exact catalog offered for this turn; defines permitted tool names and argument schemas. Raw MCP definitions are not needed again. |
+| `context` | Application-owned context value; always supplied. | Caller selects the context used to choose applicable additional validators. |
+| `validation_context` | Caller-provided runtime reference data or `None`. | Supplies facts for additional validators. `None` skips checks requiring that data; an empty dictionary is supplied data, not `None`. |
 
+Tool name and call ID are outer call fields, not arguments. Field nesting follows the response adapter's format. Each call needs a unique tool-call ID within the message, even when several calls use the same tool.
 
+##### Process flow of step
 
+```text
+GUARD PROPOSED CALLS — C3.1.3
+══════════════════════════════════════════════════════════════════════
 
+ BEFORE
+ Build LLM-Facing Tool Catalog produced the offered catalog.
+ The caller supplied it through C3.1.2 and received the response.
+ No proposed call has executed.
+   |
+   | proposed_tool_calls + tool_catalog + context + validation_context
+   v
+ +-- GENERIC CALL GUARD --------------------------------------------+
+ | 1. No calls: record no_tool_calls (category: null).               |
+ | 2. Check required outer fields and unique tool-call IDs.         |
+ |    Missing fields / duplicate IDs: invalid_call_structure.       |
+ | 3. Match tool name exactly against the supplied catalog.         |
+ |    Tool absent: out_of_catalog.                                 |
+ | 4. Decode each permitted tool's argument JSON string.            |
+ |    Malformed JSON: in_catalog / invalid_argument_json.           |
+ | 5. Validate decoded arguments against that tool's schema.        |
+ |    Schema failure: in_catalog.                                  |
+ | 6. If validation_context is not None, invoke the applicable      |
+ |    separate tool validator after prerequisite checks pass.      |
+ |    Application-validation failure: in_catalog.                  |
+ | 7. Collect all detectable errors across all calls.               |
+ |    Dependent checks require successful prerequisites.           |
+ |    Preserve identifiers where available and argument values.    |
+ | 8. Any error: REJECT entire message; admit no calls.             |
+ |    At least one call and no errors: ACCEPT all calls in order.   |
+ +----------------------------------------------------------------+
+   |
+   +-- REJECTED -> Step 3: Prepare rejection outcomes
+   |              Step 4: Sanitize replay history, where required
+   +-- ACCEPTED -> Step 5: Prepare admitted tool calls
 
+ EXIT: no tool execution, history mutation, or retry decisions.
+```
 
+##### Agreed decisions for the traceflow — critical decision factors
 
+| Decision factor | Agreed rule |
+|---|---|
+| Authoritative catalog | Use the exact catalog offered for the turn. Match names exactly; infer no aliases and hardcode no tools. |
+| Call structure and identity | Missing required outer fields, including names or IDs, and duplicate tool-call IDs produce `invalid_call_structure`. Use call position when IDs are missing or ambiguous. |
+| Argument decoding | Arguments consistently arrive as JSON strings. Decode before validation. For a permitted tool, malformed JSON produces `in_catalog` with reason `invalid_argument_json`. |
+| Schema validation | Each tool's supplied schema determines required fields, allowed fields, types, and decoded argument structure. Do not hardcode argument names or silently repair or coerce values. |
+| Blank strings | No dedicated empty-string or whitespace-only checks; remove the previously proposed blank-objective and blank-query checks. |
+| Normalization | Preserve accepted values; do not trim, deduplicate, or otherwise normalize arguments. |
+| Additional limits | Introduce no separate query-count, text-length, or call-count policy here. Validate the supplied schema as offered. |
+| Multiple calls and empty messages | Accept only a nonempty message whose calls all pass. Any error or no calls rejects the entire message; no sibling calls proceed. |
+| Rejection classification | Absent tool: `out_of_catalog`. Permitted tool's decoding, schema, or application-validation failure: `in_catalog`. Missing outer fields or duplicate IDs: `invalid_call_structure`. No calls: category `null`. |
+| Error reporting | Collect all detectable errors, not only the first; continue inspecting other calls. Skip checks whose prerequisites failed. Step 3 constructs rejection outcomes. |
+| Validation authority | Caller always supplies `context`. Separate tool validators interpret optional runtime `validation_context`; select by tool name and context as needed. `None` skips data-dependent checks. |
+| Execution readiness | Passing means satisfying the offered schema and applicable application checks. Gateway availability and execution failures remain downstream concerns. |
 
+##### Additional validator contract
 
+```python
+validate(arguments, validation_context) -> list[ValidationIssue]
+```
 
+Select a separate validator by tool name and context as applicable. Invoke it when `validation_context` is not `None` and prerequisites pass. An empty returned list means success; returned issues become `in_catalog` errors with call metadata attached by the guard. A tool needing no additional checks requires no custom validator. Schemas check structure and types; separate validators can check values against caller-provided runtime facts such as available identifiers. These examples are not built-in guard requirements.
 
+##### Output and error contract
 
+Return one message-level decision:
 
+| Decision | Returned information |
+|---|---|
+| `accepted` | `validated_calls`: all calls in original order, each containing `tool_call_id`, `tool_name`, and decoded, validated `arguments`; `errors: []`. |
+| `rejected` | `validated_calls: []`; `errors`: all detected validation failures. No calls admitted. |
 
+Decoded and validated describe the same returned arguments object, not separate fields.
 
+| Error field | Meaning |
+|---|---|
+| `reason_code` | Stable failure identifier, e.g. `invalid_argument_json` or `no_tool_calls`. |
+| `explanation` | Concise readable description. |
+| `call_index` | Zero-based call position; `null` for message-level errors. |
+| `tool_call_id` | ID where available; otherwise `null`. |
+| `tool_name` | Name where available; otherwise `null`. |
+| `category` | `out_of_catalog`, `in_catalog`, or `invalid_call_structure`; `null` for no calls. |
+| `field_path` | Error location where applicable, e.g. `arguments.candidate_id`; otherwise `null`. |
 
+Schema validators provide error locations; separate validators explicitly return locations for their issues. Do not infer paths from explanation text. Call position disambiguates missing or duplicate IDs. An empty-call error uses `reason_code: "no_tool_calls"` with call fields, category, and field path set to `null`.
 
+```json
+{
+  "decision": "rejected",
+  "validated_calls": [],
+  "errors": [{
+    "reason_code": "invalid_argument_type",
+    "explanation": "candidate_id must be a string.",
+    "call_index": 0,
+    "tool_call_id": "call_123",
+    "tool_name": "example_tool",
+    "category": "in_catalog",
+    "field_path": "arguments.candidate_id"
+  }]
+}
+```
 
+##### Immediately preceding step and downstream ownership
 
+Build LLM-Facing Tool Catalog precedes this step. The caller sends that catalog and its instructions through C3.1.2, then supplies the response's proposed calls and the same catalog to this guard. Step 3 builds rejection outcomes; Step 4 performs required replay cleanup; Step 5 prepares tool calls only after whole-message acceptance. The guard does not construct final tool error messages, mutate history, inject execution arguments, execute tools, or decide retries.
+
+This Step 2 contract supersedes older per-call admission, blank-query, and normalization/cap responsibilities attributed to the guard. Existing execution budgets and application-controlled argument preparation belong to surrounding orchestration or later preparation, not this generic validation step. History handling for structural errors without usable unique IDs must be specified in the downstream steps; do not invent matching IDs here.
+
+**Decisions — generally mandatory**
+
+Status labels identify changes resulting from the finalized catalog-building and guard steps. **Unchanged** highlights existing policies unaffected by those steps.
+
+- **Updated — Catalog construction and validation authority.** Build a restricted copy of the raw MCP schema using an explicit field allowlist selected by application-owned context. Preserve permitted types, descriptions, compatible constraints, and required references with their transitive `$defs`; do not inline definitions or mutate the raw schema. Fail before the LLM call if the selected server/tool is missing or the schema cannot be safely transformed. Return C3.1.2-compatible function tools. The guard uses the exact catalog offered for that turn, matches names exactly, and does not need raw definitions again. Context-specific field lists are recorded below.
+- **Added — Generic guard contract.** Require a nonempty tool-call message with required outer fields and unique call IDs. Decode argument JSON strings and validate against each offered schema without coercion, repair, normalization, dedicated blank-string checks, or additional limits. Collect all detectable errors, skipping dependent checks when prerequisites fail. Accept all calls in original order only if every call passes; otherwise reject the entire message and return no admitted calls. Report stable reasons, available call metadata, call positions, and explicit field paths. Missing fields or duplicate IDs are `invalid_call_structure`; no calls produces `no_tool_calls` with category `null`.
+- **Added — Additional validation and ownership.** The caller always supplies `context`. Separate validators selected by tool and context check runtime facts when `validation_context` is not `None` and prerequisites pass; an empty dictionary is supplied data. `None` skips data-dependent checks. The guard returns decisions only. Step 3 constructs rejection outcomes, Step 4 sanitizes replay history, and Step 5 prepares admitted calls. Execution argument injection, deduplication, execution ceilings, gateway execution, and retry decisions belong downstream or to orchestration.
+- **Updated — Guard failure handling.** Any validation error rejects the whole message, including otherwise valid sibling calls; none reaches the gateway or consumes a gateway-call cap. Step 3 must prepare matching outcomes for calls with usable unique IDs, including siblings withheld by message rejection. Handling structural errors without usable unique IDs and empty messages remains to be specified downstream; do not invent IDs or misclassify valid siblings as argument failures. Existing workflow retry allowances remain caller-owned, and the guard does not assign per-metric retries for malformed or mixed messages. For identifiable rejected calls, preserve the distinction:
+  - *In-catalog rejection* — decoding, schema, or applicable application-validation failure for an exposed tool. Preserve the assistant call and its paired error response in replay history.
+  - *Out-of-catalog rejection* — a tool absent from the exact offered catalog. Step 4 removes that call and its paired response before replay, preserving unrelated messages. This retains the existing Groq compatibility policy for both providers.
+- **Unchanged — Unexposed tools.** MCP tools outside the selected context's allowlist remain unexposed. `firecrawl_crawl` is retained in the gateway but never exposed to the LLM.
+
+**Decisions — problem-specific**
+- **Updated — LLM-settable fields by context.** `website_discovery` selects `parallel` / `web_search` and exposes only required `objective` and `search_queries`, with at least one string query and no additional arguments; it has no `metric_label`. `metric_web_search` exposes `objective`, `search_queries`, and `metric_label`. `site_map` selects `firecrawl_map` with no LLM-settable arguments. `metric_scrape` selects `firecrawl_scrape` with candidate `id` and required `metric_label`(s), allowing multiple labels; URL and scrape settings remain application-owned. Discovery catalog construction takes raw definitions and context, not amenity identity, queries, labels, or history.
+- **Updated — Query rules in the tool description.** Concise related keyword queries 3–6 words, ≥1 per call, 2–3 diverse recommended, operators allowed. The guard enforces the offered schema's minimum of one string query. Word count and diversity remain instructions; introduce no dedicated blank-objective or blank-query checks and do not trim or deduplicate accepted values.
+- **Updated — `metric_label` rule.** Applies to metric evidence contexts only, never website discovery. Required label structure is expressed in the offered schema. A separate validator checks membership in the amenity's metric set using caller-supplied runtime data; an invalid label rejects the entire message. Under the generic contract, `validation_context=None` skips this data-dependent check, so callers requiring membership validation must supply that data. Labels are removed during admitted-call preparation before MCP execution.
+- **Unchanged — Scrape / map clamps (map→scrape model).** `firecrawl_map`'s `url` is **app-injected** (the resolved official homepage from `website_search_results`, C3.1.5). `firecrawl_scrape`'s `url` is **app-resolved from the LLM's `id`** against the map candidate list. The LLM supplies **no** URL in either tool, so the draft's host-clamp (host normalization / netloc comparison) is **removed** — there is no LLM-supplied host to validate. The LLM decides *when* to scrape and *which page* (by `id`, D1) and tags each scrape with its `metric_label`(s); the app fills everything else.
+- **Updated — Caps and preparation ownership; budget values unchanged.** The phase loop (C3.1.6) enforces attempt budgets. The guard validates required label structure through the schema and candidate/label membership through supplied additional validators; URL resolution, URL deduplication, and the 8-distinct-scrape ceiling belong to downstream preparation/orchestration. The cap counts only MCP calls that hit the gateway. Phase 1: one `web_search` + one retry per metric. Phase 2: one `firecrawl_map` (+ one retry), then **one `firecrawl_scrape` per unresolved metric, deduped by URL to ≤ 8 distinct scrapes per amenity**, each scrape + one retry. Retry allowed only when attempt 1 failed, timed out, or was guard-rejected, subject to caller attribution of the rejected message. A successful attempt 1 is not retried even if metrics remain unresolved. Worst case bounded: ≤2 gateway searches per metric; ≤ (1 map + 8 scrapes) × 2 gateway Firecrawl calls per amenity; a rejected message consumes neither gateway budget. The generic guard introduces no separate call-count limit.
+- **Unchanged — Phase 2 availability.** The `firecrawl_map` / `firecrawl_scrape` tools are offered only when a URL exists AND ≥1 metric is unresolved.
 
 ## M4 — Output: Null Policy & Structured Assembly
 ### Component C4.1 — Null‑Policy & Completeness Enforcement
