@@ -42,11 +42,12 @@ class Settings(BaseSettings):
         validation_alias="LLM_PROVIDER_ORDER",
     )
 
-    # R2 Mechanism 3 C3.1.1 — MCP tool gateway (Parallel web_search, Firecrawl crawl).
-    # Keys are optional: a keyless Parallel works at a lower anonymous limit, and a keyless
-    # Firecrawl is detected by the gateway's capability check (its crawl tool is absent). Leaving
-    # both unset keeps every existing M1 run and test working, since the gateway opens nothing at
-    # construction time.
+    # R2 Mechanism 3 C3.1.1 — MCP tool gateway (Parallel web_search, Firecrawl map and scrape).
+    # Keys are optional in Settings: a keyless Parallel works at a lower anonymous limit. Firecrawl
+    # needs a key to run M3: per its 3.29.1 changelog the hosted endpoint no longer serves keyless
+    # requests (401), so without one the gateway cannot open the session and open() raises
+    # McpConnectionError. Not verified against the live endpoint. Leaving both unset keeps every
+    # existing M1 run and test working, since the gateway opens nothing at construction time.
     parallel_api_key: str | None = Field(
         default=None,
         validation_alias="PARALLEL_API_KEY",
@@ -62,6 +63,13 @@ class Settings(BaseSettings):
     firecrawl_mcp_url: str = Field(
         default="https://mcp.firecrawl.dev/v2/mcp",
         validation_alias="FIRECRAWL_MCP_URL",
+    )
+    # The page the gateway maps and scrapes once at open() to confirm Firecrawl returns the MCP
+    # server 3.x JSON output shape. No amenity URL exists yet at that point, so this is a fixed,
+    # stable page.
+    firecrawl_probe_url: str = Field(
+        default="https://example.com",
+        validation_alias="FIRECRAWL_PROBE_URL",
     )
 
     @property

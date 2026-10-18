@@ -1,10 +1,9 @@
 """Gateway-level failures for R2 Mechanism 3 Component C3.1.1 (MCP tool gateway).
 
-Only two conditions raise out of the gateway: it cannot connect a server session, and a required
-tool or argument is missing at connect. Everything a single tool call can do wrong degrades to a
-returned `ToolFailure` (see `clients.mcp_tools`) so one failed call never aborts a gather. Each
-exception carries the `stage` it exited from, matching the stage convention used across
-`exceptions.deep_search`.
+Setup failures (connection/listing, missing required capabilities or invalid definition shapes)
+raise this family. Definition access outside a successfully open session raises McpConnectionError
+with stage="get_tool_definitions". Per-call execution failures return ToolFailure. The former
+connection-time shape probe has been removed; response parsing failures are per-call failures.
 """
 
 from typing import ClassVar
@@ -26,19 +25,20 @@ class McpGatewayError(Exception):
 
 
 class McpConnectionError(McpGatewayError):
-    """Raised when a server session cannot be started, or a capability read cannot reach it.
+    """Raised when setup cannot reach a server or definitions are unavailable for this lifecycle.
 
     A timeout on an in-flight tool call is NOT this: that is our side giving up on one wait, and
     the open session stays in use. This is only a genuine failure to establish or query a session.
+
+    A missing or refused Firecrawl key surfaces here: per Firecrawl's 3.29.1 changelog the hosted
+    endpoint no longer serves keyless requests and answers 401, so the session cannot open
+    (`stage="open"`). Not verified against the live endpoint.
     """
 
     stage: ClassVar[str] = "open"
 
 
 class McpToolUnavailableError(McpGatewayError):
-    """Raised when a required tool, or a required argument of one, is absent from a server catalog.
-
-    A keyless Firecrawl lacks the crawl tool, so this also surfaces a missing key at connect time.
-    """
+    """Required tool/argument or valid input-schema mapping missing during capability checks."""
 
     stage: ClassVar[str] = "verify_capabilities"

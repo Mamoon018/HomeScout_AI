@@ -19,6 +19,8 @@ from src.clients.llm_provider import (
     StructuredLLMCaller,
     ToolCall,
     _build_assistant_turn,
+    _decode_body,
+    _read_first_choice,
 )
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import (
@@ -91,14 +93,14 @@ def _turn(provider="openai", *, content=None, tool_calls=()):
     )
 
 
-def _sdk_response(*, content=None, tool_calls=None, finish_reason="stop"):
+def _sdk_response(*, content=None, tool_calls=None, finish_reason="stop", refusal=None):
     raw_calls = None
     if tool_calls is not None:
         raw_calls = [
             SimpleNamespace(id=cid, function=SimpleNamespace(name=name, arguments=args))
             for cid, name, args in tool_calls
         ]
-    message = SimpleNamespace(content=content, tool_calls=raw_calls)
+    message = SimpleNamespace(content=content, tool_calls=raw_calls, refusal=refusal)
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice])
 
@@ -314,6 +316,109 @@ async def test_call_structured_does_not_fall_back_on_returned_body():
     assert body == {"unexpected": True}
     assert answered_by == "openai"
     assert p1._bodies == [{"never": True}]  # untouched
+
+
+# --- M1: structured-path refusal / finish_reason fallback -------------------
+
+
+def test_decode_body_rejects_refusal():
+    # A decline carries decodable content; the refusal, not the body, drives the rejection.
+    with pytest.raises(LLMProviderError):
+        _decode_body(
+            provider="openai",
+            model="m",
+            content='{"ok": 1}',
+            finish_reason="stop",
+            refusal="I can't help with that.",
+        )
+
+
+def test_decode_body_rejects_content_filter():
+    with pytest.raises(LLMProviderError):
+        _decode_body(
+            provider="openai",
+            model="m",
+            content='{"ok": 1}',
+            finish_reason="content_filter",
+        )
+
+
+def test_decode_body_accepts_clean_stop_no_over_reach():
+    # Same decodable content as the rejection cases; a clean stop with no refusal succeeds,
+    # proving the check is refusal/finish_reason-driven, not content-driven.
+    body = _decode_body(
+        provider="openai",
+        model="m",
+        content='{"ok": 1}',
+        finish_reason="stop",
+        refusal=None,
+    )
+    assert body == {"ok": 1}
+
+
+def test_read_first_choice_surfaces_refusal():
+    response = _sdk_response(content='{"ok": 1}', finish_reason="stop", refusal="declined")
+    content, finish_reason, refusal = _read_first_choice(response)
+    assert content == '{"ok": 1}'
+    assert finish_reason == "stop"
+    assert refusal == "declined"
+
+
+class _DecodingProvider:
+    """Routes a queued SDK response through the real _read_first_choice + _decode_body,
+    so a refusal / abnormal finish_reason becomes an LLMProviderError the way a real adapter would.
+    """
+
+    def __init__(self, name, *, responses):
+        self.name = name
+        self.model = f"{name}-model"
+        self._responses = list(responses)
+        self.close_count = 0
+
+    async def generate_structured(self, *, instruction, user_content, json_schema, schema_name):
+        response = self._responses.pop(0)
+        content, finish_reason, refusal = _read_first_choice(response)
+        return _decode_body(
+            provider=self.name, model=self.model,
+            content=content, finish_reason=finish_reason, refusal=refusal,
+        )
+
+    async def aclose(self):
+        self.close_count += 1
+
+
+async def test_call_structured_falls_back_on_refusal_then_answers():
+    p0 = _DecodingProvider("openai", responses=[
+        _sdk_response(content='{"ok": 0}', finish_reason="stop", refusal="declined"),
+    ])
+    p1 = _DecodingProvider("groq", responses=[
+        _sdk_response(content='{"ok": 1}', finish_reason="stop"),
+    ])
+    caller = StructuredLLMCaller([p0, p1])
+
+    body, answered_by = await caller.call_structured(
+        instruction="i", user_content="u", json_schema={}, schema_name="s",
+        stage=STAGE, provider_error_cls=MetricResolutionProviderError,
+    )
+    assert body == {"ok": 1}
+    assert answered_by == "groq"
+
+
+async def test_call_structured_all_refuse_raises_typed():
+    p0 = _DecodingProvider("openai", responses=[
+        _sdk_response(content='{"ok": 0}', finish_reason="stop", refusal="declined"),
+    ])
+    p1 = _DecodingProvider("groq", responses=[
+        _sdk_response(content='{"ok": 0}', finish_reason="content_filter"),
+    ])
+    caller = StructuredLLMCaller([p0, p1])
+
+    with pytest.raises(MetricResolutionProviderError) as exc:
+        await caller.call_structured(
+            instruction="i", user_content="u", json_schema={}, schema_name="s",
+            stage=STAGE, provider_error_cls=MetricResolutionProviderError,
+        )
+    assert exc.value.stage == STAGE
 
 
 # --- lifecycle --------------------------------------------------------------

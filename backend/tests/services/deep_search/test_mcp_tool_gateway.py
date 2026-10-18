@@ -1,26 +1,46 @@
 """Offline fixtures for R2 Mechanism 3 Component C3.1.1 (MCP tool gateway).
 
 No network and no keys: each test wires an in-process `MCPServer` into the gateway through the
-client factory seam, so the real gateway code paths (owner tasks, capability check, retry, timeout,
-parsing, concurrency, close) run against a fake server on the event loop.
+client factory seam, so the real gateway code paths (owner tasks, capability check, shape probe,
+retry, timeout, parsing, concurrency, close) run against a fake server on the event loop.
+
+Because `open()` probes Firecrawl once (one map and one scrape of the probe URL), every Firecrawl
+fixture serves MCP server 3.x JSON-shaped map and scrape bodies by default. A handler that fails on purpose is
+wrapped with `_except_probe` so the probe still passes and only the page under test fails.
 """
 
 import asyncio
+import json
 import logging
+import socket
+import threading
+import time
 
+import httpx2
 import pytest
+import uvicorn
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.shared.exceptions import MCPError
+from mcp.types import CallToolResult, TextContent
 
 from src.clients import mcp_tools
 from src.clients.mcp_tools import (
     CrawlResult,
+    MapResult,
     McpServerConfig,
     McpToolGateway,
+    ScrapeResult,
+    ScrapeResults,
     ToolFailure,
     WebSearchResult,
+    _classify_failure,
+    _parse_map_result,
+    _parse_scrape_result,
+    create_mcp_tool_gateway,
 )
+from src.core.config import Settings
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.mcp import McpConnectionError, McpToolUnavailableError
 
@@ -33,11 +53,37 @@ def _static(value):
     return handler
 
 
+_PROBE_URL = "https://example.com"
 _DEFAULT_SEARCH_BODY = {"results": [{"url": "http://a", "title": "A", "text": "body"}]}
 _DEFAULT_CRAWL_PAGES = {
     "status": "completed",
     "data": [{"url": "http://p/1", "title": "P1", "markdown": "page one"}],
 }
+_DEFAULT_MAP_BODY = {
+    "links": [{"url": "https://example.com/a", "title": "A", "description": "page a"}]
+}
+_DEFAULT_SCRAPE_BODY = {"markdown": "page text", "metadata": {"sourceURL": _PROBE_URL}}
+_DEFAULT_BATCH_START = {"id": "batch-1"}
+_DEFAULT_BATCH_STATUS = {
+    "status": "completed",
+    "total": 2,
+    "completed": 2,
+    "data": [
+        {"markdown": "page one", "metadata": {"sourceURL": "https://x.test/1"}},
+        {"markdown": "page two", "metadata": {"sourceURL": "https://x.test/2"}},
+    ],
+}
+
+
+def _except_probe(handler, default):
+    """Answer the connect-time probe URL with `default`; send every other URL to `handler`."""
+
+    async def wrapped(url, *rest):
+        if url == _PROBE_URL:
+            return default
+        return await handler(url, *rest)
+
+    return wrapped
 
 
 # ------------------------------------------------------------------------------------- servers
@@ -63,12 +109,38 @@ def _firecrawl_server(
     crawl_handler=None,
     status_handler=None,
     *,
+    map_handler=None,
+    scrape_handler=None,
+    batch_handler=None,
+    batch_status_handler=None,
     include_crawl: bool = True,
     include_status: bool = True,
+    include_map: bool = True,
+    include_scrape: bool = True,
+    include_batch: bool = True,
+    include_formats_arg: bool = True,
 ) -> MCPServer:
+    """In-process Firecrawl. Every tool is toggleable; map and scrape default to 3.x JSON bodies."""
     server = MCPServer(name="firecrawl-srv")
     crawl_handler = crawl_handler or _static({"id": "job-1"})
     status_handler = status_handler or _static(_DEFAULT_CRAWL_PAGES)
+    map_handler = map_handler or _static(_DEFAULT_MAP_BODY)
+    scrape_handler = scrape_handler or _static(_DEFAULT_SCRAPE_BODY)
+    batch_handler = batch_handler or _static(_DEFAULT_BATCH_START)
+    batch_status_handler = batch_status_handler or _static(_DEFAULT_BATCH_STATUS)
+    if include_batch:
+
+        @server.tool()
+        async def firecrawl_batch_scrape(
+            urls: list[str], formats: list[str], onlyMainContent: bool = True,  # noqa: N803
+            maxConcurrency: int = 2,  # noqa: N803
+        ) -> dict:
+            return await batch_handler(urls, formats, onlyMainContent, maxConcurrency)
+
+        @server.tool()
+        async def firecrawl_check_batch_scrape_status(id: str, skip: int = 0) -> dict:  # noqa: A002
+            return await batch_status_handler(id, skip)
+
     if include_crawl:
 
         @server.tool()
@@ -83,11 +155,52 @@ def _firecrawl_server(
         async def firecrawl_check_crawl_status(id: str) -> dict:  # noqa: A002
             return await status_handler(id)
 
+    if include_map:
+
+        @server.tool()
+        async def firecrawl_map(url: str) -> dict:
+            return await map_handler(url)
+
+    if include_scrape:
+        if include_formats_arg:
+
+            @server.tool()
+            async def firecrawl_scrape(
+                url: str, formats: list[str], onlyMainContent: bool = True  # noqa: N803
+            ) -> dict:
+                return await scrape_handler(url, formats, onlyMainContent)
+
+        else:
+
+            @server.tool()
+            async def firecrawl_scrape(url: str) -> dict:  # noqa: F811
+                return await scrape_handler(url, None, None)
+
     return server
 
 
 # ------------------------------------------------------------------------------------- factory
-def _factory(targets: dict, counter: list | None = None):
+class _FlakyClient:
+    """Wraps a connected `Client` and raises the queued exceptions on `call_tool`.
+
+    Models the network edge (a dropped connection) that an in-process server cannot produce. Only
+    `call_tool` is flaky; the capability listing passes straight through.
+    """
+
+    def __init__(self, inner: Client, failures: list[BaseException]) -> None:
+        self._inner = inner
+        self.failures = list(failures)
+
+    async def list_tools(self, **kwargs):
+        return await self._inner.list_tools(**kwargs)
+
+    async def call_tool(self, name, arguments, **kwargs):
+        if self.failures:
+            raise self.failures.pop(0)
+        return await self._inner.call_tool(name, arguments, **kwargs)
+
+
+def _factory(targets: dict, counter: list | None = None, flaky: dict | None = None):
     """Build a client factory mapping config.name → an MCPServer, or an Exception to raise on open."""
     from contextlib import asynccontextmanager
 
@@ -100,7 +213,10 @@ def _factory(targets: dict, counter: list | None = None):
             if isinstance(target, BaseException):
                 raise target
             async with Client(target) as client:
-                yield client
+                if flaky and config.name in flaky:
+                    yield _FlakyClient(client, flaky[config.name])
+                else:
+                    yield client
 
         return cm()
 
@@ -114,20 +230,27 @@ def _gateway(
     parallel_timeout: float = 5.0,
     firecrawl_timeout: float = 5.0,
     search_concurrency: int = 4,
-    crawl_concurrency: int = 2,
+    firecrawl_concurrency: int = 2,
+    firecrawl_rate_per_minute: int = 10_000,
+    probe_url: str = _PROBE_URL,
     api_key: str | None = None,
     factory_counter: list | None = None,
+    flaky: dict | None = None,
 ) -> McpToolGateway:
+    # Default the A7 per-minute bucket effectively unlimited so a multi-call test is not paced by
+    # real time; the bucket's pacing is covered directly by the `_TokenBucket` unit test.
     parallel = McpServerConfig("parallel", "http://parallel", api_key, parallel_timeout)
     firecrawl = McpServerConfig("firecrawl", "http://firecrawl", api_key, firecrawl_timeout)
     factory = _factory(
-        {"parallel": parallel_target, "firecrawl": firecrawl_target}, factory_counter
+        {"parallel": parallel_target, "firecrawl": firecrawl_target}, factory_counter, flaky
     )
     return McpToolGateway(
         parallel,
         firecrawl,
         search_concurrency=search_concurrency,
-        crawl_concurrency=crawl_concurrency,
+        firecrawl_concurrency=firecrawl_concurrency,
+        firecrawl_rate_per_minute=firecrawl_rate_per_minute,
+        firecrawl_probe_url=probe_url,
         client_factory=factory,
     )
 
@@ -144,6 +267,23 @@ def no_wait(monkeypatch):
     return waits
 
 
+@pytest.fixture
+def short_wait(monkeypatch):
+    """Like `no_wait` but yields real (10 ms) time, for loops bounded by a real deadline."""
+    waits: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        waits.append(seconds)
+        await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(mcp_tools, "_async_sleep", fake_sleep)
+    return waits
+
+
+def _session_tasks() -> set:
+    return {t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-session")}
+
+
 # ===================================================================================== Capabilities
 async def test_full_capability_set_passes() -> None:
     gateway = _gateway(_parallel_server(), _firecrawl_server())
@@ -151,31 +291,55 @@ async def test_full_capability_set_passes() -> None:
     await gateway.aclose()
 
 
-async def test_missing_tool_raises() -> None:
-    gateway = _gateway(_parallel_server(), _firecrawl_server(include_crawl=False))
+async def test_missing_map_tool_raises() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server(include_map=False))
     with pytest.raises(McpToolUnavailableError) as exc:
         await gateway.open()
     assert exc.value.stage == "verify_capabilities"
 
 
-async def test_missing_argument_raises() -> None:
+async def test_missing_scrape_tool_raises() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server(include_scrape=False))
+    with pytest.raises(McpToolUnavailableError) as exc:
+        await gateway.open()
+    assert exc.value.stage == "verify_capabilities"
+
+
+async def test_missing_scrape_formats_argument_raises() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server(include_formats_arg=False))
+    with pytest.raises(McpToolUnavailableError) as exc:
+        await gateway.open()
+    assert exc.value.stage == "verify_capabilities"
+
+
+async def test_missing_parallel_argument_raises() -> None:
     gateway = _gateway(_parallel_server(include_queries_arg=False), _firecrawl_server())
     with pytest.raises(McpToolUnavailableError) as exc:
         await gateway.open()
     assert exc.value.stage == "verify_capabilities"
 
 
-async def test_missing_status_tool_raises() -> None:
-    gateway = _gateway(_parallel_server(), _firecrawl_server(include_status=False))
-    with pytest.raises(McpToolUnavailableError):
-        await gateway.open()
+async def test_server_without_crawl_and_status_tools_passes_connect() -> None:
+    # Crawl and status are retained for crawl_site but are not part of the connect requirement.
+    gateway = _gateway(
+        _parallel_server(), _firecrawl_server(include_crawl=False, include_status=False)
+    )
+    await gateway.open()
+    await gateway.aclose()
 
 
-async def test_keyless_firecrawl_without_crawl_tool_raises() -> None:
-    # A keyless Firecrawl exposes no crawl tool; the capability check reports it like any miss.
-    gateway = _gateway(_parallel_server(), _firecrawl_server(include_crawl=False), api_key=None)
-    with pytest.raises(McpToolUnavailableError):
-        await gateway.open()
+async def test_crawl_without_crawl_tool_fails_per_call_not_at_connect(no_wait) -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server(include_crawl=False))
+    await gateway.open()
+    result = await gateway.crawl_site("https://x.test", limit=3, depth=1)
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+
+
+# ===================================================================================== Probe
+# (Iteration 5, R4) The connect-time Firecrawl shape probe was removed: open() runs the
+# capability check only. A wrong output shape now surfaces per-call as ToolFailure(unparseable),
+# covered by the map/scrape parse tests below. The former probe tests are retired.
 
 
 # ===================================================================================== Typed results
@@ -211,6 +375,264 @@ async def test_empty_search_body_gives_zero_excerpts() -> None:
     await gateway.aclose()
     assert isinstance(result, WebSearchResult)
     assert result.excerpts == ()
+
+
+# ===================================================================================== Map
+async def test_map_returns_typed_links() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server())
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, MapResult)
+    assert result.url == "https://x.test"
+    assert result.retrieved_at
+    assert result.links[0].url == "https://example.com/a"
+    assert result.links[0].title == "A"
+    assert result.links[0].description == "page a"
+
+
+async def test_map_accepts_plain_string_links() -> None:
+    body = {"links": ["https://x.test/a", "https://x.test/b"]}
+    handler = _except_probe(_static(body), _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, MapResult)
+    assert [link.url for link in result.links] == ["https://x.test/a", "https://x.test/b"]
+    assert all(link.title is None for link in result.links)
+
+
+async def test_map_empty_links_is_a_valid_result() -> None:
+    handler = _except_probe(_static({"links": []}), _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, MapResult)
+    assert result.links == ()
+
+
+async def test_map_without_links_list_is_unparseable() -> None:
+    handler = _except_probe(_static({"unexpected": 1}), _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unparseable"
+    assert result.tool == "firecrawl_map"
+
+
+async def test_map_skips_malformed_entries_and_logs_the_count(caplog) -> None:
+    caplog.set_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME)
+    body = {"links": [{"url": "https://x.test/ok"}, {"title": "no url"}, 5]}
+    handler = _except_probe(_static(body), _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, MapResult)
+    assert [link.url for link in result.links] == ["https://x.test/ok"]
+    assert "mcp.map_links_skipped" in caplog.text
+
+
+async def test_map_with_no_usable_entry_is_unparseable() -> None:
+    body = {"links": [{"title": "no url"}, 5]}
+    handler = _except_probe(_static(body), _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unparseable"
+
+
+async def test_map_is_error_returns_tool_failure_not_raised(no_wait) -> None:
+    async def boom(_url):
+        raise ToolError("the tool is broken")
+
+    handler = _except_probe(boom, _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "tool_error"
+    assert result.tool == "firecrawl_map"
+    assert no_wait == []
+
+
+async def test_map_retries_twice_on_rate_limit_then_fails(no_wait) -> None:
+    calls = {"n": 0}
+
+    async def rate_limited(_url):
+        calls["n"] += 1
+        raise ToolError("rate limit exceeded")
+
+    handler = _except_probe(rate_limited, _DEFAULT_MAP_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(map_handler=handler))
+    await gateway.open()
+    result = await gateway.map_site("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "rate_limited"
+    assert calls["n"] == 3  # one attempt plus two retries
+    assert no_wait == [30.0, 60.0]
+
+
+async def test_bad_map_url_raises_value_error() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server())
+    await gateway.open()
+    try:
+        for bad in ("", "ftp://x.test", "x.test"):
+            with pytest.raises(ValueError):
+                await gateway.map_site(bad)
+    finally:
+        await gateway.aclose()
+
+
+# ===================================================================================== Scrape
+async def test_scrape_returns_page_keyed_by_the_reported_source_url() -> None:
+    body = {"markdown": "# hello", "metadata": {"sourceURL": "https://x.test/final"}}
+    handler = _except_probe(_static(body), _DEFAULT_SCRAPE_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=handler))
+    await gateway.open()
+    result = await gateway.scrape_page("https://x.test/start")
+    await gateway.aclose()
+    assert isinstance(result, ScrapeResult)
+    assert result.url == "https://x.test/final"  # sourceURL as the server reports it, unchanged
+    assert result.text == "# hello"
+    assert result.retrieved_at
+
+
+async def test_scrape_empty_markdown_with_source_url_is_a_valid_result() -> None:
+    body = {"markdown": "", "metadata": {"sourceURL": "https://x.test/blank"}}
+    handler = _except_probe(_static(body), _DEFAULT_SCRAPE_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=handler))
+    await gateway.open()
+    result = await gateway.scrape_page("https://x.test/blank")
+    await gateway.aclose()
+    assert isinstance(result, ScrapeResult)
+    assert result.text == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"markdown": "text", "metadata": {}},
+        {"markdown": "text"},
+        {"metadata": {"sourceURL": "https://x.test"}},
+        {"success": True, "data": {"markdown": "text", "metadata": {"sourceURL": "https://x.test"}}},
+    ],
+    ids=["blank_source_url", "no_metadata", "no_markdown", "wrapped_data_envelope"],
+)
+async def test_scrape_unrecognised_shape_is_unparseable(body) -> None:
+    handler = _except_probe(_static(body), _DEFAULT_SCRAPE_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=handler))
+    await gateway.open()
+    result = await gateway.scrape_page("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unparseable"
+    assert result.tool == "firecrawl_scrape"
+
+
+async def test_scrape_sends_markdown_format_and_main_content_only() -> None:
+    seen: dict = {}
+
+    async def scrape_handler(url, formats, only_main):
+        if url != _PROBE_URL:
+            seen.update(url=url, formats=formats, only_main=only_main)
+        return _DEFAULT_SCRAPE_BODY
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
+    await gateway.open()
+    await gateway.scrape_page("https://x.test/page")
+    await gateway.aclose()
+    assert seen == {"url": "https://x.test/page", "formats": ["markdown"], "only_main": True}
+
+
+async def test_scrape_retries_twice_on_rate_limit_then_fails(no_wait) -> None:
+    calls = {"n": 0}
+
+    async def rate_limited(_url, *_rest):
+        calls["n"] += 1
+        raise ToolError("rate limit exceeded")
+
+    handler = _except_probe(rate_limited, _DEFAULT_SCRAPE_BODY)
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=handler))
+    await gateway.open()
+    result = await gateway.scrape_page("https://x.test")
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "rate_limited"
+    assert calls["n"] == 3
+    assert no_wait == [30.0, 60.0]
+
+
+async def test_bad_scrape_url_raises_value_error() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server())
+    await gateway.open()
+    try:
+        for bad in ("", "ftp://x.test", "x.test"):
+            with pytest.raises(ValueError):
+                await gateway.scrape_page(bad)
+    finally:
+        await gateway.aclose()
+
+
+async def test_timed_out_scrape_leaves_the_same_client_usable(no_wait, monkeypatch) -> None:
+    counter: list[str] = []
+    monkeypatch.setattr(mcp_tools, "SCRAPE_TIMEOUT_SECONDS", 0.05)
+
+    async def scrape_handler(url, _formats, _only_main):
+        if url == "https://x.test/slow":
+            await asyncio.sleep(0.5)  # cut short by the per-call scrape timeout
+        return {"markdown": url, "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(scrape_handler=scrape_handler),
+        factory_counter=counter,
+    )
+    await gateway.open()
+    timed_out = await gateway.scrape_page("https://x.test/slow")
+    follow_up = await gateway.scrape_page("https://x.test/fast")
+    await gateway.aclose()
+    assert isinstance(timed_out, ToolFailure)
+    assert timed_out.kind == "timeout"
+    assert no_wait == [2.0, 3.0]
+    assert isinstance(follow_up, ScrapeResult)
+    assert follow_up.url == "https://x.test/fast"
+    # One client per server at open; none rebuilt after the timeout.
+    assert counter.count("firecrawl") == 1
+
+
+# ===================================================================================== Decode
+def test_parsers_prefer_structured_content_over_the_text_block() -> None:
+    # The in-process server fills both fields, so preference is proven at the parser: the text block
+    # carries different data, and the structured payload must be the one read.
+    map_result = CallToolResult(
+        content=[TextContent(type="text", text=json.dumps({"links": ["https://text.test"]}))],
+        structured_content={"links": ["https://structured.test"]},
+        is_error=False,
+    )
+    scrape_result = CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=json.dumps({"markdown": "from text", "metadata": {"sourceURL": "https://t"}}),
+            )
+        ],
+        structured_content={"markdown": "from structured", "metadata": {"sourceURL": "https://s"}},
+        is_error=False,
+    )
+    mapped = _parse_map_result(map_result, "https://x.test", "2026-01-01T00:00:00+00:00")
+    scraped = _parse_scrape_result(scrape_result, "2026-01-01T00:00:00+00:00")
+    assert mapped.links[0].url == "https://structured.test"
+    assert scraped.text == "from structured"
+    assert scraped.url == "https://s"
 
 
 # ===================================================================================== Crawl shapes
@@ -264,7 +686,7 @@ async def test_search_retries_twice_then_fails(no_wait) -> None:
     assert isinstance(result, ToolFailure)
     assert result.kind == "rate_limited"
     assert calls["n"] == 3  # one attempt plus two retries
-    assert no_wait == [2.0, 3.0]
+    assert no_wait == [30.0, 60.0]
 
 
 async def test_non_transient_error_makes_one_attempt(no_wait) -> None:
@@ -373,11 +795,53 @@ async def test_in_flight_searches_never_exceed_semaphore() -> None:
     assert {r.excerpts[0].title for r in results} == {f"obj-{i}" for i in range(10)}
 
 
+async def test_concurrent_map_and_scrape_share_one_firecrawl_pool() -> None:
+    state = {"active": 0, "max": 0}
+
+    async def tracked(body_for):
+        state["active"] += 1
+        state["max"] = max(state["max"], state["active"])
+        try:
+            await asyncio.sleep(0.01)
+            return body_for
+        finally:
+            state["active"] -= 1
+
+    async def map_handler(_url):
+        return await tracked(_DEFAULT_MAP_BODY)
+
+    async def scrape_handler(url, _formats, _only_main):
+        return await tracked({"markdown": url, "metadata": {"sourceURL": url}})
+
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(map_handler=map_handler, scrape_handler=scrape_handler),
+        firecrawl_concurrency=2,
+    )
+    await gateway.open()
+    urls = [f"https://x.test/{i}" for i in range(6)]
+    results = await asyncio.gather(
+        gateway.map_site("https://x.test"),
+        gateway.map_site("https://y.test"),
+        *(gateway.scrape_page(u) for u in urls),
+    )
+    await gateway.aclose()
+    assert state["max"] <= 2
+    scraped = results[2:]
+    # Each concurrent scrape returns its own page.
+    assert [r.url for r in scraped] == urls
+    assert [r.text for r in scraped] == urls
+
+
 # ===================================================================================== Session scope
 async def test_call_before_open_raises() -> None:
     gateway = _gateway(_parallel_server(), _firecrawl_server())
     with pytest.raises(McpConnectionError):
         await gateway.search_web("o", ["q"])
+    with pytest.raises(McpConnectionError):
+        await gateway.map_site("https://x.test")
+    with pytest.raises(McpConnectionError):
+        await gateway.scrape_page("https://x.test")
 
 
 async def test_aclose_is_idempotent() -> None:
@@ -388,13 +852,12 @@ async def test_aclose_is_idempotent() -> None:
 
 
 async def test_failed_open_leaves_no_running_task() -> None:
-    before = {t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-session")}
+    before = _session_tasks()
     gateway = _gateway(_parallel_server(), McpConnectionError("boom"))
     with pytest.raises(McpConnectionError):
         await gateway.open()
     await asyncio.sleep(0)  # let any unwinding finish
-    after = {t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-session")}
-    assert after == before
+    assert _session_tasks() == before
 
 
 # ===================================================================================== Forced timeout
@@ -442,3 +905,364 @@ async def test_keys_never_appear_in_logs_or_errors(caplog) -> None:
     assert isinstance(result, ToolFailure)
     assert secret not in result.message
     assert secret not in caplog.text
+
+
+async def test_keys_never_appear_in_map_or_scrape_logs(caplog, no_wait) -> None:
+    secret = "SECRET-KEY-DO-NOT-LEAK-456"
+    caplog.set_level(logging.DEBUG, logger=DEEP_SEARCH_LOGGER_NAME)
+
+    async def rate_limited(_url, *_rest):
+        raise ToolError("rate limit exceeded")
+
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(
+            map_handler=_except_probe(rate_limited, _DEFAULT_MAP_BODY),
+            scrape_handler=_except_probe(rate_limited, _DEFAULT_SCRAPE_BODY),
+        ),
+        api_key=secret,
+    )
+    await gateway.open()
+    mapped = await gateway.map_site("https://x.test")
+    scraped = await gateway.scrape_page("https://x.test")
+    await gateway.aclose()
+    assert isinstance(mapped, ToolFailure) and isinstance(scraped, ToolFailure)
+    assert secret not in mapped.message and secret not in scraped.message
+    assert secret not in caplog.text
+    # The failed attempts are logged at WARN and carry the page they were for.
+    assert "mcp.call_attempt_failed" in caplog.text
+    assert "https://x.test" in caplog.text
+
+
+# ============================================================ Iteration 3: classifier (M6, M7)
+async def test_mcp_error_sse_disconnect_is_transport_and_retried(no_wait) -> None:
+    disconnect = MCPError(-32000, "SSE stream ended and reconnection attempts were exhausted")
+    gateway = _gateway(
+        _parallel_server(), _firecrawl_server(), flaky={"parallel": [disconnect, disconnect]}
+    )
+    await gateway.open()
+    result = await gateway.search_web("o", ["q"])
+    await gateway.aclose()
+    assert isinstance(result, WebSearchResult)  # retried on the same session and recovered
+    assert no_wait == [2.0, 3.0]  # transport backoff, not the rate-limit one
+
+
+async def test_persistent_sse_disconnect_returns_transport_failure(no_wait) -> None:
+    disconnect = MCPError(-32000, "SSE stream ended and reconnection attempts were exhausted")
+    gateway = _gateway(
+        _parallel_server(), _firecrawl_server(), flaky={"parallel": [disconnect] * 3}
+    )
+    await gateway.open()
+    result = await gateway.search_web("o", ["q"])
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert (result.tool, result.kind) == ("web_search", "transport")
+    assert no_wait == [2.0, 3.0]
+
+
+async def test_a_429_wrapped_in_mcperror_is_rate_limited(no_wait) -> None:
+    throttled = MCPError(-32000, "upstream returned 429 Too Many Requests")
+    gateway = _gateway(
+        _parallel_server(), _firecrawl_server(), flaky={"parallel": [throttled] * 3}
+    )
+    await gateway.open()
+    result = await gateway.search_web("o", ["q"])
+    await gateway.aclose()
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "rate_limited"  # 429 wins over the generic MCPError->transport branch
+    assert no_wait == [30.0, 60.0]  # window-clearing backoff
+
+
+def test_classifier_maps_mcp_error_and_wrapped_429() -> None:
+    sse = MCPError(-32000, "SSE stream ended and reconnection attempts were exhausted")
+    assert _classify_failure(sse) == "transport"
+    assert _classify_failure(MCPError(-32000, "boom: 429")) == "rate_limited"
+    # An MCPError that is neither a disconnect nor a 429 stays a tool error (de-mask on the message).
+    assert _classify_failure(MCPError(-32000, "tool blew up")) == "tool_error"
+
+
+# ================================================ Iteration 5: scrape_pages fan-out (M13) + rate (A7)
+async def test_scrape_pages_fans_out_and_keys_each_page_by_source_url() -> None:
+    async def scrape_handler(url, _formats, _only_main):
+        return {"markdown": f"text {url}", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
+    await gateway.open()
+    result = await gateway.scrape_pages(["https://x.test/1", "https://x.test/2"])
+    await gateway.aclose()
+    assert isinstance(result, ScrapeResults)
+    assert sorted(p.url for p in result.pages) == ["https://x.test/1", "https://x.test/2"]
+    assert (result.total, result.completed, result.failed_urls) == (2, 2, ())
+    assert result.retrieved_at
+
+
+async def test_scrape_pages_partial_failure_rides_failed_urls_and_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME)
+
+    async def scrape_handler(url, _formats, _only_main):
+        if url.endswith("/bad"):
+            return {"markdown": "x"}  # no metadata.sourceURL -> ToolFailure(unparseable) for this URL
+        return {"markdown": "ok", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
+    await gateway.open()
+    result = await gateway.scrape_pages(["https://x.test/ok", "https://x.test/bad"])
+    await gateway.aclose()
+    assert isinstance(result, ScrapeResults)
+    assert [p.url for p in result.pages] == ["https://x.test/ok"]
+    assert result.failed_urls == ("https://x.test/bad",)
+    assert "mcp.scrape_pages_partial" in caplog.text
+
+
+async def test_bad_scrape_pages_input_raises_value_error() -> None:
+    gateway = _gateway(_parallel_server(), _firecrawl_server())
+    await gateway.open()
+    try:
+        with pytest.raises(ValueError):
+            await gateway.scrape_pages([])
+        with pytest.raises(ValueError):
+            await gateway.scrape_pages(["https://x.test/ok", "ftp://x.test"])
+    finally:
+        await gateway.aclose()
+
+
+async def test_scrape_pages_concurrency_stays_within_the_firecrawl_pool() -> None:
+    inflight = {"now": 0, "max": 0}
+
+    async def scrape_handler(url, _formats, _only_main):
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await asyncio.sleep(0.02)
+        inflight["now"] -= 1
+        return {"markdown": "t", "metadata": {"sourceURL": url}}
+
+    gateway = _gateway(_parallel_server(), _firecrawl_server(scrape_handler=scrape_handler))
+    await gateway.open()
+    result = await gateway.scrape_pages([f"https://x.test/{i}" for i in range(6)])
+    await gateway.aclose()
+    assert isinstance(result, ScrapeResults)
+    assert result.completed == 6
+    assert inflight["max"] <= 2  # FIRECRAWL_CONCURRENCY
+
+
+async def test_token_bucket_paces_acquisitions_to_capacity_per_window() -> None:
+    bucket = mcp_tools._TokenBucket(2, window_seconds=0.2)  # 10 tokens/sec
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await bucket.acquire()
+    await bucket.acquire()
+    assert loop.time() - start < 0.05  # the first `capacity` tokens are immediate
+    await bucket.acquire()  # over budget -> waits ~0.1 s for one refill
+    assert loop.time() - start >= 0.08
+
+
+# ============================================================ Iteration 3: slow stream (M5), real HTTP
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _settings(urls: dict, *, parallel_key, firecrawl_key) -> Settings:
+    return Settings.model_construct(
+        parallel_api_key=parallel_key,
+        firecrawl_api_key=firecrawl_key,
+        parallel_mcp_url=urls["parallel"],
+        firecrawl_mcp_url=urls["firecrawl"],
+        firecrawl_probe_url=_PROBE_URL,
+    )
+
+
+async def test_a_slow_stream_is_not_severed_by_the_read_timeout() -> None:
+    # Over real loopback HTTP: a scrape whose body streams for ~6 s (longer than httpx's old 5 s
+    # read default) must still complete, proving the factory sets read=None (M5).
+    async def slow_scrape(url, _formats, _only_main):
+        if url != _PROBE_URL:
+            await asyncio.sleep(6.0)
+        return {"markdown": "late body", "metadata": {"sourceURL": url}}
+
+    servers = {
+        "parallel": _parallel_server(),
+        "firecrawl": _firecrawl_server(scrape_handler=slow_scrape),
+    }
+    running: list[tuple[uvicorn.Server, threading.Thread]] = []
+    urls: dict[str, str] = {}
+    for name, server in servers.items():
+        port = _free_port()
+        uv = uvicorn.Server(
+            uvicorn.Config(server.streamable_http_app(), host="127.0.0.1", port=port, log_level="warning")
+        )
+        thread = threading.Thread(target=uv.run, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not uv.started and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert uv.started, f"{name} did not start"
+        running.append((uv, thread))
+        urls[name] = f"http://127.0.0.1:{port}/mcp"
+    try:
+        gateway = create_mcp_tool_gateway(
+            _settings(urls, parallel_key=None, firecrawl_key="fc-key")
+        )
+        await gateway.open()
+        try:
+            scraped = await gateway.scrape_page("https://x.test/slow")
+        finally:
+            await gateway.aclose()
+        assert isinstance(scraped, ScrapeResult)  # not a ToolFailure(timeout/transport)
+        assert scraped.text == "late body"
+    finally:
+        for uv, thread in running:
+            uv.should_exit = True
+            thread.join(timeout=10)
+
+
+# Iteration 6: definition handoff and successful-session lifetime.
+class _DefinitionClient:
+    def __init__(self, tools, *, gate=None, failure=None):
+        self.tools = tools
+        self.calls = []
+        self.gate = gate
+        self.failure = failure
+        self.settled = False
+
+    async def list_tools(self, *, cursor=None, cache_mode=None):
+        from types import SimpleNamespace
+        self.calls.append(cursor)
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            if self.failure is not None:
+                raise self.failure
+            if cursor is None:
+                return SimpleNamespace(tools=self.tools[:-1], next_cursor="last")
+            return SimpleNamespace(tools=self.tools[-1:], next_cursor=None)
+        finally:
+            self.settled = True
+
+
+def _definition_gateway(*, gate=None, failure=None):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    def tool(name, schema, description=None):
+        return SimpleNamespace(name=name, description=description, input_schema=schema)
+
+    nested = {"type": "object", "properties": {"choice": {"$ref": "#/$defs/Choice"}},
+              "$defs": {"Choice": {"$ref": "#/$defs/Values"},
+                        "Values": {"type": "array", "minItems": 1,
+                                   "items": {"enum": ["a", "b"]}}},
+              "required": ["choice"], "additionalProperties": False}
+    parallel = _DefinitionClient([
+        tool("web_search", {"properties": {"objective": {}, "search_queries": {}}}),
+        tool("shared", nested, "unused nested tool")], gate=gate, failure=failure)
+    firecrawl = _DefinitionClient([
+        tool("firecrawl_map", {"properties": {"url": {}}}),
+        tool("firecrawl_scrape", {"properties": {"url": {}, "formats": {}}}),
+        tool("shared", {})], gate=gate)
+    clients = {"custom-search": parallel, "custom-pages": firecrawl}
+
+    @asynccontextmanager
+    async def factory(config):
+        yield clients[config.name]
+
+    gateway = McpToolGateway(
+        McpServerConfig("custom-search", "unused", None, 1),
+        McpServerConfig("custom-pages", "unused", None, 1), client_factory=factory)
+    return gateway, parallel, firecrawl, nested
+
+
+def _assert_definitions_unavailable(gateway):
+    with pytest.raises(McpConnectionError) as exc:
+        gateway.get_tool_definitions()
+    assert exc.value.stage == "get_tool_definitions"
+
+
+async def test_iteration6_grouped_paginated_snapshot_is_isolated_and_reused(caplog):
+    from copy import deepcopy
+    gateway, parallel, firecrawl, source = _definition_gateway()
+    expected = deepcopy(source)
+    _assert_definitions_unavailable(gateway)
+    with caplog.at_level(logging.INFO, logger=DEEP_SEARCH_LOGGER_NAME):
+        await gateway.open()
+        try:
+            first = gateway.get_tool_definitions()
+            assert set(first) == {"parallel", "firecrawl"}
+            assert first["parallel"]["shared"].input_schema == expected
+            assert first["firecrawl"]["shared"].input_schema == {}
+            assert first["firecrawl"]["shared"].description is None
+            assert first["parallel"]["shared"].description == "unused nested tool"
+            source["$defs"]["Values"]["items"]["enum"].append("source edit")
+            first["parallel"]["shared"].input_schema["$defs"]["Values"]["items"]["enum"].clear()
+            first["firecrawl"].clear()
+            await gateway.open()
+            verified = await gateway.verify_capabilities()
+            assert verified["parallel"]["shared"].input_schema == expected
+            verified.clear()
+            assert gateway.get_tool_definitions()["parallel"]["shared"].input_schema == expected
+            assert parallel.calls == firecrawl.calls == [None, "last"]
+        finally:
+            await gateway.aclose()
+        await gateway.aclose()
+    _assert_definitions_unavailable(gateway)
+    events = [json.loads(r.message) for r in caplog.records if r.message.startswith("{")]
+    states = [e for e in events if e.get("event") == "mcp.tool_definitions_state"]
+    assert [e["available"] for e in states] == [True, False]
+    boundaries = [e for e in events if e.get("event") == "mcp.tools_listed"]
+    assert len(boundaries) == 2
+    assert len({e["gateway_session_id"] for e in states + boundaries}) == 1
+    assert {e["server_key"] for e in boundaries} == {"parallel", "firecrawl"}
+
+
+@pytest.mark.parametrize("failure_kind", ["listing", "capability", "schema"])
+async def test_iteration6_failed_setup_never_publishes(failure_kind):
+    gateway, parallel, firecrawl, _ = _definition_gateway()
+    if failure_kind == "listing":
+        parallel.failure = McpConnectionError("listing failed")
+    elif failure_kind == "capability":
+        parallel.tools = parallel.tools[1:]
+    else:
+        parallel.tools[-1].input_schema = None
+    with pytest.raises((McpConnectionError, McpToolUnavailableError)):
+        await gateway.open()
+    assert parallel.settled and firecrawl.settled
+    _assert_definitions_unavailable(gateway)
+    assert gateway._parallel._task is gateway._firecrawl._task is None
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_iteration6_open_cancellation_or_queued_close_leaves_no_snapshot(cancel):
+    gate = asyncio.Event()
+    gateway, parallel, firecrawl, _ = _definition_gateway(gate=gate)
+    opening = asyncio.create_task(gateway.open())
+    while not (parallel.calls and firecrawl.calls):
+        await asyncio.sleep(0)
+    _assert_definitions_unavailable(gateway)
+    if cancel:
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+    else:
+        closing = asyncio.create_task(gateway.aclose())
+        await asyncio.sleep(0)
+        gate.set()
+        await opening
+        await closing
+    assert parallel.settled and firecrawl.settled
+    _assert_definitions_unavailable(gateway)
+    assert gateway._parallel._task is gateway._firecrawl._task is None
+
+
+async def test_iteration6_reopen_uses_new_session_snapshot():
+    gateway, parallel, firecrawl, _ = _definition_gateway()
+    await gateway.open()
+    old = gateway.get_tool_definitions()
+    await gateway.aclose()
+    parallel.tools[-1].description = "new session"
+    await gateway.open()
+    try:
+        assert gateway.get_tool_definitions()["parallel"]["shared"].description == "new session"
+        assert old["parallel"]["shared"].description == "unused nested tool"
+        assert parallel.calls == firecrawl.calls == [None, "last", None, "last"]
+    finally:
+        await gateway.aclose()
