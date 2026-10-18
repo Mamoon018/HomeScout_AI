@@ -443,9 +443,11 @@ async def test_feature_closes_shared_caller_exactly_once():
     caller = StructuredLLMCaller([provider])
     interpretation = _Recorder()
     amenity_search = _Recorder()
+    specific_metric_resolution = _Recorder()
     feature = DeepSearch(
         interpretation=interpretation,  # type: ignore[arg-type]
         amenity_search=amenity_search,  # type: ignore[arg-type]
+        specific_metric_resolution=specific_metric_resolution,  # type: ignore[arg-type]
         llm_caller=caller,
     )
 
@@ -453,6 +455,7 @@ async def test_feature_closes_shared_caller_exactly_once():
 
     assert interpretation.close_count == 1
     assert amenity_search.close_count == 1
+    assert specific_metric_resolution.close_count == 1
     assert provider.close_count == 1
 
 
