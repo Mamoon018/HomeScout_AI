@@ -261,7 +261,7 @@ Example invocation: website discovery
 
 For every context, the output is the Chat Completions function-tool list already accepted by C3.1.2 (`tools: list[dict]`), not the raw MCP definition format. Its selected tools and schemas vary by context. The discovery catalog (catalog of websearch for website discovery) has no `metric_label`; the metric-label requirements below apply to metric evidence acquisition.
 
-#### 2. Guard Proposed Calls
+#### Guard Proposed Calls
 
 Reusable Step 2 of R3.M1.1. Validate the entire LLM tool-call message against the exact catalog supplied for that turn and applicable application checks. Tool names, schemas, and additional validators are supplied separately; the guard is not specific to website discovery or any particular tool.
 
