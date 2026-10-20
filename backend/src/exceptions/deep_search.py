@@ -236,3 +236,21 @@ class MetricResolutionProviderError(MetricResolutionError):
     """Raised when no provider in the bound order returned a metric-resolution tool turn."""
 
     stage: ClassVar[str] = "run_llm_metric_resolution"
+
+
+class MetricResolutionValidationError(MetricResolutionError):
+    """Raised by R3.M1.1 tool-catalog construction (the non-strict tool path).
+
+    This is the one raising path of R3.M1.1. `build_tool_catalog` raises it *before* any LLM
+    call when the controlled catalog cannot be built: the context-selected server or tool is
+    missing from the raw definitions, the raw schema conflicts with expectations (for example
+    `search_queries` absent or type-incompatible), or a retained `$ref` cannot be resolved
+    against the `$defs` carried with it. The run cannot proceed, so it fails fast rather than
+    sending the model a schema it could not honor.
+
+    The call guard (`guard_proposed_calls`) does NOT raise this: a rejected tool message is a
+    normal, expected outcome carrying per-call metadata that downstream replay/retry steps read,
+    so it is returned as a `GuardDecision`, not thrown.
+    """
+
+    stage: ClassVar[str] = "build_tool_catalog"

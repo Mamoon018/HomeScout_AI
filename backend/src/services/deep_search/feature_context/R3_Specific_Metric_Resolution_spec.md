@@ -173,7 +173,7 @@ flowchart TD
 
 ### Steps of sub-component
 
-#### Build LLM-Facing Tool Catalog
+#### 1. Build LLM-Facing Tool Catalog
 
 Reusable R3.M1.1 abstraction that builds an LLM-facing tool catalog for the caller's current workflow context. Any workflow caller preparing a tool turn can use it; it is not limited to website discovery or `web_search`. Application-owned context selects the permitted tools and schema policy. The step builds schemas, not search argument values, and does not call the LLM or execute tools.
 
