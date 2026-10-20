@@ -153,6 +153,10 @@ class OpenAIStructuredProvider:
                 messages=messages,
                 tools=tools,
                 tool_choice=tool_choice,
+                # A reasoning model (e.g. gpt-6-luna) rejects function tools on
+                # /v1/chat/completions unless reasoning_effort is "none"; set it so the tool turn
+                # is accepted. Non-reasoning models accept "none" as a no-op.
+                reasoning_effort="none",
             )
         except openai.APITimeoutError as exc:
             raise LLMProviderError("OpenAI tool turn timed out") from exc

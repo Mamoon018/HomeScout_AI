@@ -173,7 +173,7 @@ flowchart TD
 
 ### Steps of sub-component
 
-#### Build LLM-Facing Tool Catalog
+#### 1. Build LLM-Facing Tool Catalog
 
 Reusable R3.M1.1 abstraction that builds an LLM-facing tool catalog for the caller's current workflow context. Any workflow caller preparing a tool turn can use it; it is not limited to website discovery or `web_search`. Application-owned context selects the permitted tools and schema policy. The step builds schemas, not search argument values, and does not call the LLM or execute tools.
 
@@ -261,7 +261,7 @@ Example invocation: website discovery
 
 For every context, the output is the Chat Completions function-tool list already accepted by C3.1.2 (`tools: list[dict]`), not the raw MCP definition format. Its selected tools and schemas vary by context. The discovery catalog (catalog of websearch for website discovery) has no `metric_label`; the metric-label requirements below apply to metric evidence acquisition.
 
-#### Guard Proposed Calls
+#### 2. Guard Proposed Calls
 
 Reusable Step 2 of R3.M1.1. Validate the entire LLM tool-call message against the exact catalog supplied for that turn and applicable application checks. Tool names, schemas, and additional validators are supplied separately; the guard is not specific to website discovery or any particular tool.
 
