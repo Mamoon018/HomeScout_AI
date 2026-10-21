@@ -48,6 +48,11 @@ The goal of this round is to **finalize the specs** of each sub-component before
 - M1.3 writes `state.predefined_records` as a plain nested dict (no envelope, no version); spec updated in `deep_search_context.md`.
 - Retype `state.amenity_records` and add the two state fields M3 populates (`state.specific_records`, `state.amenity_records`). Full detail in R3.M2.5 "Other changes outside M3."
 
+**New dependency — `tldextract` (R3.M1.3 official-URL gate)**
+- Add **`tldextract==<pin>`** to the dependency manifest (the gate needs public-suffix-aware SLD extraction; stdlib `urlsplit` alone cannot split `co.uk`-style suffixes). Pin an exact version.
+- Vendor an **offline PSL snapshot** and instantiate one module-level `TLDExtract(cache_dir=<snapshot>, suffix_list_urls=[])` so the gate never fetches at runtime (deterministic, reproducible tests, no network dependency).
+- Add a **periodic PSL-refresh** maintenance step for the vendored snapshot. Full behavior in R3.M1.3 "Google-provided URL handling."
+
 ---
 
 ## Research that shapes the sub-components
@@ -430,38 +435,78 @@ Status labels identify changes resulting from the finalized catalog-building and
 
 ## R3.M1.3 — Resolve the Official Website URL Before the Loop
 
-**Goal.** Before the LLM loop runs, produce a resolved `website_search_results` object per work item holding `website_url` and `website_origin` (`google` / `discovered` / `none`). If `PredefinedMetricsRecord.website` is set **and is an official first-party host**, use it. Otherwise one discovery step runs → a confirmed official site or `none`. `PredefinedMetricsRecord.website` is never changed.
+**Goal.** Before the LLM loop runs, produce a resolved `website_search_results` object per work item holding `website_url` and `website_origin` (`google` / `discovered` / `none`). If `PredefinedMetricsRecord.website` is set **and passes the official-URL gate** (`official_url_gate`, below), use it (`origin=google`). Otherwise one discovery step runs → a confirmed official site (`origin=discovered`) or `none`. `PredefinedMetricsRecord.website` is never changed.
 
 **Problem.** Google's `websiteUri` is sometimes absent, and is sometimes a social/aggregator host rather than the official site. Phase 2 needs an official URL to crawl. RC8 requires URL-first. A wrong site produces wrong crawl evidence.
 
-**Finalized approach — Approach 2: one search, LLM selection.**
-Discovery is a **self-contained prerequisite step, not a phase.** It does not share the phase loop's budget, triage, or machinery; it runs to completion before any amenity loop starts and produces an input to it. Mechanism:
-1. **Tool turn** exposing *only* `web_search` — the **LLM builds the search args** and makes the call through the gateway (the one place in the flow where the LLM chooses the search arguments). The amenity identity (name, locality) is given to the LLM as the matching target; the query is **grounded on the postal code** parsed from the Google-address field so results are scoped to the target locality.
-   - **Input source (finalized).** All discovery inputs are read from the work item's **`PredefinedMetricsRecord`** — the M1 record at `state.predefined_records[category_id][place_id]` (looked up by the work item's `(category_id, place_id)`; the work item itself carries only the key, not these fields). The fields used: **`name`** and **`website`** (the candidate Google `websiteUri`), plus the **`address`** field from which **locality** and **postal code** are parsed. No other object is read for discovery.
-2. **Structured selection turn** (`response_format`, no tools) where the LLM returns a Pydantic-validated verdict — the official `website_url` or `null` — judged from the raw search results (URLs + per-result snippets). The LLM has no per-candidate address/phone; it evaluates snippets against the amenity identity.
+**Finalized approach — gate-first, then Approach 2 (one search, LLM selection).**
+Discovery is a **self-contained prerequisite step, not a phase.** It does not share the phase loop's budget, triage, or machinery; it runs to completion before any amenity loop starts and produces an input to it. Per work item it is a **two-stage decision** — the gate first, the search only when the gate declines:
 
-Because this switches from code-built to LLM-built args + a structured verdict, discovery now depends on **C3.1.2** (tool turn) and **R3.M1.1** (guard) and needs a small schema (à la R3.M2.1), in addition to **C3.1.1** (gateway).
+**Stage 0 — official-URL gate (deterministic; no LLM, no search).** Run `official_url_gate` (the `tldextract` SLD-match specified under "Google-provided URL handling" below) on the candidate Google `website`. Returns `official` → `website_url = website`, `website_origin = google`, and **discovery stops here (no search runs)**; returns `discovery` → fall through to Stage 1. This is the common, zero-cost path and the only place `origin=google` is produced. Stage 0 is executed as a **synchronous pre-pass over all work items** before the discovery fan-out (see "Batch orchestration"), so gate-passing items never enter the async batch.
+
+**Stage 1 — one search + LLM selection (only when Stage 0 returns `discovery`).**
+1. **Tool turn** exposing *only* `web_search` — the **LLM builds the search args** and makes the call through the gateway (the one place in the flow where the LLM chooses the search arguments). The amenity identity (name, locality) is given to the LLM as the matching target; the **complete `address` string is passed to the LLM verbatim** and the instruction directs it to **use only the postal code** from that address to scope the query to the target locality — the app parses nothing.
+   - **Input source (finalized).** All discovery inputs are read from the work item's **`PredefinedMetricsRecord`** — the M1 record at `state.predefined_records[category_id][place_id]` (looked up by the work item's `(category_id, place_id)`; the work item itself carries only the key, not these fields). The fields used: **`name`** and **`website`** (the candidate Google `websiteUri`, consumed by Stage 0), plus the **full `address`** string, passed to the LLM **verbatim** (the app does not parse locality or postal code — the instruction tells the LLM to use only the postal code for locality scoping). No other object is read for discovery.
+2. **Structured selection turn** (`response_format`, no tools). To make a hallucinated URL **structurally impossible**, the selection uses **candidate id-indirection** (full mechanism under "Candidate id-indirection & verdict validation" below): after the search returns, the app indexes each result URL under an opaque `id`, shows the LLM `id + title + snippet`, and the LLM returns a single **candidate `id`** (→ the app resolves `id → url`, `website_origin = discovered`) or a **`none` sentinel** (→ `website_origin = none`). **The LLM never emits a URL.** It judges each candidate's snippet against the **amenity identity it was given** (name, locality, and the amenity's own `address`); the raw results carry no structured **per-candidate** address or phone — only URL + snippet — which is why the draft's "address/phone agreement" acceptance rule was dropped.
+
+Stage 0 is pure code (stdlib `urlsplit` + pinned `tldextract`), so it adds no LLM/gateway cost. Stage 1, because it switches from code-built to LLM-built args + a structured verdict, depends on **C3.1.2** (tool turn) and **R3.M1.1** (the tool-call guard, which validates the `web_search` tool turn — **not** the selection verdict) and needs a small schema (à la R3.M2.1 — returning a `selected_id` / `none`, not a URL), in addition to **C3.1.1** (gateway).
 
 **Host rule — binary.** An **official first-party site** → `website_url` + eligible for crawl. **Everything else** (social, aggregator, directory/listing, maps, review) → `none`, **no crawl**. There is no middle "aggregator → crawl anyway" class. This makes phase-1 query scoping always safe, since a non-null `website_url` is always an official site. The instruction's one judgment: *"is this the amenity's own first-party official site? If not, return `none`."*
 
-**Google-provided URL handling.** The trust rule is **revised** from the draft's "use as-is, not re-checked": a Google `websiteUri` is trusted **only if it is an official (non-social, non-aggregator) host**. A social/aggregator Google URL is treated as *absent* → discovery runs. (This reopens the draft's locked "trust as-is" rule — intentional.)
+**Google-provided URL handling — finalized gate (`official_url_gate`, `tldextract`-based).** The trust rule is **revised** from the draft's "use as-is, not re-checked": a Google `websiteUri` is trusted **only when a cheap, deterministic gate confirms it by rule**. The gate runs **before** any discovery search and returns `official` (trust → `website_url = website`, `website_origin = google`, no search) or `discovery` (run the search + LLM selection).
+
+**Core idea.** Match the brand name against the **SLD label only** (the label left of the public suffix), ignoring subdomain and suffix. That single choice decides the expensive direction by rule: `brand.evil.com` → `discovery` (SLD `evil`), while a buried official site `clinic.reseller.greenvalleydental.co.uk` → `official` (SLD `greenvalleydental`).
+
+Ordered steps (order matters):
+
+```
+0 PRESENCE   website empty / whitespace                          → DISCOVERY
+1 HOST       urlsplit(website).netloc → lower, strip userinfo/port, rstrip('.')
+2 EXTRACT    sub, sld, suffix = extractor(host)
+             no sld or no suffix (IP, localhost, bare host)       → DISCOVERY
+             registered_domain = f"{sld}.{suffix}"
+3 DENYLIST   registered_domain ∈ DENYLIST  (exact set membership) → DISCOVERY   (fast reject)
+4 SLD MATCH  match(compact(name), compact(sld))                   → OFFICIAL(origin=google)
+5 ELSE                                                            → DISCOVERY
+```
+
+- **`DENYLIST`** — exact-set membership on `registered_domain` (no `endswith`/substring), e.g. `yelp.com`, `business.site`, social / maps hosts. A **fast-reject optimization only**, no longer load-bearing for correctness: step 4 already rejects foreign SLDs by rule.
+- **`compact(x)`** = NFKD → drop combining marks → casefold → keep `[a-z0-9]` (NFKD, not NFKC, so accents **fold** instead of being deleted): `"Café México"` → `cafemexico`.
+- **`match(cn, cs)`** = both `≥ MIN_LEN` (5) **and** (`cn in cs` **or** `cs in cn`). The bidirectional substring absorbs a domain carrying an extra token (`greenvalleydentalclinic`) or dropping a generic one; the length guard blocks spurious short hits.
+
+**Library configuration (locked).** *Pinned, offline PSL* — one module-level `TLDExtract(cache_dir=<vendored snapshot>, suffix_list_urls=[])` so it **never fetches the PSL at runtime** (deterministic, reproducible tests, no network dependency); refreshing the snapshot is a deliberate maintenance task. *`include_psl_private_domains=True`* — recognizes brand-owned platform subdomains (`brand.wixsite.com`, `brand.github.io`) as the brand's own SLD → `official`, while still rejecting foreign apex domains (`brand.evil.com` → SLD `evil`); private suffixes cover only delegated platforms and do **not** reopen the `evil.com` leak. (Set `False` to send all site-builder subdomains to `discovery` — a cheaper, more conservative false-negative; recommendation is `True`.)
+
+**Why strict (asymmetry).** A false `official` skips discovery and feeds a wrong site to the crawl (expensive, uncorrectable); a false `discovery` is cheap and usually re-finds the URL. So the SLD rule is precise on the OFFICIAL direction, and anything ambiguous falls to `discovery`.
+
+**Residual risk & maintenance.** *Accepted false-negatives (cheap):* creative/acronym domains (`smile-dds.com`, `nyu.edu`) → `discovery` → LLM backstop. *Accepted false-positive (now tiny):* a non-denylisted registrable domain whose **SLD itself** matches the brand but isn't theirs (a deliberate decoy `greenvalleydental.<tld>`) — no no-fetch gate can catch that, far rarer than v1's leak. *Maintenance:* `tldextract==<pin>` in the dependency manifest, a vendored PSL snapshot, and a periodic refresh step. (This reopens the draft's locked "trust as-is" rule — intentional.)
 
 **Decisions — generally mandatory**
-- **Failure vs empty (mirrors R3.M1.2).** *Tool call failed* (gateway failure) → one retry, then `none`. *Search returned results but the LLM found no official site* → terminal `none`, **no retry** (a confident decision). *Pydantic-invalid verdict* → treated as **failed → one retry** of the **selection turn only** (re-send the raw results already in hand; no second `web_search`); still invalid → terminal `none`. This same-provider retry is distinct from R3.M2.2's provider-level fallback.
+- **Failure vs empty (mirrors R3.M1.2).** *Tool call failed* (gateway failure) → one retry, then `none`. *Search returned results but the LLM chose the `none` sentinel* → terminal `none`, **no retry** (a confident decision). *Invalid verdict* — schema-invalid, **or** a `selected_id` not in the issued candidate set (see "Candidate id-indirection & verdict validation") — → treated as **failed → one retry** of the **selection turn only** (re-send the same indexed candidates already in hand; no second `web_search`); still invalid → terminal `none`. This same-provider retry is distinct from R3.M2.2's provider-level fallback.
 - **Budget.** The discovery `web_search` is one real gateway call; it does **not** consume any metric's phase-1 attempt or the amenity's crawl retry. It runs under the Parallel search semaphore; its selection turn runs under the LLM-call bound.
-- **Where the result lives.** The resolved `website_search_results` object, keyed `(category_id, place_id)`. Raw search candidates live transiently in the conversation (read by the LLM to decide); only the resolved, structured verdict is persisted. Downstream (phase-1 `web_search`, phase-2 `firecrawl_crawl`) reads the URL from this object as read-only context.
+- **Where the result lives.** The resolved verdict (`website_url`, `website_origin`) is persisted to the `website_search_results` object, keyed `(category_id, place_id)`. The **full indexed candidate set** is persisted separately to `state.discovery_search_results` for evaluation (see "Store candidates for evaluation"). Downstream (phase-1 `web_search`, phase-2 `firecrawl_map`) reads the URL from `website_search_results` as read-only context.
 
 **Decisions — problem-specific**
-- **Precision over recall.** An unconfirmed candidate → `none`. Never invent a URL.
-- **Always-produce rule.** The object is always created, one per work item. When a non-social Google `websiteUri` provides the URL, `website_url` + `website_origin=google` are **populated from Google** and only the discovery-specific (raw-result-derived) fields are null (no search ran).
+- **Precision over recall.** An unconfirmed candidate → `none`. The LLM **cannot** invent a URL — it selects a candidate `id` and the app resolves it to a real search-result URL (see "Candidate id-indirection & verdict validation"); invention is prevented **by construction**, not merely instructed.
+- **Candidate id-indirection & verdict validation (anti-hallucination).** The selection turn is the only point where the LLM would otherwise emit a website URL; a shape-valid but **hallucinated** URL would pass a type check, become `website_url`, scope phase-1 queries, and be **app-injected as the phase-2 `firecrawl_map` url** — crawling a nonexistent host (expensive, uncorrectable, and recurring given LLM non-determinism). Mechanism, mirroring R3.M1.1's phase-2 scrape id-indirection but adapted to a single pick:
+  1. **Candidate indexing** — after `search_web` returns a `WebSearchResult`, the app iterates `.excerpts`, **drops hits with `url is None`** (non-selectable), assigns a fresh opaque `id` (`c1…cN`) to each remaining hit, and builds `candidates` (`id + url + title + text`) plus an app-only **`id → url` map**.
+  2. **Selection turn** — the LLM is shown `candidates` (ids + title + snippet; `url` shown only for judgment) and the schema returns a single **`selected_id`** or a **`none` sentinel** — never a URL.
+  3. **Verdict validation + resolve** — a **body-level check in R3.M1.3's validation path** (explicitly **not** the R3.M1.1 tool-call guard, which only validates the `web_search` tool turn): `null → none`; `selected_id ∉ id→url map → invalid verdict → one selection retry → else none` (the "Failure vs empty" invalid-verdict path); `selected_id ∈ map → website_url = map[selected_id]`, `website_origin = discovered`. Because the LLM only ever names an id, a hallucinated host is impossible by construction. Adaptations vs phase-2: **one** `selected_id` (not a list), **no** `metric_label`, **no** dedup/ceiling, and validation at the structured body rather than by the tool-call guard.
+- **Store candidates for evaluation (revises "Where the result lives").** The id-indirection needs `candidates` + the `id → url` map only **in-memory for the turn**, so persistence is **not** required for correctness. To evaluate web-search quality after the run, the full candidate set is persisted to a dedicated **`state.discovery_search_results[(category_id, place_id)]`** — `{objective, search_queries, candidates: [{id, url, title, text}], selected_id, resolved_url, retrieved_at}` — kept **separate** from the clean verdict in `website_search_results`. This **revises** the earlier "only the resolved verdict is persisted; raw candidates are transient" rule.
+- **Always-produce rule.** The object is always created, one per work item. When the Google `websiteUri` **passes the official-URL gate (Stage 0)**, `website_url` + `website_origin=google` are **populated from Google** and **no search runs** (`website_url` + `website_origin` are the whole verdict; nothing raw-result-derived is persisted — raw candidates are transient, per "Where the result lives").
 - **No dedup across categories.** One physical place appearing under two categories = two work items (same `place_id`, different `category_id`). Each work item runs **its own** discovery (duplication accepted; single-flight intentionally *not* used).
-- **URL format.** Handled by the instruction + a one-shot example + the schema-field description (no separate code normalization pass). Pydantic `HttpUrl` is the type backstop; a malformed value → failed → retry. No crawl host-clamp is needed because the crawl `url` is **app-injected** from this object (see R3.M1.1 edit), so there is never an LLM-supplied host to compare.
+- **URL format.** The LLM no longer emits a URL — it returns a `selected_id`, and the app resolves it to a **verbatim** search-result URL from the candidate set (see "Candidate id-indirection"), so there is **no LLM-typed URL** to normalize or `HttpUrl`-validate; the resolved URL is exactly what the search returned for that hit. No crawl host-clamp is needed because the phase-2 `firecrawl_map` `url` is **app-injected** from this object (see R3.M1.1), so there is never an LLM-supplied host to compare.
 - **Effect of `none`.** Phase 2 skipped for this amenity (no official URL to crawl); metrics rely on web evidence. Phase 1 still runs. When a URL **is** present, phase 1 **also** uses it — folding the host into some queries to scope them to the official site — but *in addition to* broader off-site queries, not as a replacement (web and scrape must stay complementary per D7; hard-scoping every query collapses web evidence onto the site).
 
-**Batch orchestration — finalized: `asyncio.gather` + semaphore (Option A).**
-All discoveries run **concurrently, before the loop, behind a hard barrier.** Build one discovery coroutine per work item, each wrapped in `async with discovery_sem`; `await asyncio.gather(*tasks, return_exceptions=True)` is the barrier — the loop starts only after it returns. Each task has a per-call timeout and swallows its own failure. Post-processing maps any exception slot or timeout → a `none` discovery result, collected into the dict keyed `(category_id, place_id)`. Because the loop has not started, discovery gets the full Parallel rate budget with no phase-1 contention.
+**Batch orchestration — finalized: synchronous Stage-0 pre-pass, then `asyncio.gather` over the declined subset (Option A).**
+Discovery runs **before the loop, behind a hard barrier**, but **Stage 0 (`official_url_gate`) runs in a synchronous pre-pass over all work items *before* the fan-out** — not inside the per-item coroutine. The fan-out is therefore **one coroutine per *gate-declined* work item**, not per work item.
 
-> **Open item:** the **postal-code degrade path** — when Google returns no postal code (rural / some international), degrade `postal code → locality/city → name-only`; a missing postal code must not block the search. Also decide whether the postal code is *injected* into the objective deterministically (hard grounding) or *instructed* to the LLM (soft).
+- **Pre-pass (synchronous, all work items).** For each work item: `official` → write `website_search_results[key] = {website_url=rec.website, website_origin=google}` immediately (no task, no semaphore, no search); `discovery` → add the work item to the declined set. Wrap each gate call so a malformed record cannot crash the pre-pass — a gate error routes that item to the **declined set** (safe default → it runs Stage 1), **never silently to `none`**.
+- **Fan-out (async, declined subset only).** Build one discovery coroutine per declined work item, each wrapped in `async with discovery_sem`; `await asyncio.gather(*tasks, return_exceptions=True)` is the barrier — the loop starts only after it returns. These coroutines start at **Stage 1** and do **not** re-check the gate. Each task has a per-call timeout and swallows its own failure; any exception slot or timeout → a `none` result.
+- **Reconvergence / RC8.** Pass-items are written before the fan-out and declined-items as their coroutines resolve, so when the barrier returns the dict holds an entry for **every** work item (`google` / `discovered` / `none`) — RC8 ("URL first, for everyone") holds. The barrier waits **only** on the declined subset, but dict completeness does not depend on its size.
+- **Placement-only.** Per-item verdicts and `website_search_results` are identical to running the gate inline; the gate stays defined once under "Google-provided URL handling." This decision fixes only *where* Stage 0 is invoked.
+- **Latency & efficiency.** Stage 0 is pure, synchronous, sub-millisecond (`urlsplit` + `tldextract` + set lookup) with **zero I/O**, and Google usually yields a usable site, so most items pass. Running the gate inside a coroutine would make every gate-passing item consume a `discovery_sem` slot and a scheduled task for a CPU-only no-op. Hoisting makes the **barrier's latency scale with the declined subset, not N**, removes semaphore churn and task-scheduling for no-op items, and lets the batch know `len(declined)` **up front** for Parallel rate planning. Because the loop has not started, discovery still gets the full Parallel rate budget with no phase-1 contention.
+
+> **Resolved — instructed, not injected.** The full `address` is passed to the LLM verbatim and the instruction directs it to use **only the postal code** for locality scoping; the app parses nothing. *Remaining instruction detail:* the prompt must also cover the **degrade when no postal code is present** (rural / some international) — fall back `postal code → locality/city → name-only` so a missing postal code never blocks the search.
 
 ## R3.M1.4 — Run the Phase Loop and Triage per Amenity
 
@@ -527,13 +572,15 @@ run_specific_metric_resolution(state)                         [R3.M1.5, method o
 │          from state.discovered_places × categories with ≥1 specific_metrics
 │          work_items = [ (cat, place, taxonomy_node, depth, specific_metrics), ... ]   (N items)
 │
-├─ STEP 3  DISCOVERY BATCH  (R3.M1.3)                      ── concurrent, own hard barrier
+├─ STEP 3  DISCOVERY BATCH  (R3.M1.3)        ── Stage-0 sync pre-pass → fan out declined only, hard barrier
 │          inputs per wi ← PredefinedMetricsRecord = state.predefined_records[cat][place]
-│                          (name, website, address→locality/postal)
-│          tasks = [ discover(wi) for wi in work_items ]
+│                          (name, website, address verbatim → LLM)
+│          Stage-0 pre-pass (sync, ALL wi): official → website_search_results[..]=google (no task)
+│                                           else     → declined += wi  (gate error → declined)
+│          tasks = [ discover_search(wi) for wi in declined ]      # Stage 1 only; declined subset
 │          await asyncio.gather(*tasks)        async with discovery_sem (Parallel pool)
-│          → website_search_results[(cat,place)] = {website_url|None, origin}
-│          ╌╌╌ barrier: ALL discoveries done before any pipeline starts (RC8) ╌╌╌
+│          → website_search_results[(cat,place)] = {website_url|None, origin}   (complete for all N)
+│          ╌╌╌ barrier waits on declined only; pass-items already written → ALL verdicts ready (RC8) ╌╌╌
 │
 ├─ STEP 4  AMENITY PIPELINES  (R3.M1.4 + R3.M2.2–R3.M2.4)    ── concurrent, under bounds
 │          tasks = [ pipeline(wi, website_search_results[key]) for wi in work_items ]
@@ -582,7 +629,7 @@ Two separate `gather` barriers: STEP 3 (discovery must finish before any pipelin
 **Decisions — problem-specific**
 - **Eligibility.** Non-empty `specific_metrics` at any depth. A `basic_profile` category with none yields no work item.
 - **No narrowing step.** M3 runs on all M1 records. Candidate selection (R3) not implemented; may move ahead of M3 later.
-- **Pre-loop discovery batch (R3.M1.3).** Before any amenity pipeline starts, `run_specific_metric_resolution` runs the discovery batch over all work items (`asyncio.gather` + `discovery_sem`, hard barrier) and populates each work item's `website_search_results`. Pipelines start only after the barrier returns. Each discovery reads its inputs (`name`, `website`, and the `address` field → locality/postal code) from the work item's **`PredefinedMetricsRecord`** at `state.predefined_records[category_id][place_id]` (R3.M1.3 "Input source").
+- **Pre-loop discovery batch (R3.M1.3).** Before any amenity pipeline starts, `run_specific_metric_resolution` runs the discovery batch over all work items (a **synchronous Stage-0 pre-pass over all items**, then `asyncio.gather` + `discovery_sem` over the **gate-declined subset only**, hard barrier) and populates each work item's `website_search_results`. Pipelines start only after the barrier returns. Each discovery reads its inputs (`name`, `website`, and the full `address` string, passed to the LLM verbatim — not parsed) from the work item's **`PredefinedMetricsRecord`** at `state.predefined_records[category_id][place_id]` (R3.M1.3 "Input source").
 - **Two categories, one place.** Two work items (metrics differ). Each runs its **own** discovery (R3.M1.3 — no dedup, no single-flight) and its **own** Phase-2 `map`/`scrape` — **there is no shared crawl cache**. (Supersedes the draft's "share one crawl via the cache"; **D4 revised** accordingly — no shared crawl per site.)
 - **Session lifetime.** Gateway sessions open at method start and close at its end — covering both the discovery batch and the amenity pipelines.
 - **Logging.** Pipeline start/end, tool-call outcome and duration, triage result, phase-2-skipped — without keys or evidence text.
@@ -740,7 +787,7 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 These are the places the draft still leaves a choice (everything else is a locked or finalized decision):
 
 - **C3.1.1** — ✅ **FINALIZED** (see section). Gateway **extended** with `map_site` + `scrape_page` (crawl **retained**, unused by M3); capability check requires map + scrape only (crawl unchecked); map/scrape parsers (scrape → top-level `markdown` + `metadata.sourceURL`; map → link objects, string-form tolerated); **connect-time shape probe**; `structuredContent` decode attribute confirmed; Parallel web path verified. (C3.1.2 is implemented and matches spec.)
-- **R3.M1.3** — ✅ **FINALIZED** (see section). Approach 2 (LLM selection), binary host rule, app-injected crawl URL / host-clamp removed, `gather`+semaphore batch discovery, empty/failed + Pydantic-retry rules. *One open item:* postal-code degrade path (injected vs instructed).
+- **R3.M1.3** — ✅ **FINALIZED** (see section). Approach 2 (LLM selection), binary host rule, app-injected crawl URL / host-clamp removed, `gather`+semaphore batch discovery, empty/failed + Pydantic-retry rules, Google-URL officiality gate (`official_url_gate`: `tldextract` SLD-match + exact-set denylist fast-reject, pinned offline PSL, strict by asymmetry), selection-turn **candidate id-indirection** (anti-hallucination; LLM returns a `selected_id`/`none`, app resolves, verdict validated at the body — not the tool-call guard) + `state.discovery_search_results` storage for eval. *Resolved:* postal-code handling is LLM-instructed — full `address` passed verbatim, use postal code only, degrade to locality/name when absent; app parses nothing.
 - **R3.M1.4** — ✅ **FINALIZED** (see section). Split loops (`phase1_loop → triage → phase2_loop`); triage via a separate strict-schema no-tools request; loop decisions aligned to R3.M1.1/R3.M1.2/R3.M1.3; `metrics_source_content` shape fixed. **Phase-2 scrape redesign finalized:** per-metric scrape (one page per unresolved metric), `metric_label` required (≥1, multi allowed), explicit dedup + fan-out (fetch per URL, attribute per metric), hard ceiling of **8** distinct scrapes/amenity, candidate list bounded to **50**; best-effort accepted (attempt ≠ guaranteed evidence).
 - **R3.M1.5** — ✅ **FINALIZED** (see section). Approach 1 (pre-indexed `gather`, `return_exceptions=True`); hard barrier before R3.M2.5; per-amenity failure isolation; pre-loop discovery batch; no shared crawl (D4 revised).
 - **R3.M2.1** — ✅ **FINALIZED** (see section). Approach 2: one static schema with a typed-union `final_value` (`string|number|boolean|null`); descriptive fields as strings; per-metric enum/unit/type conformance deferred to R3.M2.3. Enums trimmed (`relation`: 4; `basis`: 5, incl. `google_reviews`); **Google reviews added as a verification-gated fallback value source** (Mechanism 6 verification-authoring convention; RC10 light-touch).
@@ -756,9 +803,10 @@ This mechanism is being promoted to its own responsibility, **R3 — Specific Me
 (see `R3_Specific_Metric_Resolution_proposal.md`). The promotion closes **none** of the decisions
 left open above; each stays open and owned by its sub-component:
 
-- **R3.M1.3 — postal-code degrade path.** Inject the postal code into the objective deterministically
-  (hard grounding) vs instruct the LLM (soft); plus the `postal code → locality/city → name-only`
-  degrade when Google returns no postal code. Unchanged by the split.
+- **R3.M1.3 — postal-code handling (resolved: instructed).** The full `address` is passed to the LLM
+  verbatim; the instruction directs it to use only the postal code for locality scoping (the app parses
+  nothing) and to degrade `postal code → locality/city → name-only` when Google returns none. The earlier
+  inject-vs-instruct choice is settled on *instruct*.
 - **R3.M2.2 — resolution body validation.** Whole-body reject / per-entry / hand-written dict
   validator (default favours whole-body reject).
 - **R3.M2.3 — value conformer.** Ordered guard functions / dynamic per-metric Pydantic model /
