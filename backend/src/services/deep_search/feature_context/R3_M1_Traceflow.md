@@ -168,6 +168,9 @@ The spine from Part 1, with STEP 3 and STEP 4 fully expanded into the atom from 
 │    official_url_gate(rec.website, rec.name):                                                    │
 │      OFFICIAL  → website_search_results[key] = {website_url=rec.website, origin=google}  (done)  │
 │      otherwise → declined += wi            (gate error → declined, NEVER none)                   │
+│    → store state.official_gate_results[key] for EVERY wi (telemetry; both verdicts)             │
+│      {name, website, host, registered_domain, sld, suffix, compact_name, compact_sld,           │
+│       verdict, reason_code}  — separate from website_search_results                             │
 │                                                                                                 │
 │  tasks = [ discover_search(wi) for wi in declined ]   ;   await asyncio.gather(*tasks)           │
 │  (barrier waits on declined subset only; pass-items already in dict → RC8 holds for all N)       │
