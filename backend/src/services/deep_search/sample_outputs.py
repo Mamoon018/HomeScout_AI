@@ -1498,3 +1498,37 @@
     }
   }
 }
+
+
+
+
+"""
+==============================================================================
+STAGE: seed state (as after M1.3)
+==============================================================================
+  (1, rijks): name='Rijksmuseum' website='https://www.rijksmuseum.nl'
+  (1, sightglass): name='Sightglass Coffee' website=''
+
+==============================================================================
+STEP 3 / STAGE 0: official_url_gate pre-pass (all items)
+==============================================================================
+{"object": "official_gate_record", "category_id": 1, "place_id": "rijks", "verdict": "official", "reason_code": "sld_match", "host": "www.rijksmuseum.nl", "registered_domain": "rijksmuseum.nl", "sld": "rijksmuseum", "suffix": "nl", "compact_name": "rijksmuseum", "compact_sld": "rijksmuseum"}
+{"object": "website_search_result", "category_id": 1, "place_id": "rijks", "website_origin": "google", "website_url": "https://www.rijksmuseum.nl"}
+{"object": "official_gate_record", "category_id": 1, "place_id": "sightglass", "verdict": "discovery", "reason_code": "presence_empty", "host": null, "registered_domain": null, "sld": null, "suffix": null, "compact_name": null, "compact_sld": null}
+
+==============================================================================
+STEP 3 / STAGE 1: discovery for (1, sightglass) — 'Sightglass Coffee'
+==============================================================================
+{"object": "discovery_candidates", "category_id": 1, "place_id": "sightglass", "count": 10, "ids": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"], "urls": ["https://sightglasscoffee.com/", "https://sightglasscoffee.com/collections/coffee", "https://sightglasscoffee.com/pages/about-us", "https://sightglasscoffee.com/pages/sightglass-welcome", "https://sightglasscoffee.com/pages/about-us?_su_rec=...", "https://sightglasscoffee.com/pages/our-cafes", "https://sightglasscoffee.com/pages/our-company", "https://sightglasscoffee.com/pages/sightglass-san-francisco-soma", "https://sightglasscoffee.com/shop", "https://sightglasscoffee.com/pages/experience"]}
+{"object": "website_search_result", "category_id": 1, "place_id": "sightglass", "website_origin": "discovered", "website_url": "https://sightglasscoffee.com/"}
+{"object": "discovery_search_record", "category_id": 1, "place_id": "sightglass", "objective": "Find Sightglass Coffee's official website", "search_queries": ["Sightglass Coffee official 94103", "Sightglass Coffee San Francisco website", "site:sightglasscoffee.com Sightglass Coffee"], "candidate_count": 10, "selected_id": "c1", "resolved_url": "https://sightglasscoffee.com/", "retrieved_at": "2026-10-21T15:39:17.552305+00:00"}
+
+==============================================================================
+RESULT: final discovery stores
+==============================================================================
+  website_search_results (1, rijks):      google     'https://www.rijksmuseum.nl'
+  website_search_results (1, sightglass): discovered 'https://sightglasscoffee.com/'
+  discovery_search_results keys: [(1, 'sightglass')]
+  official_gate_results keys:    [(1, 'rijks'), (1, 'sightglass')]
+  RC8 (every work item has a verdict): True
+"""

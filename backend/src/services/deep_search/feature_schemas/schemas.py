@@ -29,6 +29,14 @@ DepthLevel = Literal["basic_profile", "operating_details", "specific_attributes"
 # Mechanism 6's constrained metric-definition call echoes this schema name back with the body.
 METRIC_DEFINITION_SCHEMA_NAME = "metric_definition_schema"
 
+# R3.M1.3's structured candidate-selection turn echoes this schema name back with the body.
+WEBSITE_SELECTION_SCHEMA_NAME = "website_selection"
+
+# Where a work item's resolved website came from (R3.M1.3). `google` = Google's websiteUri passed
+# the official-URL gate; `discovered` = the discovery search + selection resolved it; `none` = no
+# official site (gate declined and discovery found nothing usable).
+WebsiteOrigin = Literal["google", "discovered", "none"]
+
 # Value sets a metric may carry. `number_with_unit`, `enum`, and `date_time` map to the
 # contract's number+unit, enum[fixed set], and date/time value types.
 MetricValueType = Literal["number_with_unit", "boolean", "enum", "date_time"]
@@ -576,6 +584,30 @@ def metric_definition_json_schema() -> dict:
     return schema
 
 
+class WebsiteSelectionResult(BaseModel):
+    """R3.M1.3 structured selection body: a candidate id or the `none` sentinel — never a URL.
+
+    `selected_id` is `None` when the LLM judged that no candidate is the amenity's own first-party
+    official site. A non-null value must be one of the issued candidate ids (`c1`..`cN`); R3.M1.3's
+    body-level verdict check resolves it against the app's id→url map (membership is not enforced
+    by the schema, so an out-of-set id is caught there, not here).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    selected_id: str | None = Field(
+        description="The id of the chosen candidate (its own first-party official site), or null "
+        "if none of the candidates is the amenity's official site."
+    )
+
+
+def website_selection_json_schema() -> dict:
+    """Strict selection schema derived from the wire model. No enum — the id set is runtime data."""
+    schema = WebsiteSelectionResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    return schema
+
+
 def _inject_taxonomy_node_enum(node: Any) -> None:
     """Constrain every `taxonomy_node` property to the real maintained nodes by enum."""
     if isinstance(node, dict):
@@ -1017,6 +1049,79 @@ class AmenityMetricsSet:
     records: dict[int, dict[str, AmenityMetricsRecord]]
 
 
+# ---------------------------------------------------------------------------------
+# Responsibility 3 — Mechanism R3.M1.3 (Website-URL discovery) contracts.
+# The three stores are keyed by a (category_id, place_id) tuple (the spec's keying for
+# discovery), which differs from the nested category_id→place_id dicts above on purpose.
+# ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WebsiteSearchResult:
+    """One work item's resolved website verdict (R3.M1.3) — the Step-4 handoff.
+
+    `website_url` is the official first-party site (from Google via the gate, or discovered by the
+    search + selection) or `None` when no official site was confirmed. `website_origin` records
+    which path produced it. This is the whole verdict; nothing raw-result-derived is carried here
+    (the indexed candidates live in `DiscoverySearchRecord`).
+    """
+
+    website_url: str | None
+    website_origin: WebsiteOrigin
+
+
+@dataclass(frozen=True)
+class DiscoveryCandidate:
+    """One indexed Stage-1 search hit under an opaque id (`c1`..`cN`), selection-only.
+
+    The LLM is shown the `id` (+ `title`/`text` for judgment) and resolves a `selected_id` to a
+    real URL via the app's id→url map, so a hallucinated host is impossible by construction.
+    """
+
+    id: str
+    url: str
+    title: str | None
+    text: str
+
+
+@dataclass(frozen=True)
+class DiscoverySearchRecord:
+    """Stage-1 telemetry for one declined work item that searched (eval, not correctness).
+
+    Persisted to `state.discovery_search_results` so web-search quality can be audited offline;
+    kept separate from the clean verdict in `website_search_results`.
+    """
+
+    objective: str
+    search_queries: tuple[str, ...]
+    candidates: tuple[DiscoveryCandidate, ...]
+    selected_id: str | None
+    resolved_url: str | None
+    retrieved_at: str
+
+
+@dataclass(frozen=True)
+class OfficialGateRecord:
+    """Stage-0 gate telemetry for EVERY work item (both verdicts), for offline audit/tuning.
+
+    Persisted to `state.official_gate_results`. Fields that do not apply to a `reason_code` (for
+    example `sld`/`compact_sld` when `presence_empty` or `no_registrable_domain`) are `None`.
+    `reason_code` ∈ {presence_empty, no_registrable_domain, denylist_hit, sld_match, sld_no_match}.
+    No `retrieved_at` — this is decision telemetry, not time-sensitive.
+    """
+
+    name: str | None
+    website: str | None
+    host: str | None
+    registered_domain: str | None
+    sld: str | None
+    suffix: str | None
+    compact_name: str | None
+    compact_sld: str | None
+    verdict: Literal["official", "discovery"]
+    reason_code: str
+
+
 @dataclass
 class AmenitySearchState:
     """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
@@ -1042,3 +1147,16 @@ class AmenitySearchState:
     )
     specific_records: dict[int, dict[str, SpecificMetricsRecord]] = field(default_factory=dict)
     amenity_records: AmenityMetricsSet | None = None
+    # R3.M1.3 discovery stores, keyed (category_id, place_id). `website_search_results` is the
+    # Step-4 handoff (one entry per work item, RC8); `discovery_search_results` is Stage-1 eval
+    # telemetry (only the declined subset that searched); `official_gate_results` is Stage-0 eval
+    # telemetry (every work item). All three are empty until R3.M1.3 runs.
+    website_search_results: dict[tuple[int, str], WebsiteSearchResult] = field(
+        default_factory=dict
+    )
+    discovery_search_results: dict[tuple[int, str], DiscoverySearchRecord] = field(
+        default_factory=dict
+    )
+    official_gate_results: dict[tuple[int, str], OfficialGateRecord] = field(
+        default_factory=dict
+    )
