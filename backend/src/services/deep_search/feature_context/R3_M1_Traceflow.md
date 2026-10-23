@@ -117,7 +117,7 @@ atom once makes the rest of the traceflow collapse into "the atom, three times."
 │        │                                                                                           │
 │        ▼                                                                                           │
 │   append `tool` message to the amenity conversation (tool_call_id order)                           │
-│   + write shaped_text into metrics_source_content[label][(source_kind,url)]  (phase 1 / phase 2)   │
+│   + record evidence item in metrics_source_content (source_kind,url,shaped_text; metric_labels)    │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -214,7 +214,7 @@ The spine from Part 1, with STEP 3 and STEP 4 fully expanded into the atom from 
 │ │  ║     │ LOOP budget check BEFORE execute: metric with no attempt left → not executed     │ ║ ││
 │ │  ║     │ ④ gateway web_search ×calls via gather (Parallel sem)  ⑤ shape ok/empty/failed   │ ║ ││
 │ │  ║     ╰────────────────────────────────────────────────────────────────────────────────╯ ║ ││
-│ │  ║     append tool msgs → write evidence into metrics_source_content[label][(web,url)]      ║ ││
+│ │  ║     append tool msgs → record web evidence item per url (source=web; metric_labels)      ║ ││
 │ │  ║     retry: failed/timeout/guard-reject → 1 retry · empty = TERMINAL (burns budget)       ║ ││
 │ │  ║   metric budget spent when its search terminates clean (ok OR empty) or retry used       ║ ││
 │ │  ╚═══════════════════════════════════════════════════════════════════════════════════════╝ ││
@@ -256,15 +256,15 @@ The spine from Part 1, with STEP 3 and STEP 4 fully expanded into the atom from 
 │ │  ║        strips metric_label  → ④ gateway → ⑤ shape ; each url's ok/empty/failed+retry once ║ ││
 │ │  ║        scrape failed/timeout → 1 retry → still failed → skip page (amenity survives)      ║ ││
 │ │  ║        scrape empty → appended, loop continues, NOT retried, NOT a skip                   ║ ││
-│ │  ║      6 FAN OUT after results — write single shaped result under EACH requesting metric's  ║ ││
-│ │  ║        key: metrics_source_content[label][(scrape,url)]  (identical text per metric)      ║ ││
+│ │  ║      6 FAN OUT after results — record ONE evidence item (source=scrape) carrying the      ║ ││
+│ │  ║        union of requesting metrics in metric_labels  (stored once, no duplication)         ║ ││
 │ │  ║  no second triage · successful phase 2 not repeated                                      ║ ││
 │ │  ╚═══════════════════════════════════════════════════════════════════════════════════════╝ ││
 │ │                               │                                                              ││
 │ │                               ▼  returns: conversation + metrics_source_content             ││
 │ │  ┌─ HAND-OFF TO R3.M2 (per amenity; M1 focus ends here) ─────────────────────────────────┐ ││
-│ │  │ metrics_source_content = { label: { (source_kind,url): {shaped_text, retrieved_at} } } │ ││
-│ │  │   + amenity-level Google-reviews block {shaped_text, retrieved_at} (no metric)         │ ││
+│ │  │ metrics_source_content = items{source_kind,url,shaped_text,retrieved_at,metric_labels} │ ││
+│ │  │   + amenity-level google_reviews item (metric_labels empty, no metric)                 │ ││
 │ │  │ R3.M2.2 resolution turn (reads buckets, NOT the thread; strict schema, no tools)       │ ││
 │ │  │   → R3.M2.3 conform + verification gate → R3.M2.4 provenance (quote ∈ bucket)          │ ││
 │ │  │   → SpecificMetricsRecord                                                              │ ││

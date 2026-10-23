@@ -2043,15 +2043,27 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
     K4 (tool fits band) is retired: an LLM-defined metric may use `parallel_web_search` or
     `firecrawl` in either band, and `google_maps` is not in the wire tool set at all.
     """
+    # The second resolution target is class-conditional: factual carries scrape_target,
+    # experiential carries review_target. Validate the class-appropriate one is present and
+    # the off-class one is absent (exactly one secondary, per RC10 revised).
+    resolution = entry.resolution_source
+    if entry.evidence_class == "factual":
+        second_target, off_class_target = resolution.scrape_target, resolution.review_target
+    else:
+        second_target, off_class_target = resolution.review_target, resolution.scrape_target
+
     texts = (
         entry.label,
         entry.question,
         entry.verification,
-        entry.resolution_source.web_target,
-        entry.resolution_source.scrape_target,
+        resolution.web_target,
+        second_target or "",
     )
     if any(not text.strip() for text in texts):
         return "text_completeness"
+
+    if off_class_target and off_class_target.strip():
+        return "resolution_source_class_mismatch"
 
     has_unit = bool(entry.unit and entry.unit.strip())
     enum_members = [member.strip() for member in entry.enum_values if member.strip()]
@@ -2070,17 +2082,30 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
 
 
 def _to_metric_spec(entry: MetricEntry) -> MetricSpec:
-    """Wire metric to stored metric, text trimmed."""
+    """Wire metric to stored metric, text trimmed.
+
+    The stored resolution source keeps only the class-appropriate second target: scrape_target
+    for a factual metric, review_target for an experiential one (the other stays None).
+    """
+    web_target = entry.resolution_source.web_target.strip()
+    if entry.evidence_class == "factual":
+        resolution_source = MetricResolutionSource(
+            web_target=web_target,
+            scrape_target=(entry.resolution_source.scrape_target or "").strip(),
+        )
+    else:
+        resolution_source = MetricResolutionSource(
+            web_target=web_target,
+            review_target=(entry.resolution_source.review_target or "").strip(),
+        )
     return MetricSpec(
         label=entry.label.strip(),
         question=entry.question.strip(),
         value_type=entry.value_type,
         unit=entry.unit.strip() if entry.unit and entry.unit.strip() else None,
         enum_values=[member.strip() for member in entry.enum_values],
-        resolution_source=MetricResolutionSource(
-            web_target=entry.resolution_source.web_target.strip(),
-            scrape_target=entry.resolution_source.scrape_target.strip(),
-        ),
+        evidence_class=entry.evidence_class,
+        resolution_source=resolution_source,
         verification=entry.verification.strip(),
         null_policy=entry.null_policy,
         band=entry.band,
