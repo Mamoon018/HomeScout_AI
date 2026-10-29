@@ -23,9 +23,12 @@ from src.clients.llm_provider import ToolCall
 from src.clients.mcp_tools import RawToolDefinition
 from src.exceptions.deep_search import MetricResolutionValidationError
 from src.services.deep_search.phase_tool_catalog import (
+    build_rejection_outcomes,
     build_tool_catalog,
     guard_proposed_calls,
     metric_label_membership_validator,
+    prepare_admitted_calls,
+    sanitize_replay_message,
 )
 
 
@@ -456,3 +459,76 @@ def test_validator_flags_each_invalid_label_in_a_list():
     assert len(issues) == 2  # one issue per out-of-set label
     assert all(i.field_path == "arguments.metric_label" for i in issues)
     assert all(i.reason_code == "metric_label_not_in_set" for i in issues)
+
+
+# --------------------------------------------------------------------------------------------------
+# Steps 3-5 (added for R3.M1.4 phase 1): rejection outcomes, replay cleanup, admitted-call prep.
+# --------------------------------------------------------------------------------------------------
+def _assistant_message(calls: list[ToolCall]) -> dict:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
+            for c in calls
+        ],
+    }
+
+
+def test_rejection_outcomes_mark_valid_siblings_withheld():
+    calls = [_metric_call("c1", "ticket_price"), _metric_call("c2", "not_a_metric")]
+    ctx = {"metric_labels": ["ticket_price"]}
+    decision = guard_proposed_calls(calls, _metric_catalog(), "metric_web_search", ctx)
+    outcomes = build_rejection_outcomes(calls, decision)
+    assert [(o.tool_call_id, o.category) for o in outcomes] == [
+        ("c1", "withheld"),
+        ("c2", "in_catalog"),
+    ]
+    assert outcomes[1].reason_codes == ("metric_label_not_in_set",)
+    assert outcomes[0].raw_arguments == calls[0].arguments  # kept for attribution
+
+
+def test_rejection_outcomes_empty_for_accepted_decision():
+    calls = [_metric_call("c1", "ticket_price")]
+    decision = guard_proposed_calls(
+        calls, _metric_catalog(), "metric_web_search", {"metric_labels": ["ticket_price"]}
+    )
+    assert build_rejection_outcomes(calls, decision) == ()
+
+
+def test_sanitize_replay_strips_out_of_catalog_call_and_keeps_the_rest():
+    stray = ToolCall(id="x1", name="firecrawl_scrape", arguments="{}")
+    calls = [_metric_call("c1", "ticket_price"), stray]
+    decision = guard_proposed_calls(
+        calls, _metric_catalog(), "metric_web_search", {"metric_labels": ["ticket_price"]}
+    )
+    outcomes = build_rejection_outcomes(calls, decision)
+    original = _assistant_message(calls)
+    sanitized = sanitize_replay_message(original, outcomes)
+    assert [c["id"] for c in sanitized["tool_calls"]] == ["c1"]
+    assert [c["id"] for c in original["tool_calls"]] == ["c1", "x1"]  # input not mutated
+
+
+def test_sanitize_replay_returns_none_when_nothing_remains():
+    stray = ToolCall(id="x1", name="firecrawl_scrape", arguments="{}")
+    decision = guard_proposed_calls([stray], _metric_catalog(), "metric_web_search", None)
+    outcomes = build_rejection_outcomes([stray], decision)
+    assert sanitize_replay_message(_assistant_message([stray]), outcomes) is None
+
+
+def test_prepare_admitted_calls_strips_metric_label_into_metadata():
+    calls = [_metric_call("c1", "ticket_price")]
+    decision = guard_proposed_calls(
+        calls, _metric_catalog(), "metric_web_search", {"metric_labels": ["ticket_price"]}
+    )
+    (prepared,) = prepare_admitted_calls(decision.validated_calls, "metric_web_search")
+    assert prepared.arguments == {"objective": "o", "search_queries": ["q"]}
+    assert prepared.metric_labels == ("ticket_price",)
+    assert "metric_label" in decision.validated_calls[0].arguments  # validated call untouched
+
+
+def test_prepare_admitted_calls_passes_untagged_context_through():
+    decision = guard_proposed_calls([_ok_call()], _discovery_catalog(), "website_discovery", None)
+    (prepared,) = prepare_admitted_calls(decision.validated_calls, "website_discovery")
+    assert prepared.metric_labels == ()
+    assert prepared.arguments == decision.validated_calls[0].arguments

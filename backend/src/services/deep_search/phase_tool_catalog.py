@@ -21,10 +21,16 @@ exercised by `feature_context/R3_M1_1_Dry_Run_Traceflow.md`:
    It never raises for validation — a rejection is a normal outcome carrying per-call metadata the
    downstream replay/retry steps read, so it is returned as a `GuardDecision`.
 
-Both are module-level functions, not methods: the spec requires reuse by any tool-turn caller
-(website discovery now, the metric phases later), and neither holds state. Later R3 stage methods
+3-5. What a caller does with the decision (added for R3.M1.4 phase 1, reusable by phase 2):
+   `build_rejection_outcomes` (Step 3: one outcome per identifiable call of a rejected message,
+   valid siblings marked `withheld`), `sanitize_replay_message` (Step 4: drop out-of-catalog calls
+   from the assistant message before it is replayed), and `prepare_admitted_calls` (Step 5: strip
+   `metric_label` before MCP execution and carry it on the prepared call).
+
+All are module-level functions, not methods: the spec requires reuse by any tool-turn caller
+(website discovery now, the metric phases later), and none holds state. R3 stage methods
 (R3.M1.3 discovery, R3.M1.4 phase loop) call them; execution, history mutation, retry budgets and
-rejection/replay handling live in those surrounding steps, not here.
+tool-message construction live in those surrounding steps, not here.
 """
 
 from __future__ import annotations
@@ -717,3 +723,140 @@ def _in_catalog_error(
         category=_CATEGORY_IN_CATALOG,
         field_path=field_path,
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# Steps 3-5 — what the caller does with a GuardDecision (reusable by every tool-turn caller).
+# Pure functions: they read the decision and the proposed calls; they never execute, retry, or log.
+# --------------------------------------------------------------------------------------------------
+RejectedCategory = Literal["in_catalog", "out_of_catalog", "invalid_call_structure", "withheld"]
+
+# The LLM-facing field that tags a call with the metric(s) it serves. It is stripped before MCP
+# execution (the server has no such argument) and carried on the prepared call instead.
+_METRIC_LABEL_FIELD = "metric_label"
+
+
+@dataclass(frozen=True)
+class RejectedCallOutcome:
+    """Step 3: the result for one identifiable call of a rejected message.
+
+    `category` is the call's own error category, or `withheld` for a sibling that passed every check
+    but was not admitted because the message as a whole was rejected. `raw_arguments` is the model's
+    argument string, unchanged, so a caller can attribute the call (for example to its metric).
+    """
+
+    tool_call_id: str
+    tool_name: str | None
+    category: RejectedCategory
+    reason_codes: tuple[str, ...]
+    raw_arguments: str
+
+
+@dataclass(frozen=True)
+class PreparedCall:
+    """Step 5: one admitted call ready for MCP execution.
+
+    `arguments` holds only what the MCP tool accepts (`metric_label` removed); `metric_labels` keeps
+    the stripped tag(s) so the caller can attribute the result. Empty for untagged contexts.
+    """
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict
+    metric_labels: tuple[str, ...]
+
+
+def build_rejection_outcomes(
+    proposed_calls: Sequence[ToolCall], decision: GuardDecision
+) -> tuple[RejectedCallOutcome, ...]:
+    """Step 3: one outcome per call that has a usable (present, unique) id, in message order.
+
+    Siblings with no error of their own are `withheld`. A call without a usable id gets no outcome:
+    no tool message can be paired with it, so the replay step drops it (see `sanitize_replay_message`).
+    An accepted decision has no rejected calls, so it yields an empty tuple.
+    """
+    if decision.decision == "accepted":
+        return ()
+    errors_by_index: dict[int, list[GuardError]] = {}
+    for error in decision.errors:
+        if error.call_index is not None:
+            errors_by_index.setdefault(error.call_index, []).append(error)
+    id_counts = _count_ids(proposed_calls)
+    outcomes: list[RejectedCallOutcome] = []
+    for index, call in enumerate(proposed_calls):
+        if not call.id or id_counts.get(call.id, 0) > 1:
+            continue
+        call_errors = errors_by_index.get(index, [])
+        if call_errors:
+            category: RejectedCategory = call_errors[0].category or _CATEGORY_IN_CATALOG  # type: ignore[assignment]
+            reasons = tuple(dict.fromkeys(e.reason_code for e in call_errors))
+        else:
+            category = "withheld"
+            reasons = ("message_rejected",)
+        outcomes.append(
+            RejectedCallOutcome(
+                tool_call_id=call.id,
+                tool_name=call.name or None,
+                category=category,
+                reason_codes=reasons,
+                raw_arguments=call.arguments,
+            )
+        )
+    return tuple(outcomes)
+
+
+def sanitize_replay_message(
+    assistant_message: dict, outcomes: Sequence[RejectedCallOutcome]
+) -> dict | None:
+    """Step 4: the assistant message to replay after a rejection, or `None` to replay nothing.
+
+    Keeps only calls that will be answered by a tool message: in-catalog, structural-but-identified,
+    and withheld calls. Out-of-catalog calls (and calls with no usable id) are removed, so the replayed
+    history never names a tool the provider was not offered (Groq compatibility) and never holds an
+    unanswered call. Returns `None` when no call and no content remain. The input is not mutated.
+    """
+    kept_ids = {o.tool_call_id for o in outcomes if o.category != _CATEGORY_OUT_OF_CATALOG}
+    kept_calls = [
+        call for call in assistant_message.get("tool_calls") or [] if call.get("id") in kept_ids
+    ]
+    content = assistant_message.get("content")
+    if not kept_calls and not content:
+        return None
+    sanitized = {key: value for key, value in assistant_message.items() if key != "tool_calls"}
+    if kept_calls:
+        sanitized["tool_calls"] = kept_calls
+    return sanitized
+
+
+def prepare_admitted_calls(
+    validated_calls: Sequence[ValidatedCall], context: ToolContext
+) -> tuple[PreparedCall, ...]:
+    """Step 5: strip the `metric_label` tag from each admitted call and carry it alongside.
+
+    The tag exists only in metric contexts (the policy injects it); other contexts pass arguments
+    through unchanged with no labels. The guard has already validated the tag's type, so a single
+    string becomes a one-label tuple and a list keeps its order. Values are not normalized.
+    """
+    policy = _CONTEXT_POLICY.get(context)
+    tagged = policy is not None and any(
+        name == _METRIC_LABEL_FIELD for name, _ in policy.injected_fields
+    )
+    prepared: list[PreparedCall] = []
+    for call in validated_calls:
+        arguments = dict(call.arguments)
+        labels: tuple[str, ...] = ()
+        if tagged:
+            raw = arguments.pop(_METRIC_LABEL_FIELD, None)
+            if isinstance(raw, str):
+                labels = (raw,)
+            elif isinstance(raw, list):
+                labels = tuple(str(label) for label in raw)
+        prepared.append(
+            PreparedCall(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                arguments=arguments,
+                metric_labels=labels,
+            )
+        )
+    return tuple(prepared)

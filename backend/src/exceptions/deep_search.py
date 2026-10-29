@@ -1,4 +1,9 @@
-from typing import ClassVar
+from typing import ClassVar, Literal
+
+# Why an M3 LLM step failed (C3.1.2 "Typed error"). `availability`: every provider in the chain
+# failed to serve the request; `content`: at least one provider answered unusably; `circuit_open`:
+# the run's breaker was open, so no call was made. Only `availability` moves the breaker counter.
+ProviderFailureCause = Literal["availability", "content", "circuit_open"]
 
 
 class RequirementExtractionError(Exception):
@@ -233,9 +238,21 @@ class MetricResolutionError(Exception):
 
 
 class MetricResolutionProviderError(MetricResolutionError):
-    """Raised when no provider in the bound order returned a metric-resolution tool turn."""
+    """Raised when an M3 LLM step got no usable answer, or the run's circuit breaker was open.
+
+    `cause` is required (C3.1.2 "Typed error"): the shared caller derives it from the chain's
+    per-provider failure classes, and the breaker check raises it as `circuit_open`.
+    `carries_cause` tells the client-layer caller to pass `cause` without importing this class.
+    """
 
     stage: ClassVar[str] = "run_llm_metric_resolution"
+    carries_cause: ClassVar[bool] = True
+
+    def __init__(
+        self, message: str, *, stage: str | None = None, cause: ProviderFailureCause
+    ) -> None:
+        super().__init__(message, stage=stage)
+        self.cause: ProviderFailureCause = cause
 
 
 class MetricResolutionValidationError(MetricResolutionError):

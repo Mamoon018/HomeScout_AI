@@ -37,6 +37,7 @@ from src.services.deep_search.feature_schemas.schemas import (
 )
 from src.services.deep_search.official_url_gate import compact, official_url_gate
 from src.services.deep_search.specific_metric_resolution import (
+    _CircuitBreaker,
     SpecificMetricResolution,
     _DiscoveryWorkItem,
     _index_candidates,
@@ -201,7 +202,9 @@ async def _discover(service, rec):
     wi = _DiscoveryWorkItem(
         rec.category_id, rec.place_id, "dentist", "specific_attributes", [object()]
     )
-    return await service._discover_website_url(wi, rec, RAW_DEFS, "batch")
+    return await service._discover_website_url(
+        wi, rec, RAW_DEFS, "batch", breaker=_CircuitBreaker(threshold=3)
+    )
 
 
 # ==================================================================================================
