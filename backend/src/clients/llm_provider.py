@@ -2,14 +2,14 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, NoReturn, Protocol, Sequence
 
 import groq
 import openai
 
 from src.core.config import Settings
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
-from src.exceptions.llm import LLMProviderError, LLMResponseTruncatedError
+from src.exceptions.llm import LLMFailureClass, LLMProviderError, LLMResponseTruncatedError
 
 logger = logging.getLogger(DEEP_SEARCH_LOGGER_NAME)
 
@@ -33,6 +33,35 @@ LLM_PROVIDER_RAW_BODY_EVENT = "llm_provider.raw_body"
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _chain_cause(classes: Sequence[LLMFailureClass]) -> LLMFailureClass:
+    """Reduce the per-provider failure classes of an exhausted chain to one `cause`.
+
+    `availability` only when EVERY provider failed that way; any `content` failure makes the chain
+    `content` (one provider rejecting the request on content grounds means it is about this request,
+    not an outage).
+    """
+    if classes and all(c == "availability" for c in classes):
+        return "availability"
+    return "content"
+
+
+def _raise_exhausted(
+    provider_error_cls: type[Exception],
+    message: str,
+    stage: str,
+    classes: Sequence[LLMFailureClass],
+) -> NoReturn:
+    """Raise the injected typed error; pass `cause` only to a class that declares `carries_cause`.
+
+    The opt-in keeps this client layer free of service-owned exception imports while letting the
+    metric-resolution error require a cause. R1's error classes do not declare it and are raised
+    exactly as before.
+    """
+    if getattr(provider_error_cls, "carries_cause", False):
+        raise provider_error_cls(message, stage=stage, cause=_chain_cause(classes))
+    raise provider_error_cls(message, stage=stage)
 
 
 @dataclass(frozen=True)
@@ -123,13 +152,21 @@ class OpenAIStructuredProvider:
                 response_format=_build_response_format(json_schema, schema_name),
             )
         except openai.APITimeoutError as exc:
-            raise LLMProviderError("OpenAI structured call timed out") from exc
+            raise LLMProviderError(
+                "OpenAI structured call timed out", failure_class="availability"
+            ) from exc
         except openai.RateLimitError as exc:
-            raise LLMProviderError("OpenAI rate limited the structured call") from exc
+            raise LLMProviderError(
+                "OpenAI rate limited the structured call", failure_class="availability"
+            ) from exc
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
-            raise LLMProviderError("OpenAI rejected the structured call credentials") from exc
+            raise LLMProviderError(
+                "OpenAI rejected the structured call credentials", failure_class="availability"
+            ) from exc
         except openai.OpenAIError as exc:
-            raise LLMProviderError("OpenAI structured call failed") from exc
+            raise LLMProviderError(
+                "OpenAI structured call failed", failure_class="availability"
+            ) from exc
 
         content, finish_reason, refusal = _read_first_choice(response)
         return _decode_body(
@@ -159,13 +196,21 @@ class OpenAIStructuredProvider:
                 reasoning_effort="none",
             )
         except openai.APITimeoutError as exc:
-            raise LLMProviderError("OpenAI tool turn timed out") from exc
+            raise LLMProviderError(
+                "OpenAI tool turn timed out", failure_class="availability"
+            ) from exc
         except openai.RateLimitError as exc:
-            raise LLMProviderError("OpenAI rate limited the tool turn") from exc
+            raise LLMProviderError(
+                "OpenAI rate limited the tool turn", failure_class="availability"
+            ) from exc
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
-            raise LLMProviderError("OpenAI rejected the tool turn credentials") from exc
+            raise LLMProviderError(
+                "OpenAI rejected the tool turn credentials", failure_class="availability"
+            ) from exc
         except openai.OpenAIError as exc:
-            raise LLMProviderError("OpenAI tool turn failed") from exc
+            raise LLMProviderError(
+                "OpenAI tool turn failed", failure_class="availability"
+            ) from exc
 
         return _build_assistant_turn(provider=self.name, model=self._model, response=response)
 
@@ -203,13 +248,21 @@ class GroqStructuredProvider:
                 response_format=_build_response_format(json_schema, schema_name),
             )
         except groq.APITimeoutError as exc:
-            raise LLMProviderError("Groq structured call timed out") from exc
+            raise LLMProviderError(
+                "Groq structured call timed out", failure_class="availability"
+            ) from exc
         except groq.RateLimitError as exc:
-            raise LLMProviderError("Groq rate limited the structured call") from exc
+            raise LLMProviderError(
+                "Groq rate limited the structured call", failure_class="availability"
+            ) from exc
         except (groq.AuthenticationError, groq.PermissionDeniedError) as exc:
-            raise LLMProviderError("Groq rejected the structured call credentials") from exc
+            raise LLMProviderError(
+                "Groq rejected the structured call credentials", failure_class="availability"
+            ) from exc
         except groq.GroqError as exc:
-            raise LLMProviderError("Groq structured call failed") from exc
+            raise LLMProviderError(
+                "Groq structured call failed", failure_class="availability"
+            ) from exc
 
         content, finish_reason, refusal = _read_first_choice(response)
         return _decode_body(
@@ -235,13 +288,21 @@ class GroqStructuredProvider:
                 tool_choice=tool_choice,
             )
         except groq.APITimeoutError as exc:
-            raise LLMProviderError("Groq tool turn timed out") from exc
+            raise LLMProviderError(
+                "Groq tool turn timed out", failure_class="availability"
+            ) from exc
         except groq.RateLimitError as exc:
-            raise LLMProviderError("Groq rate limited the tool turn") from exc
+            raise LLMProviderError(
+                "Groq rate limited the tool turn", failure_class="availability"
+            ) from exc
         except (groq.AuthenticationError, groq.PermissionDeniedError) as exc:
-            raise LLMProviderError("Groq rejected the tool turn credentials") from exc
+            raise LLMProviderError(
+                "Groq rejected the tool turn credentials", failure_class="availability"
+            ) from exc
         except groq.GroqError as exc:
-            raise LLMProviderError("Groq tool turn failed") from exc
+            raise LLMProviderError(
+                "Groq tool turn failed", failure_class="availability"
+            ) from exc
 
         return _build_assistant_turn(provider=self.name, model=self._model, response=response)
 
@@ -334,7 +395,9 @@ def _build_assistant_turn(*, provider: str, model: str, response: Any) -> Assist
             f"{provider} hit the token limit before completing the tool turn"
         )
     if not content and not tool_calls:
-        raise LLMProviderError(f"{provider} returned an empty tool turn")
+        raise LLMProviderError(
+            f"{provider} returned an empty tool turn", failure_class="content"
+        )
 
     appended_message: dict = {"role": "assistant", "content": content}
     if tool_calls:
@@ -394,20 +457,27 @@ def _decode_body(
     # back even when partial content would otherwise decode. Refusal is checked first because
     # a declined turn can still carry a non-`stop` finish reason.
     if refusal:
-        raise LLMProviderError(f"{provider} returned a refusal instead of a body")
+        raise LLMProviderError(
+            f"{provider} returned a refusal instead of a body", failure_class="content"
+        )
     if finish_reason not in (None, _CLEAN_FINISH_REASON):
         raise LLMProviderError(
-            f"{provider} returned an abnormal finish_reason {finish_reason!r}"
+            f"{provider} returned an abnormal finish_reason {finish_reason!r}",
+            failure_class="content",
         )
     if not content:
-        raise LLMProviderError(f"{provider} returned an empty body")
+        raise LLMProviderError(f"{provider} returned an empty body", failure_class="content")
 
     try:
         body = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"{provider} returned a body that is not valid JSON") from exc
+        raise LLMProviderError(
+            f"{provider} returned a body that is not valid JSON", failure_class="content"
+        ) from exc
     if not isinstance(body, dict):
-        raise LLMProviderError(f"{provider} returned a JSON value that is not an object")
+        raise LLMProviderError(
+            f"{provider} returned a JSON value that is not an object", failure_class="content"
+        )
     return body
 
 
@@ -483,6 +553,7 @@ class StructuredLLMCaller:
         """Try providers in the bound order; return the first body or a typed provider error."""
         body: dict | None = None
         answered_by: str | None = None
+        failure_classes: list[LLMFailureClass] = []
 
         for provider in self._providers:
             try:
@@ -507,10 +578,12 @@ class StructuredLLMCaller:
                             "provider": provider.name,
                             "model": provider.model,
                             "outcome": "failed",
+                            "failure_class": exc.failure_class,
                             "detail": detail,
                         }
                     )
                 )
+                failure_classes.append(exc.failure_class)
                 continue
 
             answered_by = provider.name
@@ -537,11 +610,15 @@ class StructuredLLMCaller:
                         "stage": stage,
                         "reason": "no_provider_answered",
                         "attempted": [provider.name for provider in self._providers],
+                        "cause": _chain_cause(failure_classes),
                     }
                 )
             )
-            raise provider_error_cls(
-                f"No LLM provider returned a {stage} body", stage=stage
+            _raise_exhausted(
+                provider_error_cls,
+                f"No LLM provider returned a {stage} body",
+                stage,
+                failure_classes,
             )
 
         logger.debug(
@@ -566,6 +643,7 @@ class StructuredLLMCaller:
         provider_error_cls: type[Exception],
     ) -> AssistantTurn:
         """Try providers in the bound order; return the first assistant turn or a typed error."""
+        failure_classes: list[LLMFailureClass] = []
         for provider in self._providers:
             try:
                 turn = await provider.generate_turn(
@@ -586,10 +664,12 @@ class StructuredLLMCaller:
                             "provider": provider.name,
                             "model": provider.model,
                             "outcome": "failed",
+                            "failure_class": exc.failure_class,
                             "detail": detail,
                         }
                     )
                 )
+                failure_classes.append(exc.failure_class)
                 continue
 
             logger.info(
@@ -614,11 +694,15 @@ class StructuredLLMCaller:
                     "stage": stage,
                     "reason": "no_provider_answered",
                     "attempted": [provider.name for provider in self._providers],
+                    "cause": _chain_cause(failure_classes),
                 }
             )
         )
-        raise provider_error_cls(
-            f"No LLM provider returned a {stage} tool turn", stage=stage
+        _raise_exhausted(
+            provider_error_cls,
+            f"No LLM provider returned a {stage} tool turn",
+            stage,
+            failure_classes,
         )
 
     async def aclose(self) -> None:

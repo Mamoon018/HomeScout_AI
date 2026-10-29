@@ -71,6 +71,13 @@ class Settings(BaseSettings):
         default="https://example.com",
         validation_alias="FIRECRAWL_PROBE_URL",
     )
+    # R3.M1.5 run-level circuit breaker: consecutive `availability` LLM failures (no success in
+    # between) that open the breaker for the rest of the run.
+    metric_resolution_breaker_threshold: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="METRIC_RESOLUTION_BREAKER_THRESHOLD",
+    )
 
     @property
     def supabase_jwt_issuer(self) -> str:

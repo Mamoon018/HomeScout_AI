@@ -18,6 +18,7 @@ from src.clients.mcp_tools import (
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.official_url_gate import compact, official_url_gate
 from src.services.deep_search.specific_metric_resolution import (
+    _CircuitBreaker,
     SpecificMetricResolution,
     _index_candidates,
     _resolve_verdict,
@@ -253,7 +254,9 @@ async def _discover(service, rec):
     from src.services.deep_search.specific_metric_resolution import _DiscoveryWorkItem
 
     wi = _DiscoveryWorkItem(rec.category_id, rec.place_id, "dentist", "specific_attributes", [object()])
-    return await service._discover_website_url(wi, rec, RAW_DEFS, "batch")
+    return await service._discover_website_url(
+        wi, rec, RAW_DEFS, "batch", breaker=_CircuitBreaker(threshold=3)
+    )
 
 
 async def test_discovery_selected_id_resolves_discovered():

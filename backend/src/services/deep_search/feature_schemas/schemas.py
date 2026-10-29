@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -48,6 +49,13 @@ ResolutionTool = Literal["google_maps", "parallel_web_search", "firecrawl"]
 # (firecrawl) target, so the tool is fixed by which target a later stage reads, not chosen.
 # The two dynamic depth bands the model defines metrics for; basic_profile is fixed.
 MetricBand = Literal["operating_details", "specific_attributes"]
+# Whether an LLM-defined metric's value is officially confirmable (`factual`) or only
+# establishable from lived customer experience (`experiential`). The single authoritative
+# signal: acquisition and every downstream fork read it instead of parsing verification text.
+# It also fixes the second `resolution_source` key (`scrape_target` for factual,
+# `review_target` for experiential). A metric that merely looks experiential but is officially
+# confirmable is `factual`.
+EvidenceClass = Literal["factual", "experiential"]
 # The bands a pre-defined (code-owned, Google-Maps-resolved) metric belongs to. Includes
 # basic_profile, which dynamic metrics never use; excludes specific_attributes, which has no
 # fixed dimensions of its own.
@@ -440,25 +448,36 @@ class DepthAssignmentResult(BaseModel):
 class ResolutionSourceEntry(BaseModel):
     """Wire shape of where later stages resolve one LLM-defined metric.
 
-    Per RC10 every LLM-defined metric carries both sources: a web-search target and a
-    firecrawl page-fetch target. The tool is implied by the field, never chosen by the model.
+    Per RC10 (revised): `web_target` is always present; the second target is
+    class-conditional — `scrape_target` for a factual metric, `review_target` for an
+    experiential one. Exactly one secondary is non-null (enforced in code; strict provider
+    schemas cannot express the conditional, so both keys are present and nullable). The tool
+    is implied by the field, never chosen by the model.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     web_target: str = Field(
         description=(
-            "The parallel_web_search hint: names the attribute or question to resolve, in "
-            "the entity's domain terms, phrased as a direction (for example 'availability of "
-            "a dedicated powerlifting platform at the gym'). Never a verdict to confirm, a "
-            "source type (no 'reviews', 'listings', 'official site'), or bare keywords. "
-            "Specific enough that the search keywords follow directly from it."
+            "The parallel_web_search hint (both classes): names the attribute or question to "
+            "resolve, in the entity's domain terms, phrased as a direction (for example "
+            "'availability of a dedicated powerlifting platform at the gym'). Never a verdict "
+            "to confirm, a source type (no 'reviews', 'listings', 'official site'), or bare "
+            "keywords. Specific enough that the search keywords follow directly from it."
         )
     )
-    scrape_target: str = Field(
+    scrape_target: str | None = Field(
         description=(
-            "The firecrawl target: the concrete page type to fetch for this metric (for "
-            "example the official site section or listing). Must name something specific."
+            "FACTUAL metrics only: the official first-party page to crawl for this metric "
+            "(for example the facilities/equipment section on the official site). Must name "
+            "something specific. Null for an experiential metric."
+        )
+    )
+    review_target: str | None = Field(
+        description=(
+            "EXPERIENTIAL metrics only: what to look for in the pre-supplied customer-reviews "
+            "block — a resolution reading hint, not a fetch target (reviews are never "
+            "fetched). Null for a factual metric."
         )
     )
 
@@ -489,11 +508,26 @@ class MetricEntry(BaseModel):
             "At least two distinct members when value_type is 'enum'. Empty list otherwise."
         )
     )
+    evidence_class: EvidenceClass = Field(
+        description=(
+            "'factual' when an official/authoritative source can confirm the value; "
+            "'experiential' when only lived customer experience can. The authoritative signal "
+            "that fixes the second resolution_source key (scrape_target for factual, "
+            "review_target for experiential) and downstream review eligibility. A metric that "
+            "merely looks experiential but is officially confirmable is 'factual'."
+        )
+    )
     # No description here: strict provider schemas reject any keyword beside a $ref, and
     # this field is a bare reference to ResolutionSourceEntry. The model's own docstring
     # and field descriptions carry the meaning.
     resolution_source: ResolutionSourceEntry
-    verification: str = Field(description="What evidence confirms the resolved value.")
+    verification: str = Field(
+        description=(
+            "The concrete evidentiary standard the evidence must meet to commit the value "
+            "(what must be shown, how much/how strong). The bar only — no source-acceptability "
+            "clause; source trust is derived from evidence_class."
+        )
+    )
     null_policy: NullPolicy = Field(
         description=(
             "What to emit if the value cannot be resolved: 'null' or 'unknown'. Never a guess."
@@ -663,12 +697,14 @@ class ResolutionSource:
 class MetricResolutionSource:
     """Stored resolution targets of one LLM-defined metric (never `google_maps`).
 
-    Per RC10, both sources are always present: a web-search target and a firecrawl
-    page-fetch target. The tool is implied by the field, not stored.
+    Per RC10 (revised): `web_target` is always present; the second target is class-conditional
+    — `scrape_target` for a factual metric, `review_target` for an experiential one — and
+    exactly one of the two is set. The tool is implied by the field, not stored.
     """
 
     web_target: str
-    scrape_target: str
+    scrape_target: str | None = None
+    review_target: str | None = None
 
 
 @dataclass
@@ -774,6 +810,7 @@ class MetricSpec:
     value_type: MetricValueType
     unit: str | None
     enum_values: list[str]
+    evidence_class: EvidenceClass
     resolution_source: MetricResolutionSource
     verification: str
     null_policy: NullPolicy
@@ -1122,6 +1159,128 @@ class OfficialGateRecord:
     reason_code: str
 
 
+# ---------------------------------------------------------------------------------
+# R3.M1.4 step 1 (Phase-1 Loop) contracts. Phase 1 fills one `Phase1Result` per amenity; until triage
+# exists, STEP 4 stores each pipeline's `AmenityPhase1Record` in `state.phase1_results` (temporary).
+# ---------------------------------------------------------------------------------
+
+# Where one evidence item came from. Phase 1 writes `web`; phase 2 adds `scrape`; R3.M2 adds the
+# amenity-level `google_reviews` item.
+EvidenceSourceKind = Literal["web", "scrape", "google_reviews"]
+# A metric's phase-1 state. `not_searched` = no call was ever attributed to it (coverage); `ok` /
+# `empty` are terminal clean outcomes; `failed` = the last attempt failed or was rejected.
+MetricSearchStatus = Literal["not_searched", "ok", "empty", "failed"]
+AmenityPipelineOutcome = Literal["completed", "resolution_call_failed", "pipeline_error"]
+
+
+@dataclass
+class MetricEvidenceItem:
+    """One distinct finding in `metrics_source_content`.
+
+    Identity is `(source_kind, url, shaped_text)`. `evidence_id` is assigned when the item is first
+    recorded and kept when a later identical finding merges in; only `metric_labels` grows.
+    `shaped_text` is exactly the text the LLM saw in the tool message (R3.M2.4 checks quotes on it).
+    """
+
+    evidence_id: str
+    source_kind: EvidenceSourceKind
+    url: str | None
+    shaped_text: str
+    retrieved_at: str
+    metric_labels: set[str]
+
+
+@dataclass
+class MetricsSourceContent:
+    """The amenity-scoped normalized evidence set (R3.M1.4 `metrics_source_content` shape).
+
+    A flat list of items; identical findings are stored once with their labels unioned, while the
+    same URL with different text stays a distinct item. Maps one-to-one to the evidence /
+    evidence_metric tables. Owned by one amenity pipeline, never shared.
+    """
+
+    items: list[MetricEvidenceItem] = field(default_factory=list)
+    _index: dict[tuple[str, str | None, str], MetricEvidenceItem] = field(
+        default_factory=dict, repr=False
+    )
+
+    def record(
+        self,
+        source_kind: EvidenceSourceKind,
+        url: str | None,
+        shaped_text: str,
+        retrieved_at: str,
+        metric_label: str | None,
+    ) -> MetricEvidenceItem:
+        """Add a new item, or merge `metric_label` into the item with the same identity triple."""
+        key = (source_kind, url, shaped_text)
+        item = self._index.get(key)
+        if item is None:
+            item = MetricEvidenceItem(
+                evidence_id=str(uuid4()),
+                source_kind=source_kind,
+                url=url,
+                shaped_text=shaped_text,
+                retrieved_at=retrieved_at,
+                metric_labels=set(),
+            )
+            self._index[key] = item
+            self.items.append(item)
+        if metric_label is not None:
+            item.metric_labels.add(metric_label)
+        return item
+
+    def items_for(self, metric_label: str) -> tuple[MetricEvidenceItem, ...]:
+        """One metric's evidence bucket: the items whose `metric_labels` contain the label."""
+        return tuple(item for item in self.items if metric_label in item.metric_labels)
+
+
+@dataclass
+class MetricSearchOutcome:
+    """One metric's phase-1 budget row, owned by the app (the LLM never counts attempts).
+
+    `attempts_used` counts executed searches AND guard-rejected attempts (max 2: one search plus one
+    retry). `failure_kind` is the gateway kind (`timeout`, `transport`, ...) or `rejected` for a
+    guard rejection; `None` unless `status == "failed"`. `empty` vs `failed` is kept for R3.M2.
+    """
+
+    label: str
+    status: MetricSearchStatus = "not_searched"
+    attempts_used: int = 0
+    failure_kind: str | None = None
+
+
+@dataclass
+class Phase1Result:
+    """Phase-1 handoff for one amenity: the shared conversation plus its evidence and ledger.
+
+    `messages` is the amenity's single provider-neutral message list; triage and phase 2 continue it.
+    `uncovered_labels` are metrics no phase-1 call was attributed to (forced unresolved later).
+    """
+
+    messages: list[dict]
+    metrics_source_content: MetricsSourceContent
+    metric_outcomes: dict[str, MetricSearchOutcome]
+    uncovered_labels: tuple[str, ...]
+    turns_run: int
+
+
+@dataclass(frozen=True)
+class AmenityPhase1Record:
+    """One amenity pipeline's result after STEP 4 (temporary, until triage consumes phase 1).
+
+    `phase1` is `None` unless `outcome == "completed"`: a provider failure discards the amenity's
+    evidence. `failed_stage` / `failed_cause` are set only for `resolution_call_failed`.
+    """
+
+    category_id: int
+    place_id: str
+    outcome: AmenityPipelineOutcome
+    phase1: Phase1Result | None
+    failed_stage: str | None = None
+    failed_cause: str | None = None
+
+
 @dataclass
 class AmenitySearchState:
     """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
@@ -1160,3 +1319,6 @@ class AmenitySearchState:
     official_gate_results: dict[tuple[int, str], OfficialGateRecord] = field(
         default_factory=dict
     )
+    # R3.M1.4 step 1, TEMPORARY: one `AmenityPhase1Record` per work item, written once after the
+    # STEP 4 barrier. Triage (R3.M1.4 step 2) takes over this output when it is built.
+    phase1_results: dict[tuple[int, str], AmenityPhase1Record] = field(default_factory=dict)

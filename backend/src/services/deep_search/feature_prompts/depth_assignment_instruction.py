@@ -109,20 +109,26 @@ contract; they are fixed and Maps-resolvable.
   Indirect = a persona / inferred fact implies they would weigh it.
 - value_type: one of number+unit | boolean | enum[fixed set] | date/time. Free-form prose
   as a final value is disallowed.
-- resolution_source: both a web_target (names the attribute or question to resolve, in the
-  entity's domain terms, phrased as a direction — not a verdict, a source type, or keywords)
-  and a scrape_target (which page type firecrawl hits); every LLM-defined metric carries both.
-  Maps is not used for an LLM-defined metric.
-- verification: what evidence confirms the value.
+- evidence_class: factual | experiential. factual = an official source can confirm the value;
+  experiential = only lived customer experience can. Fixes the second resolution_source key and
+  whether reviews may resolve it.
+- resolution_source: exactly two keys. web_target (always; names the attribute or question to
+  resolve, in the entity's domain terms, phrased as a direction — not a verdict, a source type,
+  or keywords) plus, by evidence_class, scrape_target (factual: which official page firecrawl
+  hits) or review_target (experiential: what to look for in customer reviews, which are read,
+  never fetched). Maps is not used for an LLM-defined metric.
+- verification: the bar the evidence must meet to commit the value — no source clause (source
+  trust comes from evidence_class).
 - null_policy: what to emit if unresolved — must be null / "unknown", never guessed.
 
 Rejection example: "is it cozy?" fails because value_type has no enumerable range,
 resolution_source names nothing concrete, and verification cannot be specified.
 Reformulated to pass: label ambiance; question "user wants a quiet place to work (persona:
 remote worker) — is it quiet or lively?"; value_type enum[quiet, mixed, lively];
-resolution_source web_target "noise level and atmosphere at the venue" and scrape_target
-"about or atmosphere section on the official site"; verification dominant sentiment
-across ≥5 reviews mentioning noise/atmosphere; null_policy "unknown"."""
+resolution_source web_target "noise level and atmosphere at the venue" and review_target
+"mentions of noise or atmosphere in customer reviews"; evidence_class experiential;
+verification dominant sentiment across ≥5 reviews mentioning noise/atmosphere; null_policy
+"unknown"."""
 
 SIGNAL_SOURCES = """\
 TRIGGER SIGNALS

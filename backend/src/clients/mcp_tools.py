@@ -60,12 +60,14 @@ SCRAPE_TIMEOUT_SECONDS = 60.0
 # crawl-plus-poll wait so a stuck job cannot block a run forever.
 CRAWL_CALL_TIMEOUT_SECONDS = 60.0
 CRAWL_DEADLINE_SECONDS = 180.0
-# Transient backoff for timeout/transport blips: retry fast on the same session.
-RETRY_BACKOFFS_SECONDS = (2.0, 3.0)
-# Rate-limited backoff (M8): a per-minute window needs a wait approaching 60 s, so two short waits
-# would both fall inside the same throttled minute. Honor a response Retry-After when present
-# (OV-8); the window figure is confirmed from Firecrawl's limits page.
-RATE_LIMIT_BACKOFFS_SECONDS = (30.0, 60.0)
+# Retry limits are per failure kind (R3.M1.4 prerequisite): a kind retries as many times as its own
+# backoff tuple is long, so timeout/transport and rate-limit limits can differ.
+# Transient backoff for timeout/transport blips: ONE fast retry on the same session. Anything still
+# failing returns `failed`, and the phase loop's per-metric budget retry takes over.
+RETRY_BACKOFFS_SECONDS = (2.0,)
+# Rate-limited backoff (M8): two 30 s waits span ~60 s from the first 429, which clears a one-minute
+# window. Only waiting fixes a 429, so it keeps two retries.
+RATE_LIMIT_BACKOFFS_SECONDS = (30.0, 30.0)
 CRAWL_POLL_INTERVAL_SECONDS = 3.0
 SEARCH_CONCURRENCY = 4
 # One slot pool for every Firecrawl call (map, scrape, crawl, and the scrape_pages fan-out). Sized
@@ -138,6 +140,13 @@ def _timestamp() -> str:
 async def _async_sleep(seconds: float) -> None:
     """Indirection for retry and poll waits so tests can replace it without touching real time."""
     await asyncio.sleep(seconds)
+
+
+def _backoffs_for(kind: str) -> tuple[float, ...]:
+    """The backoff tuple of one failure kind; its length is that kind's retry limit."""
+    if kind == "rate_limited":
+        return RATE_LIMIT_BACKOFFS_SECONDS
+    return RETRY_BACKOFFS_SECONDS
 
 
 # --------------------------------------------------------------------------------------------------
@@ -859,27 +868,25 @@ class McpToolGateway:
         Firecrawl path (A7); each attempt takes a token (a retry is another real call), and the
         Parallel path passes `None`.
         """
-        failure: ToolFailure | None = None
-        max_retries = len(RETRY_BACKOFFS_SECONDS)
-        for attempt in range(max_retries + 1):
+        # Retries are counted per failure kind, and each kind stops at the length of its own backoff
+        # tuple (R3.M1.4 prerequisite "per-kind gateway retry limits"). A call that times out and
+        # then hits a 429 therefore keeps both caps instead of sharing one.
+        retries_by_kind: dict[str, int] = {}
+        attempt = 0
+        while True:
             outcome = await self._single_call(semaphore, client, tool, arguments, timeout, rate)
             if not isinstance(outcome, ToolFailure):
                 return outcome
-            failure = outcome
             _log_attempt(tool, attempt, outcome, target)
-            if outcome.kind in retry_kinds and attempt < max_retries:
-                # Backoff by kind (M8): a rate limit needs a wait that clears the per-minute window,
-                # while a timeout/transport blip retries fast. Both sequences are the same length.
-                backoffs = (
-                    RATE_LIMIT_BACKOFFS_SECONDS
-                    if outcome.kind == "rate_limited"
-                    else RETRY_BACKOFFS_SECONDS
-                )
-                await _async_sleep(backoffs[attempt])
-                continue
-            break
-        assert failure is not None
-        return failure
+            attempt += 1
+            if outcome.kind not in retry_kinds:
+                return outcome
+            backoffs = _backoffs_for(outcome.kind)
+            used = retries_by_kind.get(outcome.kind, 0)
+            if used >= len(backoffs):
+                return outcome
+            retries_by_kind[outcome.kind] = used + 1
+            await _async_sleep(backoffs[used])
 
     async def _single_call(
         self,
