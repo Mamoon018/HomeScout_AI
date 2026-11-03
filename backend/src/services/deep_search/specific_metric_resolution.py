@@ -4,14 +4,22 @@ This module holds the `SpecificMetricResolution` responsibility class. Its entry
 `run_specific_metric_resolution` is being built sub-component by sub-component, following
 `feature_context/R3_Specific_Metric_Resolution_spec.md` and `feature_context/R3_M1_Traceflow.md`.
 
-**Built so far: through STEP 5 with phase 1 only (R3.M1.4 step 1).** `run_specific_metric_resolution`
+**Built so far: through STEP 5 with phase 1 + R3.M2.2 resolution.** `run_specific_metric_resolution`
 opens the gateway, builds `plan_index` (STEP 1), derives the eligible work items (STEP 2, RC7), runs
 the R3.M1.3 discovery batch (STEP 3) to populate `state.website_search_results` /
 `state.discovery_search_results` / `state.official_gate_results`, runs one amenity pipeline per work
-item (STEP 4; the pipeline is the R3.M1.4 Phase-1 Loop alone for now), sweeps the results (STEP 5),
-writes them to the TEMPORARY `state.phase1_results`, then closes the gateway. A run-scoped circuit
-breaker (R3.M1.5) is shared by discovery and the pipelines. **Not yet built:** triage, phase 2, R3.M2
-resolution and STEP 6 combine, so `state.amenity_records` is still `None` after this partial run.
+item (STEP 4: the R3.M1.4 Phase-1 Loop, then the R3.M2.2 resolution turn), sweeps the results
+(STEP 5), writes them to the TEMPORARY `state.resolution_results`, then closes the gateway. A
+run-scoped circuit breaker (R3.M1.5) is shared by discovery and the pipelines. **Not yet built:**
+triage and phase 2 (deferred), R3.M2.3 conformance, R3.M2.4 provenance and STEP 6 combine, so
+`state.amenity_records` is still `None` after this partial run.
+
+R3.M2.2 resolution, per amenity (after phase 1): write the Google reviews as one unlinked
+`google_reviews` evidence item; skip the call when no metric has evidence and no reviews exist
+(every metric `no_evidence`); otherwise one fresh structured call over every metric. Correct entries
+are kept, extra labels dropped, duplicated labels treated as missing, and missing labels get ONE
+follow-up call (still missing → `resolution_body_invalid`). A provider failure on the first call
+ends the amenity like a phase-1 failure; on the follow-up only its labels fail.
 
 R3.M1.4 Phase-1 Loop, per amenity: turn 1 asks the LLM for one `web_search` per metric (all metrics,
 each tagged `metric_label`); the app owns the budget (one search + one retry per metric), runs the
@@ -69,18 +77,26 @@ from src.services.deep_search.feature_prompts.phase1_web_search_instruction impo
 from src.services.deep_search.feature_prompts.phase1_web_search_instruction import (
     build_phase1_search_instruction,
 )
+from src.services.deep_search.feature_prompts.resolution_instruction import (
+    build_resolution_instruction,
+    render_resolution_input,
+)
 from src.services.deep_search.feature_prompts.website_discovery_instruction import (
     build_discovery_search_instruction,
     build_website_selection_instruction,
 )
 from src.services.deep_search.feature_schemas.schemas import (
+    RESOLUTION_SCHEMA_NAME,
     WEBSITE_SELECTION_SCHEMA_NAME,
-    AmenityPhase1Record,
+    AmenityPipelineOutcome,
+    AmenityResolutionRecord,
     AmenitySearchState,
     CategoryMetricPlan,
     DepthLevel,
     DiscoveryCandidate,
     DiscoverySearchRecord,
+    MetricResolutionEntry,
+    MetricResolutionResult,
     MetricSearchOutcome,
     MetricSearchStatus,
     MetricsSourceContent,
@@ -88,8 +104,10 @@ from src.services.deep_search.feature_schemas.schemas import (
     OfficialGateRecord,
     Phase1Result,
     PredefinedMetricsRecord,
+    UnresolvedReason,
     WebsiteSearchResult,
     WebsiteSelectionResult,
+    resolution_json_schema,
     website_selection_json_schema,
 )
 from src.services.deep_search.official_url_gate import official_url_gate
@@ -151,6 +169,26 @@ PHASE1_METRICS_UNCOVERED_EVENT = "r3m1_4.metrics_uncovered"
 PHASE1_DONE_EVENT = "r3m1_4.phase1_done"
 # DEBUG, like the R3.M1.3 object trace: the finalized Phase1Result summary per amenity.
 PHASE1_OBJECT_FINALIZED_EVENT = "r3m1_4.object_finalized"
+
+# R3.M2.2 resolution turn: one first call over every metric, at most one follow-up for missing labels.
+RESOLUTION_STAGE = "r3_m2_2_resolution"
+RESOLUTION_FOLLOWUP_STAGE = "r3_m2_2_resolution_followup"
+# R3.M2.2 log events (spec "Logging"), threaded by run_id + the (category_id, place_id) key.
+RESOLUTION_VALIDATED_EVENT = "metric_resolution.validated"
+RESOLUTION_EXTRA_LABEL_EVENT = "metric_resolution.extra_label_dropped"
+RESOLUTION_DUPLICATE_LABEL_EVENT = "metric_resolution.duplicate_label"
+RESOLUTION_MISSING_RETRY_EVENT = "metric_resolution.missing_label_retry"
+RESOLUTION_REJECTED_EVENT = "metric_resolution.rejected"
+RESOLUTION_FOLLOWUP_FAILED_EVENT = "metric_resolution.followup_failed"
+RESOLUTION_BODY_UNPARSEABLE_EVENT = "metric_resolution.body_unparseable"
+RESOLUTION_DONE_EVENT = "metric_resolution.done"
+# DEBUG: the finalized per-label resolution summary (values, basis), like the other object traces.
+RESOLUTION_OBJECT_FINALIZED_EVENT = "metric_resolution.object_finalized"
+# DEBUG boundary-out line, once per resolution call: the rendered user turn exactly as the LLM gets
+# it (each metric's evidence bucket as formatted text + the shared reviews block). Phase 1 logs only
+# evidence URLs, so this is the one record of the text a resolution value was judged from. DEBUG
+# (like `llm_provider.raw_body`, its response-side pair) because it carries full evidence text.
+RESOLUTION_INPUT_RENDERED_EVENT = "metric_resolution.input_rendered"
 
 # Gateway failure kinds rendered for the LLM in a `failed` tool message (a few words, no retry flag).
 _FAILURE_PHRASES = {
@@ -256,6 +294,21 @@ class _ShapedToolResult:
     failure_kind: str | None
 
 
+@dataclass(frozen=True)
+class _LabelSort:
+    """R3.M2.2 label coverage for one resolution call's body (spec "Label coverage" Step 1).
+
+    `kept` = submitted labels returned exactly once. `extra` = returned labels never submitted
+    (dropped). `duplicate` = submitted labels returned more than once (all copies dropped; also in
+    `missing`). `missing` = submitted labels not kept, in submitted order (sent to the follow-up).
+    """
+
+    kept: dict[str, MetricResolutionEntry]
+    extra: tuple[str, ...]
+    duplicate: tuple[str, ...]
+    missing: tuple[str, ...]
+
+
 class SpecificMetricResolution:
     """Responsibility 3: resolve each LLM-defined `specific_metric` to a committed factual value.
 
@@ -282,17 +335,21 @@ class SpecificMetricResolution:
         self._owns_caller = owns_caller
         # Consecutive availability failures that open the run's circuit breaker (R3.M1.5).
         self._breaker_threshold = breaker_threshold
+        # R3.M2.1 static artifacts for every R3.M2.2 call: no per-run or per-amenity data, so they
+        # are built once here and never mutated (only mutable per-run state stays off `self`).
+        self._resolution_schema = resolution_json_schema()
+        self._resolution_instruction = build_resolution_instruction(self._resolution_schema)
 
     async def run_specific_metric_resolution(
         self, state: AmenitySearchState
     ) -> AmenitySearchState:
-        """R3 entry point — built through STEP 5 with the Phase-1 Loop as the only pipeline step.
+        """R3 entry point — built through STEP 5; each pipeline runs phase 1 then R3.M2.2.
 
         Opens the gateway, builds `plan_index` (STEP 1), derives the eligible work items (STEP 2),
         builds the phase-1 catalog (fails the run before any LLM call if the schema is unusable),
         runs the discovery batch (STEP 3), runs one pipeline per work item (STEP 4), sweeps the
-        results into `state.phase1_results` (STEP 5) and applies the run-level raise, then closes
-        the gateway. STEP 6 (combine) is not built, so `state.amenity_records` stays `None`.
+        results into `state.resolution_results` (STEP 5) and applies the run-level raise, then
+        closes the gateway. STEP 6 (combine) is not built, so `state.amenity_records` stays `None`.
         """
         if self._llm_caller is None:
             # Discovery Stage 1 needs the shared caller; a None caller is a composition-root bug.
@@ -323,7 +380,7 @@ class SpecificMetricResolution:
                 )
                 records = self._sweep_pipeline_results(work_items, results, breaker, run_id)
                 # The only STEP 4/5 state write, after the barrier (pipelines return by value).
-                state.phase1_results.update(records)
+                state.resolution_results.update(records)
                 self._raise_if_no_pipeline_completed(records, breaker)  # STEP 5 run-level raise
         finally:
             # Session scope = this method (C3.1.1): close the gateway sessions even on failure. The
@@ -760,7 +817,7 @@ class SpecificMetricResolution:
         breaker.record_success()
         return result
 
-    # ---- STEP 4 (amenity pipelines; R3.M1.4 phase 1 only for now) ------------------------------
+    # ---- STEP 4 (amenity pipelines: R3.M1.4 phase 1, then R3.M2.2 resolution) ----------------
     async def _run_amenity_pipelines(
         self,
         state: AmenitySearchState,
@@ -768,7 +825,7 @@ class SpecificMetricResolution:
         catalog: list[dict],
         breaker: _CircuitBreaker,
         run_id: str,
-    ) -> list[AmenityPhase1Record | BaseException]:
+    ) -> list[AmenityResolutionRecord | BaseException]:
         """STEP 4: one pipeline per work item, concurrently under a cap; the gather is the barrier.
 
         Pipelines read state but write none; each returns its record by value. An unexpected raise
@@ -787,7 +844,7 @@ class SpecificMetricResolution:
         )
         semaphore = asyncio.Semaphore(AMENITY_PIPELINE_CONCURRENCY)
 
-        async def _one(work_item: _DiscoveryWorkItem) -> AmenityPhase1Record:
+        async def _one(work_item: _DiscoveryWorkItem) -> AmenityResolutionRecord:
             key = (work_item.category_id, work_item.place_id)
             website = state.website_search_results.get(key)
             if website is None:
@@ -817,12 +874,14 @@ class SpecificMetricResolution:
         catalog: list[dict],
         breaker: _CircuitBreaker,
         run_id: str,
-    ) -> AmenityPhase1Record:
-        """One amenity pipeline with its provider-failure catch (R3.M1.5 pipeline catch).
+    ) -> AmenityResolutionRecord:
+        """One amenity pipeline (phase 1 → R3.M2.2) with its provider-failure catch (R3.M1.5).
 
-        A `MetricResolutionProviderError` from any LLM step ends the amenity: evidence is discarded
-        and the record is `resolution_call_failed` with the step's `stage` and `cause`. Any other
-        exception propagates to the gather (and becomes `pipeline_error` in the sweep).
+        A `MetricResolutionProviderError` from phase 1 or the FIRST resolution call ends the
+        amenity: evidence is discarded and every metric is `resolution_call_failed`, with the
+        step's `stage` and `cause` on the record. A follow-up-call failure is handled inside
+        `_resolve_amenity` (kept entries stand). Any other exception propagates to the gather (and
+        becomes `pipeline_error` in the sweep).
         """
         key = (work_item.category_id, work_item.place_id)
         if rec is None:
@@ -830,9 +889,10 @@ class SpecificMetricResolution:
             self._log_pipeline_event(
                 logging.WARNING, PIPELINE_DEGRADED_EVENT, run_id, key, reason="missing_record"
             )
-            return AmenityPhase1Record(key[0], key[1], "pipeline_error", None)
+            return _failed_record(work_item, "pipeline_error")
         try:
             phase1 = await self._phase1_loop(work_item, rec, website, catalog, breaker, run_id)
+            return await self._resolve_amenity(work_item, rec, website, phase1, breaker, run_id)
         except MetricResolutionProviderError as exc:
             self._log_pipeline_event(
                 logging.WARNING,
@@ -842,15 +902,285 @@ class SpecificMetricResolution:
                 stage=exc.stage,
                 cause=exc.cause,
             )
-            return AmenityPhase1Record(
-                key[0],
-                key[1],
+            # The first resolution call was made unless the breaker stopped it (or phase 1 failed).
+            calls = 1 if exc.stage == RESOLUTION_STAGE and exc.cause != "circuit_open" else 0
+            return _failed_record(
+                work_item,
                 "resolution_call_failed",
-                None,
-                failed_stage=exc.stage,
-                failed_cause=exc.cause,
+                stage=exc.stage,
+                cause=exc.cause,
+                resolution_calls=calls,
             )
-        return AmenityPhase1Record(key[0], key[1], "completed", phase1)
+
+    # ---- R3.M2.2: run the resolution turn and validate the body --------------------------------
+    async def _resolve_amenity(
+        self,
+        work_item: _DiscoveryWorkItem,
+        rec: PredefinedMetricsRecord,
+        website: WebsiteSearchResult,
+        phase1: Phase1Result,
+        breaker: _CircuitBreaker,
+        run_id: str,
+    ) -> AmenityResolutionRecord:
+        """R3.M2.2 workflow: reviews item → skip rule → call 1 → label coverage → ≤1 follow-up.
+
+        Mutates `phase1.metrics_source_content` (adds the `google_reviews` item). A provider error
+        on the FIRST call propagates to the pipeline catch (evidence discarded). A follow-up error
+        is caught here: only its labels become `resolution_call_failed`; kept entries stand. Every
+        submitted label ends in exactly one of `kept` / `unresolved`. At most 2 calls.
+        """
+        key = (work_item.category_id, work_item.place_id)
+        metrics = work_item.specific_metrics
+        store = phase1.metrics_source_content
+        kept: dict[str, MetricResolutionEntry] = {}
+        unresolved: dict[str, UnresolvedReason] = {}
+        calls = 0
+        followup_skipped = False
+
+        # Step 1: written once, before the skip rule and the follow-up (both read it).
+        reviews_recorded = _record_review_evidence(rec, store, _timestamp())
+
+        # Step 2: structural skip rule; never reads `verification` text.
+        skipped = not _has_resolution_evidence(metrics, store)
+        if skipped:
+            unresolved = {metric.label: "no_evidence" for metric in metrics}
+        else:
+            # Step 3: call 1 over every metric. A provider error propagates (P1).
+            result = await self._run_resolution_call(
+                metrics, rec, website, store, RESOLUTION_STAGE, breaker, key, run_id
+            )
+            calls = 1
+            # Step 4a/b: sort every returned entry by its label.
+            first = _sort_entries_by_label(result, [metric.label for metric in metrics])
+            self._log_label_sort(first, len(metrics), RESOLUTION_STAGE, key, run_id)
+            kept.update(first.kept)
+
+            if first.missing:
+                missing_set = set(first.missing)
+                missing_metrics = [metric for metric in metrics if metric.label in missing_set]
+                # Step 4c: the skip rule runs on the missing metrics first.
+                if not _has_resolution_evidence(missing_metrics, store):
+                    followup_skipped = True
+                    unresolved.update({label: "no_evidence" for label in first.missing})
+                else:
+                    self._log_pipeline_event(
+                        logging.WARNING,
+                        RESOLUTION_MISSING_RETRY_EVENT,
+                        run_id,
+                        key,
+                        labels=list(first.missing),
+                    )
+                    try:
+                        followup = await self._run_resolution_call(
+                            missing_metrics,
+                            rec,
+                            website,
+                            store,
+                            RESOLUTION_FOLLOWUP_STAGE,
+                            breaker,
+                            key,
+                            run_id,
+                        )
+                    except MetricResolutionProviderError as exc:
+                        # Degrade, not end: kept entries stand. This WARN is the only signal.
+                        if exc.cause != "circuit_open":
+                            calls += 1
+                        self._log_pipeline_event(
+                            logging.WARNING,
+                            RESOLUTION_FOLLOWUP_FAILED_EVENT,
+                            run_id,
+                            key,
+                            stage=exc.stage,
+                            cause=exc.cause,
+                            labels=list(first.missing),
+                        )
+                        unresolved.update(
+                            {label: "resolution_call_failed" for label in first.missing}
+                        )
+                    else:
+                        calls += 1
+                        # Submitted set = missing labels only, so a kept label coming back is
+                        # `extra` and dropped: kept entries are never overwritten.
+                        second = _sort_entries_by_label(followup, list(first.missing))
+                        self._log_label_sort(
+                            second, len(first.missing), RESOLUTION_FOLLOWUP_STAGE, key, run_id
+                        )
+                        kept.update(second.kept)
+                        if second.missing:
+                            # Step 3: no third call (LC1: one reason; detail in logs only).
+                            self._log_pipeline_event(
+                                logging.WARNING,
+                                RESOLUTION_REJECTED_EVENT,
+                                run_id,
+                                key,
+                                labels=list(second.missing),
+                                duplicate=list(second.duplicate),
+                                reason="resolution_body_invalid",
+                            )
+                            unresolved.update(
+                                {label: "resolution_body_invalid" for label in second.missing}
+                            )
+
+        # Plan order for both maps, so the record reads the same whatever order calls returned.
+        kept = {m.label: kept[m.label] for m in metrics if m.label in kept}
+        unresolved = {m.label: unresolved[m.label] for m in metrics if m.label in unresolved}
+        record = AmenityResolutionRecord(
+            category_id=key[0],
+            place_id=key[1],
+            outcome="completed",
+            kept=kept,
+            unresolved=unresolved,
+            phase1=phase1,
+            resolution_calls=calls,
+        )
+        reason_counts: dict[str, int] = {}
+        for reason in unresolved.values():
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        self._log_pipeline_event(
+            logging.INFO,
+            RESOLUTION_DONE_EVENT,
+            run_id,
+            key,
+            calls=calls,
+            skipped=skipped,
+            followup_skipped=followup_skipped,
+            reviews_recorded=reviews_recorded,
+            kept=len(kept),
+            unresolved=reason_counts,
+        )
+        self._log_pipeline_event(
+            logging.DEBUG,
+            RESOLUTION_OBJECT_FINALIZED_EVENT,
+            run_id,
+            key,
+            object="amenity_resolution_record",
+            kept={
+                label: {
+                    "verification_met": entry.verification_met,
+                    "final_value": entry.final_value,
+                    "basis": entry.basis,
+                    "relation": entry.relation,
+                    "opinion_mixed": entry.opinion_mixed,
+                    "quotes": len(entry.evidence),
+                }
+                for label, entry in kept.items()
+            },
+            unresolved=dict(unresolved),
+        )
+        return record
+
+    async def _run_resolution_call(
+        self,
+        metrics: Sequence[MetricSpec],
+        rec: PredefinedMetricsRecord,
+        website: WebsiteSearchResult,
+        store: MetricsSourceContent,
+        stage: str,
+        breaker: _CircuitBreaker,
+        key: tuple[int, str],
+        run_id: str,
+    ) -> MetricResolutionResult:
+        """One resolution call: breaker check → render → counted structured call → parse.
+
+        Fresh call: the static R3.M2.1 instruction is the system message, the rendered evidence the
+        user turn (no tools, no phase-1 thread). An unparseable body (a safety line under strict
+        mode) cannot fall back, so it is raised like a provider failure, `cause = content`.
+        """
+        assert self._llm_caller is not None  # guarded in run_specific_metric_resolution
+        breaker.check(stage)
+        user_turn = render_resolution_input(
+            rec.name, rec.address, website.website_url, metrics, store
+        )
+        rendered = json.loads(user_turn)
+        self._log_pipeline_event(
+            logging.DEBUG,
+            RESOLUTION_INPUT_RENDERED_EVENT,
+            run_id,
+            key,
+            stage=stage,
+            amenity=rendered["amenity"],
+            buckets=[
+                {
+                    "label": section["label"],
+                    "evidence_class": section["evidence_class"],
+                    "evidence_items": len(section["evidence"]),
+                    "evidence": section["evidence"],
+                }
+                for section in rendered["metrics"]
+            ],
+            google_reviews=rendered["google_reviews"],
+            user_turn_chars=len(user_turn),
+        )
+        body, _answered_by = await self._counted_llm_call(
+            breaker,
+            self._llm_caller.call_structured(
+                instruction=self._resolution_instruction,
+                user_content=user_turn,
+                json_schema=self._resolution_schema,
+                schema_name=RESOLUTION_SCHEMA_NAME,
+                stage=stage,
+                provider_error_cls=MetricResolutionProviderError,
+            ),
+        )
+        try:
+            return MetricResolutionResult.model_validate(body)
+        except ValidationError as exc:
+            errors = exc.errors()
+            # Boundary: the body from outside failed the wire model. Log where, never the values.
+            self._log_pipeline_event(
+                logging.WARNING,
+                RESOLUTION_BODY_UNPARSEABLE_EVENT,
+                run_id,
+                key,
+                stage=stage,
+                error_count=len(errors),
+                first_error_loc=[str(part) for part in errors[0]["loc"]] if errors else None,
+            )
+            raise MetricResolutionProviderError(
+                f"{stage} body failed MetricResolutionResult validation ({len(errors)} errors)",
+                stage=stage,
+                cause="content",
+            ) from exc
+
+    def _log_label_sort(
+        self,
+        sort: _LabelSort,
+        submitted: int,
+        stage: str,
+        key: tuple[int, str],
+        run_id: str,
+    ) -> None:
+        """`validated` once per call, plus one drift line each for extra / duplicate labels."""
+        self._log_pipeline_event(
+            logging.INFO,
+            RESOLUTION_VALIDATED_EVENT,
+            run_id,
+            key,
+            stage=stage,
+            submitted=submitted,
+            kept=len(sort.kept),
+            extra=len(sort.extra),
+            duplicate=len(sort.duplicate),
+            missing=len(sort.missing),
+        )
+        if sort.extra:
+            self._log_pipeline_event(
+                logging.WARNING,
+                RESOLUTION_EXTRA_LABEL_EVENT,
+                run_id,
+                key,
+                stage=stage,
+                labels=list(sort.extra),
+            )
+        if sort.duplicate:
+            self._log_pipeline_event(
+                logging.WARNING,
+                RESOLUTION_DUPLICATE_LABEL_EVENT,
+                run_id,
+                key,
+                stage=stage,
+                labels=list(sort.duplicate),
+            )
 
     # ---- R3.M1.4 step 1: Phase-1 Loop ----------------------------------------------------------
     async def _phase1_loop(
@@ -1092,12 +1422,12 @@ class SpecificMetricResolution:
     def _sweep_pipeline_results(
         self,
         work_items: list[_DiscoveryWorkItem],
-        results: list[AmenityPhase1Record | BaseException],
+        results: list[AmenityResolutionRecord | BaseException],
         breaker: _CircuitBreaker,
         run_id: str,
-    ) -> dict[tuple[int, str], AmenityPhase1Record]:
+    ) -> dict[tuple[int, str], AmenityResolutionRecord]:
         """STEP 5: turn every gather slot into a record; an exception slot is a `pipeline_error`."""
-        records: dict[tuple[int, str], AmenityPhase1Record] = {}
+        records: dict[tuple[int, str], AmenityResolutionRecord] = {}
         for work_item, result in zip(work_items, results):
             key = (work_item.category_id, work_item.place_id)
             if isinstance(result, BaseException):
@@ -1110,7 +1440,7 @@ class SpecificMetricResolution:
                     error_type=type(result).__name__,
                     message=str(result),
                 )
-                records[key] = AmenityPhase1Record(key[0], key[1], "pipeline_error", None)
+                records[key] = _failed_record(work_item, "pipeline_error")
             else:
                 records[key] = result
         counts = {"completed": 0, "resolution_call_failed": 0, "pipeline_error": 0}
@@ -1131,7 +1461,7 @@ class SpecificMetricResolution:
 
     def _raise_if_no_pipeline_completed(
         self,
-        records: dict[tuple[int, str], AmenityPhase1Record],
+        records: dict[tuple[int, str], AmenityResolutionRecord],
         breaker: _CircuitBreaker,
     ) -> None:
         """Run-level raise: no pipeline completed and at least one ended on a provider failure.
@@ -1555,6 +1885,121 @@ def _record_web_evidence(
             )
             recorded += 1
     return recorded
+
+
+# --------------------------------------------------------------------------------------------------
+# Module-level pure helpers (R3.M2.2: reviews item, skip rule, label coverage, failure record).
+# --------------------------------------------------------------------------------------------------
+def _review_text(review: dict) -> str | None:
+    """A review's text: `text.text`, else `original_text.text`; None when neither has content."""
+    for field_name in ("text", "original_text"):
+        block = review.get(field_name)
+        if isinstance(block, dict):
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return None
+
+
+def _shape_reviews_text(reviews: list | None) -> tuple[str | None, int]:
+    """The numbered reviews block (spec "Reviews item") and how many reviews it holds.
+
+    `Review N (★r): <text>` per review with text, in Google's order, joined by a blank line. `N`
+    counts written reviews only (a rating-only review is skipped, not numbered); the rating is a
+    whole number, or left out when missing. Text is copied verbatim (R3.M2.4 matches quotes on it).
+    Author, photo, links and publish time are never included. `(None, 0)` when nothing to quote.
+    """
+    entries: list[str] = []
+    for review in reviews or ():
+        text = _review_text(review)
+        if text is None:
+            continue
+        number = len(entries) + 1
+        rating = review.get("rating")
+        if isinstance(rating, (int, float)) and not isinstance(rating, bool):
+            header = f"Review {number} (★{round(rating)}):"
+        else:
+            header = f"Review {number}:"
+        entries.append(f"{header} {text}")
+    if not entries:
+        return None, 0
+    return "\n\n".join(entries), len(entries)
+
+
+def _record_review_evidence(
+    rec: PredefinedMetricsRecord, store: MetricsSourceContent, retrieved_at: str
+) -> int:
+    """Write the reviews as ONE unlinked `google_reviews` item; returns the reviews written.
+
+    `url = None`, `metric_label = None` (so the item is in no metric bucket). Writes nothing when
+    `rec.reviews` is None / empty or no review has text (the renderer then shows null).
+    """
+    text, count = _shape_reviews_text(rec.reviews)
+    if text is None:
+        return 0
+    store.record("google_reviews", None, text, retrieved_at, None)
+    return count
+
+
+def _has_resolution_evidence(
+    metrics: Sequence[MetricSpec], store: MetricsSourceContent
+) -> bool:
+    """Skip-rule test: any metric has web/scrape evidence, or a `google_reviews` item exists."""
+    if any(store.items_for(metric.label) for metric in metrics):
+        return True
+    return any(item.source_kind == "google_reviews" for item in store.items)
+
+
+def _sort_entries_by_label(
+    result: MetricResolutionResult, submitted: Sequence[str]
+) -> _LabelSort:
+    """Sort a body's entries: correct (kept) / extra (dropped) / duplicate (→ missing) / missing.
+
+    Labels match exactly (the instruction says to copy them verbatim). A duplicated submitted label
+    keeps no copy, because the app cannot tell which one is right.
+    """
+    submitted_set = set(submitted)
+    counts: dict[str, int] = {}
+    for entry in result.metrics:
+        counts[entry.metric_label] = counts.get(entry.metric_label, 0) + 1
+    kept: dict[str, MetricResolutionEntry] = {}
+    extra: list[str] = []
+    for entry in result.metrics:
+        label = entry.metric_label
+        if label not in submitted_set:
+            if label not in extra:
+                extra.append(label)
+        elif counts[label] == 1:
+            kept[label] = entry
+    duplicate = tuple(label for label in submitted if counts.get(label, 0) > 1)
+    missing = tuple(label for label in submitted if label not in kept)
+    return _LabelSort(kept=kept, extra=tuple(extra), duplicate=duplicate, missing=missing)
+
+
+def _failed_record(
+    work_item: _DiscoveryWorkItem,
+    outcome: AmenityPipelineOutcome,
+    *,
+    stage: str | None = None,
+    cause: str | None = None,
+    resolution_calls: int = 0,
+) -> AmenityResolutionRecord:
+    """An amenity that produced nothing: every label `resolution_call_failed`, evidence dropped.
+
+    Used for a phase-1 / first-call provider failure and for `pipeline_error` (missing record or a
+    crashed pipeline). The failing step and cause go on the record only for provider failures.
+    """
+    return AmenityResolutionRecord(
+        category_id=work_item.category_id,
+        place_id=work_item.place_id,
+        outcome=outcome,
+        kept={},
+        unresolved={metric.label: "resolution_call_failed" for metric in work_item.specific_metrics},
+        phase1=None,
+        resolution_calls=resolution_calls,
+        failed_stage=stage,
+        failed_cause=cause,
+    )
 
 
 def create_specific_metric_resolution(

@@ -4,6 +4,8 @@
 
 `run_specific_metric_resolution` is built through STEP 3 (R3.M1.3 discovery). This plan adds STEP 4 for **phase 1 only**: per amenity, a tool-calling loop (function-calling loop) that runs one `web_search` per metric in turn 1, then at most one retry turn for metrics whose search `failed`, and records web evidence into `metrics_source_content`. Triage, phase 2 and resolution are not built, so STEP 4's pipeline is `phase1_loop` alone and its output lands in a temporary state store.
 
+> **Scope update (2026-11-02).** Triage and phase 2 are now **DEFERRED** in the spec. The pipeline's next step after `phase1_loop` is **R3.M2 resolution**, so every "→ triage (later)" reader below now means "→ R3.M2 resolution". Nothing built here changes. One follow-up from this decision: the gateway's `open()` must stop starting the Firecrawl session (spec C3.1.1 "Firecrawl connection deferred"), which touches `mcp_tools.py` and its tests.
+
 Grounding: spec R3.M1.4 (lines 524-590) and step "1. Phase-1 Loop" (lines 596-684, incl. its `failure_class` prerequisite); R3.M1.5 breaker and pipeline rules (lines 865-879); traceflow Part 3 STEP 4.
 
 Scope decisions confirmed with you:
@@ -229,6 +231,7 @@ AmenitySearchState{website_search_results[N]}
 - Sections: task statement, rules, the tool-message format, the retry rule, amenity identity (name, taxonomy node, address verbatim, `website_url` or "none"), metrics JSON (`label`, `question`, `value_type`, `unit`, `enum_values`, `evidence_class`, `verification`, `web_target`, app-computed `host_scoping`).
 - `host_scoping` is "include at least one query scoped to `site:<host>` alongside off-site queries" for a factual metric when a URL exists, and "do not scope any query to the official site" otherwise.
 - One worked example on a public library (not the runner's seed).
+- **Follow-up (source rules, DECIDED, NOT DONE).** The experiential call in the worked example targets *"visitor experiences … reviews"* only. Under the spec's R3.M2.1 "Evidence source rules", third-party write-ups (guides, local news, blogs) also count for experiential metrics, so reword its `objective` and one query to reach them. Text-only change: no contract, method or test changes, and fixture 12 (host scoping) still holds.
 
 **`_run_amenity_pipeline`**
 - Catches `MetricResolutionProviderError`, returning `resolution_call_failed` with `stage`/`cause` and discarding evidence. Any other exception propagates to the gather and becomes `pipeline_error` in the sweep. The breaker count happens in `_counted_llm_call`, not here, so it is counted once per failing call, which equals once per amenity because the error ends the amenity.

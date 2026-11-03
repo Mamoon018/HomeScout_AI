@@ -76,6 +76,7 @@ class RoutingProvider:
     def __init__(self, queues: dict[str, list]) -> None:
         self._queues = {name: list(items) for name, items in queues.items()}
         self.sent: dict[str, list[list[dict]]] = {name: [] for name in queues}
+        self.structured: list[str] = []
 
     def _amenity(self, messages: list[dict]) -> str:
         system = messages[0]["content"]
@@ -94,8 +95,30 @@ class RoutingProvider:
             raise item
         return item
 
-    async def generate_structured(self, **_kwargs):  # pragma: no cover - discovery never runs here
-        raise LLMProviderError("unexpected structured call", failure_class="content")
+    async def generate_structured(self, *, instruction, user_content, json_schema, schema_name):
+        """R3.M2.2 resolution turn (discovery never runs here): answer every submitted label with
+        an unmet entry, so an amenity with phase-1 evidence completes. Recorded apart from the
+        phase-1 turns, so `total_calls` still counts tool turns only."""
+        assert schema_name == "metric_resolution"
+        payload = json.loads(user_content)
+        self.structured.append(payload["amenity"]["name"])
+        return {
+            "metrics": [
+                {
+                    "metric_label": metric["label"],
+                    "web_value": None,
+                    "scrape_value": None,
+                    "reviews_value": None,
+                    "relation": "none",
+                    "verification_met": False,
+                    "final_value": None,
+                    "opinion_mixed": False,
+                    "basis": "none",
+                    "evidence": [],
+                }
+                for metric in payload["metrics"]
+            ]
+        }
 
     async def aclose(self) -> None:
         pass
@@ -601,7 +624,7 @@ async def test_tool_failures_never_end_the_amenity():
     gateway = FakeGateway({_obj(A, label): [_fail("transport")] * 2 for label in LABELS})
     state = await _service(provider, gateway).run_specific_metric_resolution(_state([A]))
 
-    record = state.phase1_results[(1, "alpha")]
+    record = state.resolution_results[(1, "alpha")]
     assert record.outcome == "completed"
     assert {r.status for r in record.phase1.metric_outcomes.values()} == {"failed"}
     assert record.phase1.metrics_source_content.items == []
@@ -633,13 +656,16 @@ async def test_retry_turn_provider_failure_discards_only_that_amenitys_evidence(
     })
     state = await _service(provider, gateway).run_specific_metric_resolution(_state([A, B]))
 
-    a, b = state.phase1_results[(1, "alpha")], state.phase1_results[(1, "bravo")]
+    a, b = state.resolution_results[(1, "alpha")], state.resolution_results[(1, "bravo")]
     assert sum(_obj(A, "") in c for c in gateway.search_calls) == 3  # A's turn 1 did search
     assert (a.outcome, a.phase1) == ("resolution_call_failed", None)
     assert (a.failed_stage, a.failed_cause) == ("r3_m1_4_phase1_retry", "content")
     assert b.outcome == "completed"
     assert {r.status for r in b.phase1.metric_outcomes.values()} == {"ok"}
     assert len(b.phase1.metrics_source_content.items) == 3
+    # Only B reached R3.M2.2: A's evidence was discarded before resolution.
+    assert provider.structured == [_rec_name(B)] and b.resolution_calls == 1
+    assert set(a.unresolved.values()) == {"resolution_call_failed"} and a.kept == {}
 
 
 # ==================================================================================================
@@ -673,7 +699,7 @@ async def test_availability_outage_opens_breaker_and_later_amenities_make_no_llm
 
     assert exc.value.cause == "circuit_open"
     assert provider.total_calls() == 2
-    causes = [state.phase1_results[(1, w.lower())].failed_cause for w in words]
+    causes = [state.resolution_results[(1, w.lower())].failed_cause for w in words]
     assert causes == ["availability", "availability", "circuit_open", "circuit_open", "circuit_open"]
     assert gateway.search_calls == [] and gateway.closed
 
@@ -694,7 +720,7 @@ async def test_content_failures_never_open_the_breaker(one_pipeline_at_a_time):
 
     assert exc.value.cause == "content"
     assert provider.total_calls() == 3
-    assert [state.phase1_results[(1, w.lower())].failed_cause for w in words] == ["content"] * 3
+    assert [state.resolution_results[(1, w.lower())].failed_cause for w in words] == ["content"] * 3
 
 
 async def test_a_successful_llm_call_resets_the_outage_count(one_pipeline_at_a_time):
@@ -721,8 +747,8 @@ async def test_a_successful_llm_call_resets_the_outage_count(one_pipeline_at_a_t
     )
 
     outcomes = [
-        (state.phase1_results[(1, w.lower())].outcome,
-         state.phase1_results[(1, w.lower())].failed_cause)
+        (state.resolution_results[(1, w.lower())].outcome,
+         state.resolution_results[(1, w.lower())].failed_cause)
         for w in words
     ]
     assert outcomes == [

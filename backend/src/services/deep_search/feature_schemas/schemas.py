@@ -1160,8 +1160,8 @@ class OfficialGateRecord:
 
 
 # ---------------------------------------------------------------------------------
-# R3.M1.4 step 1 (Phase-1 Loop) contracts. Phase 1 fills one `Phase1Result` per amenity; until triage
-# exists, STEP 4 stores each pipeline's `AmenityPhase1Record` in `state.phase1_results` (temporary).
+# R3.M1.4 step 1 (Phase-1 Loop) contracts. Phase 1 fills one `Phase1Result` per amenity; R3.M2.2
+# carries it on the pipeline's `AmenityResolutionRecord` (see below).
 # ---------------------------------------------------------------------------------
 
 # Where one evidence item came from. Phase 1 writes `web`; phase 2 adds `scrape`; R3.M2 adds the
@@ -1265,18 +1265,165 @@ class Phase1Result:
     turns_run: int
 
 
-@dataclass(frozen=True)
-class AmenityPhase1Record:
-    """One amenity pipeline's result after STEP 4 (temporary, until triage consumes phase 1).
+# ---------------------------------------------------------------------------------
+# R3.M2.1 (Resolution) wire contract. One static strict schema for the resolution turn; per-metric
+# enum / unit / value_type conformance of `final_value` is a code check in R3.M2.3, not schema.
+# ---------------------------------------------------------------------------------
 
-    `phase1` is `None` unless `outcome == "completed"`: a provider failure discards the amenity's
-    evidence. `failed_stage` / `failed_cause` are set only for `resolution_call_failed`.
+# The resolution call echoes this schema name back with the body.
+RESOLUTION_SCHEMA_NAME = "metric_resolution"
+
+# How the two source kinds behind a value relate. `none` = only one source kind is present (no
+# cross-source relationship), NOT "no value"; it is read together with `basis`.
+ResolutionRelation = Literal["agree", "refined_by_scrape", "conflict", "none"]
+# What a value rests on. `web_and_reviews` = an experiential value resting on web evidence and the
+# Google-reviews block (relation is then `agree` or `conflict`); `none` = no value.
+ResolutionBasis = Literal["web", "scrape", "web_and_reviews", "google_reviews", "none"]
+
+
+class ResolutionEvidenceEntry(BaseModel):
+    """One quote the LLM cites for a resolved value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: EvidenceSourceKind = Field(
+        description="The kind of the evidence item quoted: 'web', 'scrape', or 'google_reviews'."
+    )
+    url: str | None = Field(
+        description="The quoted item's url, copied from the input. Null for 'google_reviews'."
+    )
+    quote: str = Field(
+        description=(
+            "Text copied character-for-character from that one evidence item's text. Never "
+            "paraphrased, shortened with ellipses, or joined across items."
+        )
+    )
+
+
+class MetricResolutionEntry(BaseModel):
+    """One metric's resolution. Fields are in decision order: sources first, then the verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric_label: str = Field(description="The submitted metric label, copied verbatim.")
+    web_value: str | None = Field(
+        description=(
+            "One short phrase: the answer the allowed web evidence gives, in the metric's own "
+            "terms (for a split: 'split: busy (2 sites), quiet (1)'). Null if no allowed web "
+            "evidence answers. Never a summary or a pasted excerpt."
+        )
+    )
+    scrape_value: str | None = Field(
+        description=(
+            "One short phrase: the answer scraped official pages give. Null when there is no "
+            "scrape evidence."
+        )
+    )
+    reviews_value: str | None = Field(
+        description=(
+            "One short phrase: the answer the Google-reviews block gives. Always null for a "
+            "factual metric and when no reviews are supplied."
+        )
+    )
+    relation: ResolutionRelation = Field(
+        description=(
+            "How the two source kinds behind the value relate: 'agree', 'conflict', "
+            "'refined_by_scrape', or 'none' (only one source kind present; not 'no value')."
+        )
+    )
+    verification_met: bool = Field(
+        description="True only when the allowed evidence meets the metric's verification bar."
+    )
+    # Union order keeps JSON types: `true` stays bool, `22.5` stays float, `"busy"` stays str.
+    final_value: str | float | bool | None = Field(
+        description=(
+            "The resolved value in the metric's value_type: a plain number in the metric's unit, "
+            "true/false, one enum member spelled exactly, or an ISO-8601 string. Null when "
+            "verification_met is false."
+        )
+    )
+    opinion_mixed: bool = Field(
+        description=(
+            "True when the value was chosen between disagreeing sources (experiential sources, "
+            "or factual sources of the same tier). False when unresolved."
+        )
+    )
+    basis: ResolutionBasis = Field(
+        description=(
+            "What the value rests on: 'web', 'scrape', 'web_and_reviews', 'google_reviews', or "
+            "'none' when there is no value."
+        )
+    )
+    evidence: list[ResolutionEvidenceEntry] = Field(
+        description=(
+            "Verbatim quotes backing the value, from both sides when opinion_mixed is true. "
+            "Empty when verification_met is false."
+        )
+    )
+
+
+class MetricResolutionResult(BaseModel):
+    """R3.M2 resolution wire body: one entry per submitted metric label."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metrics: list[MetricResolutionEntry] = Field(
+        description=(
+            "Exactly one entry for every submitted metric label. Do not invent, drop, or repeat "
+            "labels."
+        )
+    )
+
+
+def resolution_json_schema() -> dict:
+    """Strict resolution schema derived from the wire model. Static: no per-amenity data.
+
+    Carries closed objects, required keys, types, and closed enums only. Value conformance per
+    metric (enum membership, unit, value_type) is checked in code (R3.M2.3).
+    """
+    schema = MetricResolutionResult.model_json_schema()
+    _apply_strict_object_rules(schema)
+    return schema
+
+
+# ---------------------------------------------------------------------------------
+# R3.M2.2 (Run the resolution turn and validate the body) contracts.
+# ---------------------------------------------------------------------------------
+
+# The closed set of reasons a specific metric ends unresolved (spec R3.M2.5). R3.M2.2 writes
+# `no_evidence`, `resolution_call_failed` and `resolution_body_invalid`; R3.M2.3 / R3.M2.4 add
+# the others.
+UnresolvedReason = Literal[
+    "no_evidence",
+    "verification_unmet",
+    "type_violation",
+    "enum_violation",
+    "quote_unverified",
+    "basis_inconsistent",
+    "resolution_call_failed",
+    "resolution_body_invalid",
+]
+
+
+@dataclass(frozen=True)
+class AmenityResolutionRecord:
+    """One amenity pipeline's output after R3.M2.2 (temporary, until R3.M2.4 builds records).
+
+    Every submitted label is in exactly one of `kept` (a correctly returned entry, passed on to
+    R3.M2.3) or `unresolved` (with its reason), on every outcome. `phase1` is None when the
+    amenity's evidence was discarded (a phase-1 or first-resolution-call provider failure, or a
+    `pipeline_error`); otherwise its `metrics_source_content` holds the web items plus the
+    `google_reviews` item R3.M2.4 checks quotes against. `resolution_calls` is 0, 1 or 2.
+    `failed_stage` / `failed_cause` are set only for `resolution_call_failed`.
     """
 
     category_id: int
     place_id: str
     outcome: AmenityPipelineOutcome
+    kept: dict[str, MetricResolutionEntry]
+    unresolved: dict[str, UnresolvedReason]
     phase1: Phase1Result | None
+    resolution_calls: int = 0
     failed_stage: str | None = None
     failed_cause: str | None = None
 
@@ -1319,6 +1466,8 @@ class AmenitySearchState:
     official_gate_results: dict[tuple[int, str], OfficialGateRecord] = field(
         default_factory=dict
     )
-    # R3.M1.4 step 1, TEMPORARY: one `AmenityPhase1Record` per work item, written once after the
-    # STEP 4 barrier. Triage (R3.M1.4 step 2) takes over this output when it is built.
-    phase1_results: dict[tuple[int, str], AmenityPhase1Record] = field(default_factory=dict)
+    # R3.M2.2, TEMPORARY: one `AmenityResolutionRecord` per work item, written once after the
+    # STEP 4 barrier. R3.M2.4 / R3.M2.5 take over this output (`specific_records`) when built.
+    resolution_results: dict[tuple[int, str], AmenityResolutionRecord] = field(
+        default_factory=dict
+    )

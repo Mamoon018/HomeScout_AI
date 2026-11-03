@@ -114,8 +114,10 @@ class FakeGateway:
         self.closed = True
 
 
-def _service(gateway, turns, *, threshold=3) -> tuple[SpecificMetricResolution, FakeProvider]:
-    provider = FakeProvider(turns=turns)
+def _service(
+    gateway, turns, *, threshold=3, bodies=None
+) -> tuple[SpecificMetricResolution, FakeProvider]:
+    provider = FakeProvider(turns=turns, bodies=bodies)
     service = SpecificMetricResolution(
         tool_gateway=gateway,
         llm_caller=StructuredLLMCaller([provider]),
@@ -501,13 +503,38 @@ def _state(place_ids) -> AmenitySearchState:
     )
 
 
+def _resolution_body(labels) -> dict:
+    """A valid R3.M2.2 resolution body: one unmet entry per label (phase 1 evidence → call made)."""
+    return {
+        "metrics": [
+            {
+                "metric_label": label,
+                "web_value": None,
+                "scrape_value": None,
+                "reviews_value": None,
+                "relation": "none",
+                "verification_met": False,
+                "final_value": None,
+                "opinion_mixed": False,
+                "basis": "none",
+                "evidence": [],
+            }
+            for label in labels
+        ]
+    }
+
+
+LABELS = [m.label for m in METRICS]
+
+
 async def test_entry_writes_completed_record_per_amenity():
     gateway = FakeGateway({f"obj {m.label}": [_ok(f"obj {m.label}")] for m in METRICS})
-    service, _ = _service(gateway, [_all_three_turn()])
+    service, _ = _service(gateway, [_all_three_turn()], bodies=[_resolution_body(LABELS)])
     state = await service.run_specific_metric_resolution(_state(["p1"]))
-    record = state.phase1_results[(1, "p1")]
+    record = state.resolution_results[(1, "p1")]
     assert record.outcome == "completed"
     assert record.phase1.metric_outcomes["dogs_allowed"].status == "ok"
+    assert list(record.kept) == LABELS and record.resolution_calls == 1
     assert state.website_search_results[(1, "p1")].website_origin == "google"
     assert gateway.closed
 
@@ -516,11 +543,13 @@ async def test_entry_mixed_results_do_not_raise():
     gateway = FakeGateway({f"obj {m.label}": [_ok(f"obj {m.label}")] for m in METRICS})
     content_failure = LLMProviderError("refused", failure_class="content")
     # Pipelines run concurrently; whichever pipeline calls first gets the ok turn.
-    service, _ = _service(gateway, [_all_three_turn(), content_failure])
+    service, _ = _service(
+        gateway, [_all_three_turn(), content_failure], bodies=[_resolution_body(LABELS)]
+    )
     state = await service.run_specific_metric_resolution(_state(["p1", "p2"]))
-    outcomes = sorted(r.outcome for r in state.phase1_results.values())
+    outcomes = sorted(r.outcome for r in state.resolution_results.values())
     assert outcomes == ["completed", "resolution_call_failed"]
-    failed = next(r for r in state.phase1_results.values() if r.outcome != "completed")
+    failed = next(r for r in state.resolution_results.values() if r.outcome != "completed")
     assert (failed.phase1, failed.failed_cause) == (None, "content")
 
 
@@ -532,7 +561,7 @@ async def test_entry_all_provider_failures_raise_and_breaker_skips_later_ameniti
     with pytest.raises(MetricResolutionProviderError) as exc:
         await service.run_specific_metric_resolution(state)
     assert exc.value.cause == "circuit_open"
-    records = state.phase1_results.values()
+    records = state.resolution_results.values()
     assert len(records) == 6 and all(r.outcome == "resolution_call_failed" for r in records)
     assert {r.failed_cause for r in records} >= {"availability", "circuit_open"}
     # Once open, later pipelines never reach the provider (at most 4 in flight hit it before).

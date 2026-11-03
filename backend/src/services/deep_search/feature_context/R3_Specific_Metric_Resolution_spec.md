@@ -8,6 +8,12 @@
 
 > **Status: DRAFT FOR DISCUSSION.** This surfaces the initial draft so we can finalize specs sub-component by sub-component. Nothing here is implemented. This is not yet an approved implementation plan.
 
+> **Current scope: phase 1 → resolution (decided 2026-11-02).** Phase-1 web search gives accurate enough evidence for **both** classes: for factual metrics it already reaches the official site, and experiential metrics use Google reviews as their second source. So **Triage (R3.M1.4 step 2) and the Phase-2 Loop (R3.M1.4 step 3) are DEFERRED**. Each amenity pipeline runs `phase1_loop → R3.M2 resolution`.
+> - **Kept:** the data shapes a later phase 2 would need — the `scrape` source kind in `metrics_source_content`, `scrape_value` / `basis = scrape` in the resolution schema, `scrape_target` on factual metrics, and the gateway's `map_site` / `scrape_page` operations. This lets more tools be added after web search without redesigning data.
+> - **Not built:** triage and phase-2 behavior, including placeholder functions. Their specs below stay as the design, each marked **DEFERRED**.
+> - **Firecrawl:** the gateway does not connect to Firecrawl while phase 2 is deferred (C3.1.1 "Firecrawl connection deferred").
+> - **When to bring phase 2 back:** decided later.
+
 ## Context
 
 Feature **Deep Search**, Responsibility 2 (R2), **Mechanism 3** resolves metrics for discovered amenities. This document decomposes the two components defined in `r2_mechanism_3_final_a4b603ba.plan.md`:
@@ -23,12 +29,12 @@ The goal of this round is to **finalize the specs** of each sub-component before
 
 | ID | Decision |
 |----|----------|
-| D1 (revised) | The LLM decides when to call tools. Order: `web_search` for all metrics → triage → `firecrawl_map` then `firecrawl_scrape` (one scrape per phase-2-eligible metric — unresolved **and** `factual`) for those metrics. |
+| D1 (revised) | The LLM decides when to call tools. **Current order:** `web_search` for all metrics → resolution. **Deferred extension:** `web_search` → triage → `firecrawl_map` then `firecrawl_scrape` (one scrape per phase-2-eligible metric — unresolved **and** `factual`) for those metrics. |
 | D2 | Hosted Streamable HTTP MCP servers with bearer keys. |
 | D4 (revised) | **No** shared crawl per site. Each work item independently resolves its website (R3.M1.3 discovery) and runs its own Phase-2 `map`/`scrape`; no crawl cache, no single-flight. (Supersedes the original "one shared crawl per site" — R3.M1.3 / R3.M1.5.) |
 | D5 | A failed item gets `null` and the run continues. |
 | D6 | One shared `StructuredLLMCaller`, owned by the composition root. |
-| D7 | Scrape overrides web on contradiction. |
+| D7 (revised) | For a `factual` metric, **official-site evidence overrides third-party evidence** on contradiction. Within official-site evidence, scrape overrides a web excerpt. Full source rules in R3.M2.1 "Evidence source rules." |
 | RC7 | M3 runs on all M1 records. |
 | RC8 | URL first, then the loop. |
 | RC9 (revised) | Output is a separate `SpecificMetricsRecord` per amenity. R3.M2.5 combines these with the `PredefinedMetricsRecord`s into one versioned `AmenityMetricsSet` (1.0). `AmenityRecord` → `PredefinedMetricsRecord`; `AmenityRecordSet` removed. |
@@ -42,6 +48,11 @@ The goal of this round is to **finalize the specs** of each sub-component before
 **Mechanism 6 — metric definition**
 - **RC10 (revised) — class-conditional `resolution_source` + new `evidence_class` field (schema change — DONE).** Each LLM-defined metric now carries an explicit **`evidence_class`** (`factual | experiential`) and a `resolution_source` of **exactly two keys**: `web_target` always, plus `scrape_target` (factual) or `review_target` (experiential). At the strict wire level all three keys are present and the off-class secondary is `null`; code enforces exactly-one-per-class (`_metric_rule_failure` → `resolution_source_class_mismatch`). Phase-2 (`firecrawl` scrape) eligibility is read off the class — only factual metrics carry a `scrape_target`. (`ResolutionSourceEntry` / `MetricEntry` / `MetricResolutionSource` / `MetricSpec` in `schemas.py`; validator + transform in `requirement_interpretation.py`.)
 - **`evidence_class` replaces the verification source-clause (prompt + field change — DONE).** `verification` is now the **bar only** — the evidentiary standard the evidence must meet — and no longer carries a source-acceptability clause. The factual/experiential signal is the explicit `evidence_class` field, read directly, never parsed from text (`metric_definition_instruction.py`, kept in sync with the condensed copy in `depth_assignment_instruction.py`). **M3-side (R3.M2.1):** review eligibility is read from `evidence_class` — experiential (equivalently, `review_target` present) ⇒ reviews eligible; factual ⇒ reviews rejected. A metric with **no `review_target`** is reviews-blocked by default (structural safety net).
+- **Verification bars must not block the R3.M2.1 source rules (prompt change — NOT DONE).** Two parts:
+  - **Factual:** the worked examples write bars like *"listed on the official facilities page"*, which a third-party source can never meet. That blocks the third-party fallback. The examples must state only what must be shown, not which site must show it.
+  - **Experiential:** the bar must accept third-party sources as well as visitor accounts.
+  
+  Full detail in R3.M1.4 step 2 "Prerequisite — align Mechanism 6 verification bars with the source rules."
 
 **Mechanism 1.3 — record assembly / state** (from R3.M2.5, RC9 revised)
 - Rename `AmenityRecord` → `PredefinedMetricsRecord`; remove `AmenityRecordSet`.
@@ -52,6 +63,9 @@ The goal of this round is to **finalize the specs** of each sub-component before
 - Add **`tldextract==<pin>`** to the dependency manifest (the gate needs public-suffix-aware SLD extraction; stdlib `urlsplit` alone cannot split `co.uk`-style suffixes). Pin an exact version.
 - Vendor an **offline PSL snapshot** and instantiate one module-level `TLDExtract(cache_dir=<snapshot>, suffix_list_urls=[])` so the gate never fetches at runtime (deterministic, reproducible tests, no network dependency).
 - Add a **periodic PSL-refresh** maintenance step for the vendored snapshot. Full behavior in R3.M1.3 "Google-provided URL handling."
+
+**C3.1.1 — Firecrawl connection deferred (code change — NOT DONE)** (from the current scope: phase 2 deferred)
+- `open()` starts **only** the Parallel session and checks only `web_search`. The Firecrawl session is not started, its `firecrawl_map` / `firecrawl_scrape` capability check does not run, and `FIRECRAWL_API_KEY` is not required. So a Firecrawl outage or missing key can no longer fail a run that never calls Firecrawl. Full rule in C3.1.1 "Capability check."
 
 **C3.1.2 — failure `cause` on `MetricResolutionProviderError` (code change — NOT DONE)** (from the R3.M1.4 / R3.M1.5 provider-failure handling)
 - Add a required **`cause`** (`availability` | `content` | `circuit_open`) to `MetricResolutionProviderError`, next to `stage`, and raise it from **both** `call_turn` and `call_structured` when the chain is exhausted. The run-level circuit breaker (R3.M1.5) counts only `availability`, so it cannot be built without this field. Full rule in C3.1.2 "Typed error."; how `cause` is derived (a `failure_class` set on each `LLMProviderError`, then aggregated across the chain) is in R3.M1.4 step 1 "Prerequisite — provider failure class on `LLMProviderError`."
@@ -131,6 +145,7 @@ flowchart TD
 - **Test seam.** Gateway is a `Protocol` injected into `SpecificMetricResolution`; a fake stands in for tests.
 
 **Decisions — problem-specific**
+- **Firecrawl connection deferred (current scope — code change NOT DONE).** While phase 2 is deferred, `open()` starts **only the Parallel session**, and the capability check below covers `web_search` only. No Firecrawl session is started and `FIRECRAWL_API_KEY` is not required. The Firecrawl operations, parsers, rate limits and the Firecrawl half of the capability check stay in the code and in this spec, ready for phase 2. When phase 2 returns, `open()` starts both sessions again.
 - **Capability check.** `tools/list` must contain `web_search` (args `objective`, `search_queries`) on Parallel and **`firecrawl_map` (arg `url`) + `firecrawl_scrape` (args `url`, `formats`)** on Firecrawl. A miss raises `McpToolUnavailableError` before any amenity work. **No batch tool is checked or required — `scrape_pages` calls no MCP batch tool; it fans out `firecrawl_scrape`, which is already required.** **`firecrawl_crawl` is retained/driven but NOT checked** — a server missing it still opens, and the gap surfaces as a per-call `ToolFailure` on the first `crawl_site`. A server missing map/scrape still fails at connect. A missing Firecrawl key is not caught by this check: per Firecrawl's changelog the hosted endpoint answers 401 without a credential, so the session cannot open and `open()` raises `McpConnectionError` first (not verified live).
 - **Firecrawl map/scrape operations (M3 path).** `map_site(url)` calls `firecrawl_map` (app-injected homepage `url`) and returns the site's link set as a typed candidate list; `scrape_page(url)` calls `firecrawl_scrape` (`formats: ["markdown"]`, `onlyMainContent`) and returns one typed page. `scrape_pages(urls)` scrapes the app-shortlisted URLs by running one `scrape_page` per URL concurrently (`gather`), each bounded by the shared Firecrawl semaphore (`FIRECRAWL_CONCURRENCY = 2`) and the ≤10/min token bucket, so one failed URL does not fail the rest — the hosted server offers no batch tool, so there is no single job. `scrape_page` is kept for single-page use and is the building block of the fan-out. The LLM never supplies a URL (R3.M1.1).
   - *multi-page output shape.* `scrape_pages` returns a `ScrapeResults` whose `pages` are the successful `ScrapeResult`s (one per URL, keyed by its own `metadata.sourceURL`), with `total`/`completed` counts and the URLs that failed in `failed_urls` (a signalled degrade, logged, not a whole-call failure). Only the field shape is carried over from the former `BatchScrapeResult`; there is no job envelope, status polling, or `next` cursor.
@@ -159,7 +174,7 @@ flowchart TD
 **Decisions — generally mandatory**
 - **Ownership.** Built once at the composition root, passed to R1 and `SpecificMetricResolution`. Created and closed once.
 - **Fallback rule.** Fallback on `LLMProviderError` — a truncated response (cut short by the token limit) and a **non-decodable** body (empty / not JSON / not a JSON object) both count, because the provider did not actually produce a usable body. A **returned, decodable, schema-valid body** is a provider success; its schema contents never trigger fallback. (A structured turn additionally falls back on an OpenAI `refusal` or a non-`stop` `finish_reason` — see the strict-mode rule below.)
-- **Strict mode guarantees schema validity (structured turns).** Structured turns (`call_structured` — triage, resolution) use constrained decoding: both providers send `response_format` with `strict: true`, and the configured models support it (OpenAI strict models; Groq `openai/gpt-oss-120b`, with `gpt-oss-20b` the other strict-capable option). A decodable-but-schema-invalid body therefore **cannot occur**, so there is **no schema retry and no schema-driven fallback**. Per-call validation is `refusal` → `finish_reason` → defensive parse: a populated OpenAI `refusal` field is a decline → fall back to the other provider, and if it also declines the amenity's metrics end **unresolved** (D5); `finish_reason` of `length` (truncation) or a non-`stop` / `content_filter` stop is an `LLMProviderError` → fallback; the body is then parsed with its Pydantic model as a **defensive backstop** — under strict this always passes, so a parse failure is an unexpected provider anomaly that falls back (raising `MetricResolutionProviderError` if every provider is exhausted), **never a same-provider retry**. Semantic non-conformance (per-metric `enum` / `unit` / `value_type`, the `verification` gate — the R3.M2.3 code checks) is unchanged: a genuine resolution outcome (`null` / verification-failed), never a provider error.
+- **Strict mode guarantees schema validity (structured turns).** Structured turns (`call_structured` — triage, resolution) use constrained decoding: both providers send `response_format` with `strict: true`, and the configured models support it (OpenAI strict models; Groq `openai/gpt-oss-120b`, with `gpt-oss-20b` the other strict-capable option). A decodable-but-schema-invalid body therefore **cannot occur**, so there is **no schema retry and no schema-driven fallback**. Per-call validation is `refusal` → `finish_reason` → defensive parse: a populated OpenAI `refusal` field is a decline → fall back to the other provider, and if it also declines the amenity's metrics end **unresolved** (D5); `finish_reason` of `length` (truncation) or a non-`stop` / `content_filter` stop is an `LLMProviderError` → fallback; the body is then parsed with its Pydantic model as a **defensive backstop** — under strict this always passes, so a parse failure is an unexpected provider anomaly, **never a same-provider retry**. The parse runs after `call_structured` returns, so it cannot fall back to the next provider; each stage handles it as a provider failure (for resolution: R3.M2.2 "Unparseable body" → `resolution_call_failed`). Semantic non-conformance (per-metric `enum` / `unit` / `value_type`, the `verification` gate — the R3.M2.3 code checks) is unchanged: a genuine resolution outcome (`null` / verification-failed), never a provider error.
 - **Config caveat (strict-capability).** This guarantee holds only while both models stay strict-capable. Pointing `GROQ_EXTRACTION_MODEL` at a non-strict-supporting model drops Groq to **best-effort** mode, which may `400` (→ fallback) or return **syntactically valid but schema-invalid** JSON — reopening the schema-retry question this decision closes. Changing the structured model must revisit this rule.
 - **Typed error.** An M3 call — tool turn (`call_turn`) or structured turn (`call_structured`) — raises `MetricResolutionProviderError` when every provider in the chain fails to return a usable response. The error carries `stage` (the M3 step that made the call) and a required **`cause`** (prerequisite change — see Prerequisites):
   - `availability` — **every** provider in the chain failed with a timeout, a 5xx, a connection error, or a 429 after its retries ran out.
@@ -508,7 +523,7 @@ Ordered steps (order matters):
 - **Always-produce rule.** The object is always created, one per work item. When the Google `websiteUri` **passes the official-URL gate (Stage 0)**, `website_url` + `website_origin=google` are **populated from Google** and **no search runs** (`website_url` + `website_origin` are the whole verdict; nothing raw-result-derived is persisted — raw candidates are transient, per "Where the result lives").
 - **No dedup across categories.** One physical place appearing under two categories = two work items (same `place_id`, different `category_id`). Each work item runs **its own** discovery (duplication accepted; single-flight intentionally *not* used).
 - **URL format.** The LLM no longer emits a URL — it returns a `selected_id`, and the app resolves it to a **verbatim** search-result URL from the candidate set (see "Candidate id-indirection"), so there is **no LLM-typed URL** to normalize or `HttpUrl`-validate; the resolved URL is exactly what the search returned for that hit. No crawl host-clamp is needed because the phase-2 `firecrawl_map` `url` is **app-injected** from this object (see R3.M1.1), so there is never an LLM-supplied host to compare.
-- **Effect of `none`.** Phase 2 skipped for this amenity (no official URL to crawl); metrics rely on web evidence. Phase 1 still runs. When a URL **is** present, phase 1 **also** uses it for **`factual` metrics only** — folding the host into some of that metric's queries to scope them to the official site — but *in addition to* broader off-site queries, not as a replacement (web and scrape must stay complementary per D7; hard-scoping every query collapses web evidence onto the site). `experiential` metrics get **no** host-scoped query: the official site is the amenity's own marketing and cannot meet their verification bar (lived customer experience), and they are never scraped in phase 2.
+- **Effect of `none`.** Phase 2 skipped for this amenity (no official URL to crawl); metrics rely on web evidence. Phase 1 still runs. When a URL **is** present, phase 1 **also** uses it for **`factual` metrics only** — folding the host into some of that metric's queries to scope them to the official site — but *in addition to* broader off-site queries, not as a replacement (web and scrape must stay complementary per D7; hard-scoping every query collapses web evidence onto the site). `experiential` metrics get **no** host-scoped query: the official site is the amenity's own marketing and cannot meet their verification bar (independent evidence only — R3.M2.1 source rules), and they are never scraped in phase 2.
 
 **Batch orchestration — finalized: synchronous Stage-0 pre-pass, then `asyncio.gather` over the declined subset (Option A).**
 Discovery runs **before the loop, behind a hard barrier**, but **Stage 0 (`official_url_gate`) runs in a synchronous pre-pass over all work items *before* the fan-out** — not inside the per-item coroutine. The fan-out is therefore **one coroutine per *gate-declined* work item**, not per work item.
@@ -523,7 +538,9 @@ Discovery runs **before the loop, behind a hard barrier**, but **Stage 0 (`offic
 
 ## R3.M1.4 — Run the Phase Loop and Triage per Amenity
 
-**Goal.** For one amenity: run phase 1 (LLM + `web_search`: one search per metric, all in the first turn, then at most one retry turn covering only the metrics whose search `failed`); run the triage turn (`sufficient`/`unresolved` per metric); run phase 2 (LLM + Firecrawl `map` → select → `scrape`) only when ≥1 **phase-2-eligible** metric (unresolved **and** `factual`, i.e. carrying a `scrape_target`) exists AND a URL exists, until the LLM stops calling tools or the phase-2 budget is spent. Return the full conversation and the `metrics_source_content` store.
+> **Current scope: phase 1 only.** The pipeline runs `phase1_loop` and hands the amenity straight to R3.M2 resolution. **Triage (step 2) and the Phase-2 Loop (step 3) are DEFERRED.** Their text below, and the triage / phase-2 rules in this overview, are the design for when more tools are needed after web search; none of it is built now. Phase-1 rules are unchanged.
+
+**Goal (full design; current scope is phase 1 only — see note above).** For one amenity: run phase 1 (LLM + `web_search`: one search per metric, all in the first turn, then at most one retry turn covering only the metrics whose search `failed`); run the triage turn (`sufficient`/`unresolved` per metric); run phase 2 (LLM + Firecrawl `map` → select → `scrape`) only when ≥1 **phase-2-eligible** metric (unresolved **and** `factual`, i.e. carrying a `scrape_target`) exists AND a URL exists, until the LLM stops calling tools or the phase-2 budget is spent. Return the full conversation and the `metrics_source_content` store.
 
 **Problem.** Nothing drives the assistant/tool-call/tool-result cycle today. Phase switching, loop termination, and the crawl decision need defined rules. The LLM's "settled" judgment must become a readable field. Tool failures must not stop the amenity or run. An LLM provider-chain failure needs one defined outcome per amenity, and a provider outage must not make every remaining amenity wait through the full chain timeout.
 
@@ -561,17 +578,17 @@ Two dedicated loop functions with triage as an explicit step between them; each 
 - **Conversation state.** One message list per amenity, provider-neutral format (C3.1.2). The split loops are **not** separate conversations: `phase1_loop`, the triage request, and `phase2_loop` all read and append to this **single shared message list** — "split" refers to the two loop *functions*, not the conversation.
 
 **Decisions — problem-specific**
-- **Phase 1 instruction content.** Amenity identity, the resolved `website_url` from the `website_search_results` object (R3.M1.3) when present, and every metric with `label`, `question`, `value_type`, `unit`, `enum_values`, `evidence_class`, `verification`, and `resolution_source.web_target` (the search direction — used for **both** classes; `scrape_target` / `review_target` are not shown in phase 1). Told to **emit one `web_search` per metric, for all metrics, in the first turn** (never split across turns) and tag each call with `metric_label`; and, **on a retry turn, to re-emit a call only for the metrics whose `tool` result `failed`**. **When a `website_url` is present AND the call's `metric_label` is a `factual` metric**, instruct the LLM to include at least one host-scoped query **alongside** broader off-site queries *within the same `web_search` call's `search_queries`* — never scoping every query to the host (web and scrape stay complementary per D7, per R3.M1.3). **For an `experiential` metric, no host-scoped query is used** (the instruction states this per metric, keyed off `evidence_class`, not as one global rule for the whole call).
+- **Phase 1 instruction content.** Amenity identity, the resolved `website_url` from the `website_search_results` object (R3.M1.3) when present, and every metric with `label`, `question`, `value_type`, `unit`, `enum_values`, `evidence_class`, `verification`, and `resolution_source.web_target` (the search direction — used for **both** classes; `scrape_target` / `review_target` are not shown in phase 1). Told to **emit one `web_search` per metric, for all metrics, in the first turn** (never split across turns) and tag each call with `metric_label`; and, **on a retry turn, to re-emit a call only for the metrics whose `tool` result `failed`**. **When a `website_url` is present AND the call's `metric_label` is a `factual` metric**, instruct the LLM to include at least one host-scoped query **alongside** broader off-site queries *within the same `web_search` call's `search_queries`* — never scoping every query to the host (web and scrape stay complementary per D7, per R3.M1.3). **For an `experiential` metric, no host-scoped query is used** (the instruction states this per metric, keyed off `evidence_class`, not as one global rule for the whole call). Experiential queries aim at **both** visitor accounts and third-party write-ups (guides, local news, blogs), because both count (R3.M2.1 source rules); they are not limited to reviews.
 - **Phase-1 retry turn (who retries).** The **LLM re-emits** the retry; the app never reissues a search call itself. The retry turn sees the full shared history (instruction, its own turn-1 calls with their `metric_label` / `objective` / `search_queries`, and every `tool` result), so nothing is re-sent and the turn-1 results stay in place; the LLM matches each `failed` result to its own call by `tool_call_id` and may reword the queries. The `failed` `tool` message states that the call failed, the failure kind in a few words (e.g. timed out), and the `metric_label` (the loop adds the label from the admitted call, since it is stripped before MCP execution); it carries **no retry flag** — the app owns the attempt count. **Both phase-1 turns call `call_turn` with `tool_choice="required"`** (matching discovery, R3.M1.3): the retry turn only runs when a metric `failed`, so there is always a call to make, and `"required"` rules out a reply with no `tool_calls` at the API level — no "no `tool_calls`" branch is specified.
 - **Phase-1 web evidence recording.** After each turn, every `ok` `web_search` result is recorded **hit by hit**: each hit (`SearchExcerpt`: `url`, `title`, `text`) becomes one evidence item with `source_kind = web`, `url` = the hit's `url`, **`shaped_text` = the hit's `title` + `"\n"` + its `text`** (the excerpts joined with newlines), `retrieved_at` = the call's `retrieved_at`, and `metric_labels` = {the call's tagged metric}. `shaped_text` is exactly the title and excerpts the hit carries in the `tool` message (R3.M1.2 passes the result through unchanged), so R3.M2.4's quote check runs on what the LLM saw. Two hits in one call with the same `(web, url, shaped_text)` are one item (identity rule). An `empty` result has no hits and a `failed` call has no result, so neither records an item.
-- **Coverage.** A metric no phase-1 call was tagged with is set `unresolved` by the app, whatever triage says.
+- **Coverage.** A metric no phase-1 call was tagged with is set `unresolved` by the app, whatever triage says. In the current scope (no triage) it reaches resolution with an empty evidence bucket, so it ends `unresolved`.
 - **Triage schema & output integrity.** Static, strict, closed **structured response**: `metric_label` + `status`, where `status` is a closed enum of exactly `sufficient` / `unresolved`. The schema is what guarantees label/status integrity. Labels are checked against the metric set; a body that omits a submitted label fails the label-set check and is handled by the robustness rule below.
 - **Triage call robustness.** A schema mismatch / invalid body is rejected and **retried up to twice**. If it still fails, **every metric is treated as `unresolved`** (safe default) and the amenity continues (phase 2 then runs for every `factual` metric when a URL exists). This covers an invalid body only; a `MetricResolutionProviderError` from the triage call is not retried here and ends the amenity (Failure handling above).
-- **Triage rule & judgment quality.** A metric is `sufficient` only if evidence meets its `verification` rule. Triage is an opinion; R3.M2 still gates each value. Judgment quality is ensured by **detailed instruction**: the triage prompt carries **one-shot examples and explicit edge cases** so the LLM makes the `sufficient` / `unresolved` call consistently.
+- **Triage rule & judgment quality.** A metric is `sufficient` only if evidence **allowed by the R3.M2.1 source rules** meets its `verification` rule (how triage applies them: step 2 "Source rules for the `sufficient` call"). Triage is an opinion; R3.M2 still gates each value. Judgment quality is ensured by **detailed instruction**: the triage prompt carries **one-shot examples and explicit edge cases** so the LLM makes the `sufficient` / `unresolved` call consistently.
 - **Evidence-state → `unresolved`.** A metric whose phase-1 searches were all `empty` (genuine no-evidence) **or** all `failed` is `unresolved` — both map to `unresolved`. (The `empty` vs `failed` distinction is preserved by R3.M1.2 for R3.M2, not by triage.)
 - **Phase-2 eligibility (derived from `evidence_class`).** Read off the class, never parsed from text: a metric enters phase 2 only if it is **`unresolved` after triage AND `factual`** (it carries a `scrape_target`). An unresolved **`experiential`** metric has no page to scrape — it skips phase 2 and goes to R3.M2 with its web evidence, where the amenity's Google-reviews block (read via its `review_target` hint) is the fallback source (R3.M2.1). Triage still judges every metric; eligibility only filters which unresolved metrics phase 2 acts on.
 - **Incomplete evidence (spent budget).** When phase 1 ends with a metric still `failed` after its retry (or with its retry not taken), triage runs normally on the evidence that exists; any metric that obtained no value is `unresolved`. This applies to tool-call failures only; an LLM provider-chain failure ends the amenity and discards its evidence (Failure handling above).
-- **`metrics_source_content` shape (finalized — normalized evidence set).** The store is **scoped to the amenity pipeline** (no `(category_id, place_id)` key — identity is ambient and carried on the returned `SpecificMetricsRecord`) and is a **normalized evidence set** — a flat list of items, each one distinct finding: `{ evidence_id, source_kind ∈ web|scrape|google_reviews, url (str|null), shaped_text, retrieved_at, metric_labels : set }`. **`evidence_id` is a UUID** the app generates when an item is first recorded; a later finding that merges into the item (same triple) keeps that id and only adds to `metric_labels`. **Item identity is the triple `(source_kind, url, shaped_text)`**: two findings with an identical triple are stored **once**, their `metric_labels` unioned; findings that share a `url` but differ in `shaped_text` stay **distinct items**. So objective-scoped web excerpts from the same URL never collapse (different query → different `shaped_text` → distinct item, single metric), while a scraped page serving several metrics is stored **once** carrying all their labels in `metric_labels` (fetch-once / fan-out). **Google reviews** are one amenity-level item (`source_kind = google_reviews`, empty `metric_labels`), passed to every metric at resolution. **Why this shape — two requirements:** (1) *downstream (R3.M2.2)* reads per metric — each metric's bucket is the items whose `metric_labels` contains that label, so every metric sees its own evidence while identical text is held only once; (2) *storage (log + database)* — the set maps **one-to-one to persistence with no reshape**: `evidence(evidence_id PK, source_kind, url NULL, shaped_text, retrieved_at)` (one row per item) + `evidence_metric(evidence_id FK, metric_label)` (one row per metric an item serves; a `google_reviews` row has no join row); `url` is non-unique and never a key. Consequence for R3.M2.4: a metric's quote is provenance-checked against **that metric's** items (same-URL excerpts route to the right metric via `metric_labels`), and `support`/`as_of` come from the cited items.
+- **`metrics_source_content` shape (finalized — normalized evidence set).** The store is **scoped to the amenity pipeline** (no `(category_id, place_id)` key — identity is ambient and carried on the returned `SpecificMetricsRecord`) and is a **normalized evidence set** — a flat list of items, each one distinct finding: `{ evidence_id, source_kind ∈ web|scrape|google_reviews, url (str|null), shaped_text, retrieved_at, metric_labels : set }`. **`evidence_id` is a UUID** the app generates when an item is first recorded; a later finding that merges into the item (same triple) keeps that id and only adds to `metric_labels`. **Item identity is the triple `(source_kind, url, shaped_text)`**: two findings with an identical triple are stored **once**, their `metric_labels` unioned; findings that share a `url` but differ in `shaped_text` stay **distinct items**. So objective-scoped web excerpts from the same URL never collapse (different query → different `shaped_text` → distinct item, single metric), while a scraped page serving several metrics is stored **once** carrying all their labels in `metric_labels` (fetch-once / fan-out). **Google reviews** are one amenity-level item (`source_kind = google_reviews`, empty `metric_labels`), shown once at resolution in a shared section that only `experiential` metrics may use (R3.M2.2 "Resolution input"). **Why this shape — two requirements:** (1) *downstream (R3.M2.2)* reads per metric — each metric's bucket is the items whose `metric_labels` contains that label, so every metric sees its own evidence while identical text is held only once; (2) *storage (log + database)* — the set maps **one-to-one to persistence with no reshape**: `evidence(evidence_id PK, source_kind, url NULL, shaped_text, retrieved_at)` (one row per item) + `evidence_metric(evidence_id FK, metric_label)` (one row per metric an item serves; a `google_reviews` row has no join row); `url` is non-unique and never a key. Consequence for R3.M2.4: a metric's quote is provenance-checked against **that metric's** items (same-URL excerpts route to the right metric via `metric_labels`), and `support`/`as_of` come from the cited items.
 - **Phase 2 scope (finalized — `map` → select → `scrape`).** A uniform tool-calling loop (D1 preserved), not a single crawl. The instruction names the **phase-2-eligible** metrics (unresolved + `factual`) and their `resolution_source.scrape_target` hints.
   - **Tools:** `firecrawl_map` + `firecrawl_scrape` — the gateway operations, result parsers, capability check, and shape probe all live in **C3.1.1** (crawl retained there, unused by M3); this section only drives the loop over them. The LLM's **first Phase-2 tool call is `firecrawl_map`** (app-injected `url` = the resolved official homepage from `website_search_results`); map returns the site's link set, no page content. The app shapes it into an **id + URL candidate list** (opaque ids, issued fresh per map result, selection-only) returned as the `tool` message.
   - **Selection via id-indirection (per-metric):** the LLM emits `firecrawl_scrape` tool calls **one page per phase-2-eligible metric** — each call carries an `id` (**never a URL**) plus a **required `metric_label` (≥1; a list is allowed** when one page serves several metrics). The guard (R3.M1.1) validates each id against the issued set (unknown / out-of-range → guard failure, not executed), **requires at least one `metric_label`** (an untagged scrape is rejected — no orphan) and checks every label against the **phase-2-eligible set** supplied in `validation_ctx` (an experiential or already-sufficient label → guard failure), **dedups by resolved URL across all requests**, enforces the **hard ceiling of 8 distinct scrapes per amenity** (surplus dropped → those metrics stay on web evidence), then **substitutes the real URL verbatim** before the call reaches the gateway. URL stays app-controlled; URL text never passes through the model. Scrapes run concurrently under the Firecrawl semaphore via `gather`.
@@ -683,13 +700,14 @@ phase1_loop(amenity)
 - **Retry turn — who retries and what the LLM sees.** The **LLM re-emits** the retry; the app never reissues a search call itself. The retry turn replays the full shared history (instruction, the LLM's own turn-1 calls with their `metric_label` / `objective` / `search_queries`, and every `tool` result), so nothing is re-sent and the turn-1 results stay in place. The LLM matches each `failed` result to its own call by `tool_call_id` and may reword the queries.
 - **`failed` tool message content.** States that the call failed, the failure kind in a few words (e.g. timed out), and the `metric_label` — the loop adds the label from the admitted call, since it is stripped before MCP execution. It carries **no retry flag**: the app owns the attempt count, and the instruction states the one-retry rule once.
 - **`tool_choice = "required"` on both turns.** Turn 1 and the retry turn both call `call_turn` with `tool_choice="required"`, matching discovery (R3.M1.3). The retry turn only runs when at least one metric `failed`, so there is always a call to make; the instruction says which metrics to re-emit; and `"required"` rules out a reply with no `tool_calls` at the API level. A "no `tool_calls`" case is therefore not handled — it cannot occur. (`"required"` forces at least one call, not one per metric; one call per metric is the instruction's job, and an untagged metric is caught by the coverage rule.)
-- **Host-scoped queries are per metric, keyed off `evidence_class`.** When a `website_url` is present **and** the call's `metric_label` is a `factual` metric, the instruction asks for at least one host-scoped query **alongside** broader off-site queries inside the same call's `search_queries` — never scoping every query to the host (web and scrape stay complementary per D7). For an `experiential` metric, **no** host-scoped query is used: the official site is the amenity's own marketing and cannot meet an experiential `verification` bar, and experiential metrics are never scraped.
+- **Host-scoped queries are per metric, keyed off `evidence_class`.** When a `website_url` is present **and** the call's `metric_label` is a `factual` metric, the instruction asks for at least one host-scoped query **alongside** broader off-site queries inside the same call's `search_queries` — never scoping every query to the host (web and scrape stay complementary per D7). For an `experiential` metric, **no** host-scoped query is used: the official site is the amenity's own marketing and cannot meet an experiential `verification` bar, and experiential metrics are never scraped. Experiential queries aim at **both** visitor accounts and third-party write-ups (guides, local news, blogs), since both count under the R3.M2.1 source rules.
+- **Source-rule follow-up (DECIDED, NOT DONE — prompt text only).** The built instruction's worked example steers the experiential search to *"visitor experiences … reviews"* only (`phase1_web_search_instruction.py`, `_WORKED_EXAMPLE`). Reword it so the objective and queries also reach third-party write-ups. No code, contract or test change: factual host scoping (site query **plus** off-site queries) already surfaces both official and third-party evidence, and phase 1 does not judge sources.
 - **Evidence recording.** Each hit of an `ok` `web_search` result becomes one evidence item:
   - `source_kind = web`, `url` = the hit's `url`, `retrieved_at` = the call's `retrieved_at`, `metric_labels` = {the call's tagged metric}, `evidence_id` = a new UUID.
   - **`shaped_text` = the hit's `title` + `"\n"` + its excerpts** (joined with newlines) — exactly what the hit carries in the `tool` message, so R3.M2.4's quote check runs on what the LLM saw.
   - Two hits in one call with the same `(web, url, shaped_text)` are one item; the same URL with different `shaped_text` is a **distinct item**, never collapsed (see the `metrics_source_content` shape bullet above).
   - An `empty` result has no hits and a `failed` call has no result, so neither records an item.
-- **Coverage.** A metric no phase-1 call was tagged with is set `unresolved` by the app, whatever triage says.
+- **Coverage.** A metric no phase-1 call was tagged with is set `unresolved` by the app, whatever triage says. In the current scope (no triage) it reaches resolution with an empty evidence bucket, so it ends `unresolved`.
 - **Incomplete evidence (spent budget).** If the phase ends with a metric still `failed` after its retry (or with its retry not taken), triage runs normally on the evidence that exists. This covers tool-call failures only; an LLM provider-chain failure in either turn ends the amenity and discards the turn-1 evidence (Failure handling above).
 - **Not yet decided (flagged for discussion).** The guard works on the whole message, all-or-nothing, so one malformed call (for example a `metric_label` not in the set) rejects the entire turn and every metric in it loses an attempt, whereas execution failures are per call. *(Resolved: who triggers the retry — the LLM re-emits, for failed metrics only; fan-out across metrics — all metrics in turn 1, by instruction; `tool_choice` — `"required"` on both turns.)*
 
@@ -724,7 +742,11 @@ phase1_loop(amenity)
 - Tests: flip `test_retry_turn_provider_failure_discards_only_that_amenitys_evidence` (behavior suite) to expect A `completed` with turn-1 evidence and `weekday_crowding` `failed`/`retry_refused`; add a case asserting an `availability` failure on the retry turn still ends the amenity; update the retry-turn case of `test_provider_error_in_either_turn_propagates_with_cause` (`test_r3_m1_4_phase1_loop.py`) to the new split by cause.
 - `R3_M1_4_Phase1_Loop_Implementation_Plan.md`: note the iteration under the `_phase1_loop` method detail and drift entry.
 
-#### 2. Triage
+#### 2. Triage — DEFERRED
+
+> **DEFERRED (current scope: phase 1 → resolution).** Not built now: with phase 2 deferred there is nothing for triage to route. This section is kept as the design for a later phase 2. Two parts still apply today:
+> - **The Prerequisite below** (Mechanism 6 verification bars) is still required, because R3.M2 resolution reads the same bars.
+> - **The source rules** live in R3.M2.1 and are applied by resolution.
 
 ##### Goal
 After phase 1, produce one `sufficient` / `unresolved` judgment per metric from the evidence collected, for **both** classes. The result is what decides which metrics may go on to phase 2.
@@ -735,12 +757,36 @@ The LLM's "settled" judgment must become a readable field with guaranteed integr
 ##### Finalized approach
 A **separate strict-schema, no-tools structured request** (C3.1.2 `call_structured`) between the two loops, run over the same shared message list. The schema is static, strict and closed: `metric_label` + `status ∈ {sufficient, unresolved}`.
 
+##### Prerequisite — align Mechanism 6 verification bars with the source rules (Mechanism 6 change, DECIDED, NOT DONE; the triage `sufficient` call depends on it)
+- **What is wrong today.** Each class's bar is stricter than the source rules (R3.M2.1 "Evidence source rules") allow:
+  - **Experiential.** Mechanism 6 defines `experiential` as a value that *"only lived customer experience can"* confirm, and its worked examples write the bar as *"dominant sentiment across at least 5 reviews …"*. So only visitor accounts can meet it. Phase 1 often returns third-party write-ups (local guides, news articles, blogs, listing/directory descriptions) that answer the question, but triage must still mark the metric `unresolved`.
+  - **Factual.** The worked examples write bars like *"listed on the official facilities page"* or *"stated on the booking page"*. A third-party source can never meet those, so the third-party fallback for a factual metric could never apply.
+- **Change.**
+  - **Experiential:** the bar accepts **evidence that is independent of the amenity**, of two kinds:
+    - **Visitor accounts:** reviews, forum or social posts describing a visit (as today).
+    - **Third-party sources:** editorial guides, local news, blogs, listing/directory write-ups.
+    
+    **Still excluded:** the amenity's official site and its own marketing. The amenity describes itself there, so it cannot confirm an experiential value.
+  - **Factual:** the bar states **only what must be shown** (e.g. *"a powerlifting platform is listed among the equipment"*), never which site must show it. The source order — official first, third-party only when the official site doesn't answer, never visitor accounts — comes from the source rules, not from the bar.
+- **Why.** Triage's purpose is to stop paying for more tools when web evidence already answers the metric. A bar that rejects allowed sources makes metrics `unresolved` for no business reason.
+- **Scope.**
+  - Mechanism 6 metric-definition prompt (the `experiential` definition and the worked examples for both classes), plus its condensed copy in the depth-assignment prompt.
+  - The triage prompt's one-shot examples and edge cases (see "Source rules for the `sufficient` call" below).
+  - R3.M2 reads the same `verification` bar, so it accepts the same sources.
+  - Unchanged: experiential metrics still get no host-scoped query in phase 1 and are never scraped, because the official site stays excluded for them.
+
 ##### Traceflow
 ```text
 triage(amenity)                      [C3.1.2 call_structured · strict schema · NO tools]
   BREAKER CHECK before the call: breaker_open → raise ProviderError(stage=triage, cause=circuit_open)
   MetricResolutionProviderError → triage STOPS, passes it up (not retried; amenity ends in R3.M1.5)
   returns { metric_label, status ∈ sufficient | unresolved }  per metric (both classes)
+    LLM judges under the R3.M2.1 source rules:
+      factual      official answers → sufficient · else identity-proven third-party answers → sufficient
+                   visitor accounts never count
+      experiential identity-proven third-party / visitor accounts answer → sufficient (conflict = mixed = sufficient)
+                   official site never counts
+      evidence age ignored · nothing allowed answers → unresolved
   label-set check (labels ∈ metric set; no submitted label omitted)
   schema mismatch / invalid body → retry up to 2× → still bad → ALL metrics unresolved
   app overrides (ignore LLM):
@@ -757,13 +803,24 @@ triage(amenity)                      [C3.1.2 call_structured · strict schema ·
 ##### Decisions — Problem-specific nuances
 - **Schema & output integrity.** Static, strict, closed structured response; the schema guarantees label/status integrity. Labels are checked against the metric set, and a body that omits a submitted label fails the label-set check and goes to the robustness rule.
 - **Call robustness.** A schema mismatch / invalid body is rejected and **retried up to twice**. If it still fails, **every metric is `unresolved`** and the amenity continues (phase 2 then runs for every `factual` metric when a URL exists). A provider-chain failure is not retried here (see Failure handling).
-- **Rule & judgment quality.** A metric is `sufficient` only if the evidence meets its `verification` rule. Quality comes from **detailed instruction**: the prompt carries one-shot examples and explicit edge cases so the call is consistent.
+- **Rule & judgment quality.** A metric is `sufficient` only if evidence **allowed by the source rules** meets its `verification` rule. Quality comes from **detailed instruction**: the prompt carries one-shot examples and explicit edge cases so the call is consistent.
+- **Source rules for the `sufficient` call.** Triage applies R3.M2.1 "Evidence source rules" (defined there once), so its call matches what resolution will accept:
+  - **Factual:** `sufficient` when official-site evidence answers the metric. Otherwise, `sufficient` when an identity-proven third-party excerpt answers it. This applies whether `website_url` is missing or the site's excerpts just don't cover the metric. Visitor accounts never make a factual metric `sufficient`.
+  - **Experiential:** `sufficient` when identity-proven third-party evidence or visitor accounts answer the metric. The official site never does. **Conflicting independent evidence is `sufficient`**, because "opinion is mixed" is an answer; R3.M2 writes it.
+  - **Identity proof:** a non-official excerpt that does not clearly and explicitly refer to this amenity is ignored.
+  - **Age:** never makes evidence insufficient.
+  - **Nothing allowed answers:** `unresolved`.
+  - **Google reviews are not seen here.** The reviews block reaches only the resolution turn (R3.M2.2), so an experiential metric backed only by reviews is `unresolved` at triage. This costs nothing, because experiential metrics never go to phase 2.
+  - **Prompt examples to include:** a factual metric made `sufficient` by a third-party source when the official site is silent; a factual conflict where the official site wins; an experiential metric made `sufficient` by a guide; an experiential conflict judged `sufficient`; an excerpt rejected for missing identity proof; a factual metric backed only by visitor reviews judged `unresolved`.
+- **Consequence for phase 2 (accepted when re-enabled).** A factual metric made `sufficient` by a third-party excerpt is not phase-2-eligible, so its official site is never scraped for it. This is consistent with the current scope, which treats phase-1 web evidence as enough for factual metrics.
 - **Evidence-state → `unresolved`.** A metric whose phase-1 searches were all `empty` (genuine no-evidence) **or** all `failed` is `unresolved`. The `empty` vs `failed` distinction is preserved by R3.M1.2 for R3.M2, not by triage.
 - **Coverage.** The app, not the LLM, sets any untagged metric `unresolved`.
 - **Phase-2 eligibility (derived from `evidence_class`).** Read off the class, never parsed from text: a metric is eligible only if it is `unresolved` after triage **and** `factual` (it carries a `scrape_target`). An unresolved `experiential` metric skips phase 2 and goes to R3.M2 with its web evidence, where the Google-reviews block (read via `review_target`) is the fallback (R3.M2.1). Triage still judges every metric; eligibility only filters what phase 2 acts on.
 - **Incomplete evidence.** When phase 1 ended with a metric still `failed` after its retry (or with its retry not taken), triage runs normally on the evidence that exists; any metric that obtained no value is `unresolved`.
 
-#### 3. Phase-2 Loop
+#### 3. Phase-2 Loop — DEFERRED
+
+> **DEFERRED (current scope: phase 1 → resolution).** Not built now: phase-1 web search already reaches the official site for factual metrics, so map + scrape is not needed yet. Kept as the design for when more tools are needed after web search. The data shapes it relies on are kept (see the current-scope note at the top of this spec).
 
 ##### Goal
 For the **phase-2-eligible** metrics only (`unresolved` after triage **and** `factual`), run `firecrawl_map` → select → `firecrawl_scrape` on the amenity's official site, record scrape evidence into `metrics_source_content`, and hand the amenity on to R3.M2.
@@ -827,7 +884,7 @@ Build `plan_index` (`category_id` → `CategoryMetricPlan`) once, derive the wor
 ```
 run_specific_metric_resolution(state)                         [R3.M1.5, method on SpecificMetricResolution]
 │
-├─ open gateway sessions (Parallel + Firecrawl)          [C3.1.1 — session scope = method]
+├─ open gateway sessions (Parallel only; Firecrawl deferred)   [C3.1.1 — session scope = method]
 │
 ├─ STEP 1  Build plan_index  (category_id → CategoryMetricPlan)      ── once
 │
@@ -853,9 +910,9 @@ run_specific_metric_resolution(state)                         [R3.M1.5, method o
 │
 │   each pipeline(wi)  ── runs independently, writes NO shared state ───────────────┐
 │   │                                                                               │
-│   │  phase1_loop  → triage → (cond.) phase2_loop            [R3.M1.4]              │
-│   │     web_search turns     map→select→scrape turns                              │
-│   │     (LLM permit per call; Parallel/Firecrawl permits per tool call)           │
+│   │  phase1_loop                                            [R3.M1.4 step 1]       │
+│   │     web_search turns  (LLM permit per call; Parallel permit per tool call)    │
+│   │     [DEFERRED: → triage → (cond.) phase2_loop map→select→scrape]              │
 │   │  builds its own conversation + metrics_source_content                         │
 │   │  → R3.M2.2 resolution turn → R3.M2.3 conform → R3.M2.4 provenance                │
 │   │  every LLM call: BREAKER CHECK first (open → ProviderError cause=circuit_open) │
@@ -898,6 +955,7 @@ Two separate `gather` barriers: STEP 3 (discovery must finish before any pipelin
 - **Wiring.** Shared caller and gateway injected at the composition root (`create_amenity_search`). `aclose()` closes the gateway. The caller is closed once, by its owner.
 - **Bounds.** Per-server semaphores — **Parallel** (search, shared by the discovery batch and phase 1) and **Firecrawl** (`map`/`scrape`, replacing the old crawl semaphore) — plus an LLM-call bound and a cap on amenity pipelines in flight. Starting values configurable, not measured. A separate **per-amenity ceiling of 8 distinct scrapes** (enforced by the R3.M1.1 guard) bounds Phase-2 fan-out independently of the global Firecrawl semaphore.
 - **Failure isolation.** One amenity's failure doesn't cancel others. The run raises in two cases only: a gateway-level failure (cannot connect, expected tool missing), and the provider-failure run-level raise below.
+- **Current pipeline.** `phase1_loop → R3.M2.2 resolution → R3.M2.3 → R3.M2.4`. Triage and phase 2 are DEFERRED (R3.M1.4). Wherever this section lists "triage, phase 2" among the LLM steps, that applies only once they are re-enabled.
 - **Provider-failure handling (pipeline catch).** The pipeline catches `MetricResolutionProviderError` from any of its LLM steps (phase 1, triage, phase 2, resolution) and returns a `SpecificMetricsRecord` with every metric `unresolved(resolution_call_failed)`; remaining steps are skipped and gathered evidence is discarded. `stage` and `cause` are logged, not stored on the record. Full rule in R3.M1.4 "Failure handling (D5)."
 - **Provider-failure circuit breaker (run-scoped).** Created at method start, shared by the discovery batch and every amenity pipeline.
   - *Counter.* Goes up by 1 for each `cause = availability` failure from an amenity pipeline **or** a discovery LLM call (tool turn or selection turn), and resets to 0 when any LLM call succeeds. Safe without a lock because everything runs on one event loop (C3.1.1). Amenities run concurrently, so "in a row" means failures with no LLM success in between, in completion order.
@@ -928,7 +986,7 @@ Two separate `gather` barriers: STEP 3 (discovery must finish before any pipelin
 **Problem.** No output wire contract for M3. Contradiction/sufficiency/quoting rules exist only as prose. Both providers apply strict schema limits; a static schema can't carry per-metric enums. The resolution turn runs after tool results that may contain untrusted text.
 
 **Finalized approach — Approach 2: one static schema with a typed-union `final_value`.**
-A single static schema (not generated per amenity). `final_value` is a **typed union of `string | number | boolean | null`**, covering the four shapes a metric value can take (text, number, boolean, or no value). Per-metric **enum membership, `unit`, and `value_type`** conformance is **not** in the schema — a static schema can't carry per-metric enums, so that stays a **code check in R3.M2.3**. Fields: `metric_label`, `web_value`, `scrape_value`, `relation`, `final_value`, `basis`, `verification_met`, `evidence`.
+A single static schema (not generated per amenity). `final_value` is a **typed union of `string | number | boolean | null`**, covering the four shapes a metric value can take (text, number, boolean, or no value). Per-metric **enum membership, `unit`, and `value_type`** conformance is **not** in the schema — a static schema can't carry per-metric enums, so that stays a **code check in R3.M2.3**. Fields, in this order: `metric_label`, `web_value`, `scrape_value`, `reviews_value`, `relation`, `verification_met`, `final_value`, `opinion_mixed`, `basis`, `evidence`.
 
 **Decisions — generally mandatory**
 - **Schema limits.** All keys required, closed objects, closed enums, no `minLength`/`minItems` — the same limits as Mechanism 6.
@@ -936,12 +994,88 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 - **Examples.** Worked examples in the instruction are not reused as a sample-runner seed.
 
 **Decisions — problem-specific**
-- **Value typing (Approach 2).** `final_value` is the typed union `string | number | boolean | null`. `web_value` and `scrape_value` are **descriptive strings the LLM writes** (they don't map to any existing data-object field, so no per-metric typing is needed on them). `verification_met` is boolean; `relation` / `basis` are the fixed closed enums below; `evidence` is a structured object. Per-metric `enum`/`unit`/`value_type` conformance of `final_value` is deferred to R3.M2.3 (code).
-- **Field order.** `web_value` and `scrape_value` before `final_value`, so both source values are extracted before the commit.
-- **Contradiction rule (D7).** A non-null `scrape_value` is the `final_value`, even contradicting `web_value`. `web_value` used only when `scrape_value` is null.
-- **Verification rule.** `verification_met` false when evidence doesn't satisfy the metric's `verification` text; `final_value` then null.
-- **Google reviews as a fallback value source (verification-gated — finalized).** Reviews are already supplied to the resolution turn as a labeled block (**not** a tool, never fetched; the tool catalog and `resolution_source` are unchanged). Instruction rule: *"Resolve each metric from the tool evidence (web/scrape) first, applying the metric's `verification` rule. Set `final_value` from the Google-reviews block **only when no tool value satisfies that rule** (tools returned nothing, or only evidence that fails verification) **and** a review quote does satisfy it. Cite `source=google_reviews`."* The per-metric **`evidence_class` is the factual/experiential switch** (set at Mechanism 6, read directly — never parsed from text): `factual` rejects reviews; `experiential` (equivalently, a `review_target` present) lets a review pass. A review-sourced value sets `basis=google_reviews` and is `single_source` (R3.M2.4). Tools may still resolve experiential metrics when a tool value passes the experiential verification — reviews fill only the gaps (not "experiential ⇒ reviews-only"). **Safety net:** a metric with **no `review_target`** (i.e. not `experiential`) is reviews-blocked by default — reviews stay ineligible unless `evidence_class` is `experiential`. **RC10 (revised):** the experiential `review_target` is a reviews **reading hint**, not a new tool — reviews are still read, never fetched; reviews remain a resolution-time fallback gated by `evidence_class`.
-- **Relation / basis enums (trimmed, + reviews).** `relation`: `agree`, `refined_by_scrape`, `conflict`, `none`. `basis`: `web`, `scrape`, `both`, `google_reviews`, `none`. `web_only`/`scrape_only` are dropped from `relation` (a single-source value is recoverable from `basis` = `web`/`scrape`); `verification_rule` is dropped from `basis` (the "why null" is carried by `verification_met` + the downstream `unresolved_reason`); **`google_reviews` is added to `basis`** for a value set from the reviews fallback above. **`relation = none`** means *no cross-source relationship* — fewer than two source values are present (only-web, only-scrape, or neither; a review-only value is also `relation=none`); it must be read **together with `basis`**, and the instruction must define it this way so the model doesn't conflate "no relationship" with "no value." The R3.M2.3 consistency check reads `relation` + `basis` together.
+- **Value typing (Approach 2).** `final_value` is the typed union `string | number | boolean | null`. `web_value`, `scrape_value` and `reviews_value` are **descriptive strings the LLM writes** (or null) (they don't map to any existing data-object field, so no per-metric typing is needed on them). `verification_met` and `opinion_mixed` are boolean; `relation` / `basis` are the fixed closed enums below; `evidence` is a structured object. Per-metric `enum`/`unit`/`value_type` conformance of `final_value` is deferred to R3.M2.3 (code).
+- **Source-value fields — `web_value`, `scrape_value`, `reviews_value` (finalized).** Each is **one short phrase stating the answer this source gives, in the metric's own terms** (e.g. `€22.50`, `busy on weekday afternoons`).
+  - **The source's items disagree:** state the split briefly, e.g. `split: busy (2 sites), quiet (1)`.
+  - **The source gives no answer:** null.
+  - **Never** a summary or a pasted excerpt. The exact text goes in `evidence` as verbatim quotes.
+  
+  They are working notes: they let the LLM write down each source before committing, let `relation` compare sources, and let R3.M2.3 check `final_value` against them. They are not carried into the final record.
+- **`reviews_value` (finalized).** What the Google-reviews block says for this metric, in the LLM's words. Always null for a `factual` metric (reviews never used) and when no reviews exist. Why: reviews are an equal source for experiential metrics, so like web and scrape they need a place to be written down before the value is committed, and `relation` compares against it.
+- **Field order (finalized — mirrors the decision order below).** `metric_label` → `web_value` → `scrape_value` → `reviews_value` → `relation` → `verification_met` → `final_value` → `opinion_mixed` → `basis` → `evidence`. The LLM fills fields in order, so the order shapes its reasoning: every source value is written down before the comparison, and the verification check comes **before** `final_value`, because a bar that is not met means no value.
+- **Decision order (finalized — stated to the LLM as a numbered procedure, run per metric).**
+  1. **Filter the evidence** to what the source rules allow:
+     - drop any non-official excerpt that does not clearly and explicitly refer to this amenity;
+     - factual: drop visitor accounts and the reviews block;
+     - experiential: drop the official site.
+  2. **`web_value`:** what the remaining web evidence says. For a factual metric, the official-site value when there is one, else the third-party value. Null if no web evidence remains.
+  3. **`scrape_value`:** what scraped official pages say. Null if none (always, while phase 2 is deferred).
+  4. **`reviews_value`:** what the reviews block says. Experiential only; null for factual or when no reviews exist.
+  5. **`relation`:** compare the source kinds that answered (`agree` / `conflict` / `refined_by_scrape` / `none`).
+  6. **`verification_met`:** does the allowed evidence meet the metric's `verification` bar? If `false`, `final_value` is null, `opinion_mixed` is `false`, `basis` is `none`, and the procedure skips to step 9.
+  7. **`final_value`, by priority:**
+     - **Factual:** take the highest tier that answered: scrape → official-site web → third-party web. If that tier's sources disagree, the value most of its sites agree on; on an even split, the more credible, detailed and clear source.
+     - **Experiential:** sources agree → that answer; sources conflict → the leaning side (even split: the more credible, detailed and clear side); only one answered → that one.
+  8. **`opinion_mixed` and `basis`.** `opinion_mixed = true` when step 7 chose between disagreeing sources: experiential sources that disagree, or factual sources in the same tier that disagree. See "Mixed opinion" and the reviews rule below.
+  9. **`evidence`:** quotes backing the value, from both sides when `opinion_mixed` is `true`.
+- **Evidence source rules (finalized).** This is the single home of these rules; triage (R3.M1.4 step 2) applies the same rules.
+  - **Current scope:** with triage deferred, resolution is the only step that applies these rules.
+  - **Three kinds of evidence:**
+    - **Official site:** a web excerpt whose URL is on the amenity's `website_url` host, and every scrape item.
+    - **Third-party:** any other site, e.g. editorial guides, local news, blogs, listing/directory write-ups.
+    - **Visitor account:** a review or post describing a visit, on any site, plus the Google-reviews block.
+  - **Identity proof (all non-official evidence).** A third-party or visitor-account excerpt counts only when its text **clearly and explicitly refers to this amenity**. Otherwise it is ignored and never cited.
+  - **Factual metrics:**
+    - Official-site evidence comes first.
+    - Third-party evidence is used **only when no official-site evidence answers the metric**. This covers both "no `website_url`" and "a site exists but doesn't answer this metric".
+    - Visitor accounts **never** answer a factual metric. This covers review excerpts on the web as well as the Google-reviews block.
+    - **Conflict across tiers:** official site wins over third-party (D7 revised). Within official-site evidence, scrape wins over a web excerpt. The tiers, highest first, are scrape → official-site web → third-party web. A conflict settled by tier is **not** mixed: `opinion_mixed = false`.
+    - **Conflict within one tier (finalized — option C):** when sources of the **same tier** disagree (e.g. no official answer, and one guide says €20 while another says €22.50):
+      - `final_value` is the value **most sites in that tier agree on**; on an even split, the source that is **more credible, detailed and clear**.
+      - `opinion_mixed = true`, so the value is marked uncertain.
+      - Quotes for both sides are kept in `evidence`.
+  - **Experiential metrics:**
+    - Third-party evidence and visitor accounts both count.
+    - The official site **never** counts, because it is the amenity describing itself.
+    - **Conflict:** when independent sources disagree (e.g. a guide says "quiet", reviews say "noisy"), the answer **reports both sides**, so the user sees that opinion online is mixed. Representation is set by "Mixed opinion (finalized)" below.
+  - **Age of evidence:** never disqualifies a value. `as_of` is still recorded (R3.M2.4).
+  - **No usable evidence from any allowed source:** `final_value` null, so the metric is `unresolved`.
+- **Mixed opinion (finalized — leaning value + separate flag).**
+  - **Value:** `final_value` is still **the side most evidence supports** (e.g. `quiet`). It stays a normal value of the metric's `value_type`, so scoring and ranking can use it.
+  - **Flag:** a boolean field, **`opinion_mixed`**, is `true` when the value was **chosen between disagreeing sources**, else `false`. It applies to both classes:
+    - **Experiential:** independent sources disagree (web items among themselves, or web vs reviews).
+    - **Factual:** sources **of the same tier** disagree (e.g. two third-party sites give different prices). A factual conflict settled by tier (official site over third-party, scrape over web) is **not** mixed.
+    
+    An unresolved metric is always `false`, because it has no value to qualify. The field name is kept for both classes: for a factual metric, `true` means the sources disagreed and the value is uncertain.
+  - **Evidence:** when `opinion_mixed` is `true`, `evidence` keeps quotes for **both** sides, not only the leaning side.
+  - **Unchanged:** metric definitions (no `mixed` enum member, no Mechanism 6 change), `relation`.
+  - **Tie rule (finalized):** on an even split, `final_value` is the side whose evidence is **more credible, detailed and clear**, e.g. a specific, first-hand description over a vague one-liner. `opinion_mixed` is still `true`, and both sides' quotes are still kept. The same rule settles a factual same-tier tie. The resolution instruction carries one example for each class.
+- **Contradiction rule (D7 revised).** For a factual metric, official-site evidence beats third-party evidence. A non-null `scrape_value` is the `final_value`, even when it contradicts `web_value`. `web_value` is used only when `scrape_value` is null. When web evidence has both official-site and third-party values, `web_value` is the official-site value.
+- **Verification rule.** `verification_met` false when evidence doesn't satisfy the metric's `verification` text; `final_value` then null. Only evidence allowed by the source rules above can satisfy it.
+- **Google reviews as an equal source for experiential metrics (verification-gated — finalized; replaces the earlier "fallback" rule).** Google reviews are people describing their own experience, which is exactly what an experiential metric measures, so for experiential metrics they carry **the same weight as web evidence**, not less. Reviews are supplied to the resolution turn as a labeled block (**not** a tool, never fetched; the tool catalog and `resolution_source` are unchanged). Instruction rule for an **experiential** metric:
+  - Read the metric's web evidence **and** the Google-reviews block **together**, as equal sources, writing each down (`web_value`, `reviews_value`), and apply the metric's `verification` rule to both.
+  - **Both answer and agree:** that is `final_value`; `basis = web_and_reviews`, `relation = agree`.
+  - **Both answer and disagree:** `final_value` is the leaning side and `opinion_mixed = true`, with both sides' quotes kept ("Mixed opinion" above, including its tie rule); `basis = web_and_reviews`, `relation = conflict`.
+  - **Only one answers:** that source alone sets `final_value` if it meets the bar; `basis = web` or `basis = google_reviews`, `relation = none`.
+  - **Neither answers:** `final_value` null.
+  - Cite review quotes with `source = google_reviews`.
+  
+  The per-metric **`evidence_class` is the factual/experiential switch** (set at Mechanism 6, read directly, never parsed from text): `factual` rejects reviews entirely; `experiential` (equivalently, a `review_target` present) uses them as above. **Safety net:** a metric with **no `review_target`** (i.e. not `experiential`) is reviews-blocked by default — reviews stay ineligible unless `evidence_class` is `experiential`. **RC10 (revised):** the experiential `review_target` is a reviews **reading hint**, not a new tool — reviews are still read, never fetched; reviews remain a resolution-time source gated by `evidence_class`.
+- **Relation / basis enums (trimmed, + reviews).** `relation`: `agree`, `refined_by_scrape`, `conflict`, `none`. `basis`: `web`, `scrape`, `web_and_reviews`, `google_reviews`, `none`. `web_only`/`scrape_only` are dropped from `relation` (a single-source value is recoverable from `basis` = `web`/`scrape`); `verification_rule` is dropped from `basis` (the "why null" is carried by `verification_met` + the downstream `unresolved_reason`). **`google_reviews`** = an experiential value resting on the reviews block alone. **`web_and_reviews` replaces the former `both`** (web + scrape): it means an experiential value resting on web evidence **and** the reviews block, whether they agree or are mixed. With phase 2 deferred there is no scrape evidence, so web + scrape cannot occur. *If phase 2 returns,* a value resting on web + scrape needs a `basis` value again. **What `relation` compares (finalized).** `relation` compares the **two source kinds behind the value**: web vs scrape, or web vs Google reviews (experiential metrics, where reviews are an equal source).
+  - `agree`: the two source kinds give the same answer.
+  - `conflict`: they give different answers.
+  - `refined_by_scrape`: scrape only; the scrape adds detail to the web value.
+  - `none`: only one source kind is present (only web, only scrape, only reviews, or nothing).
+  
+  So a `web_and_reviews` value is `agree` or `conflict`, never `none`.
+  
+  **`relation` vs `opinion_mixed`.** They answer different questions:
+  - `relation` compares **source kinds**.
+  - `opinion_mixed` tells the user whether the evidence disagreed.
+  
+  For example, a guide and a blog that disagree with no reviews give `basis = web`, `relation = none`, `opinion_mixed = true`. A factual conflict settled by "official site wins" gives `opinion_mixed = false`. Two third-party sites giving different prices, with no official answer, give `opinion_mixed = true`.
+  
+  `relation = none` means *no cross-source relationship*, not "no value"; it must be read **together with `basis`**, and the instruction must define it this way so the model doesn't conflate "no relationship" with "no value." The R3.M2.3 consistency check reads `relation` + `basis` together.
 - **Evidence items.** `source` (`web`/`scrape`/`google_reviews`), `url` (string|null), verbatim `quote`.
 - **No numeric confidence.** Trust carried by `support` (R3.M2.4) and the quotes.
 - **Untrusted content rule.** Instructions in tool results are ignored. Amenity Google reviews supplied as a labeled block.
@@ -950,29 +1084,92 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 
 ## R3.M2.2 — Run the Resolution Turn and Validate the Body
 
-**Goal.** Build the resolution turn from the amenity's `metrics_source_content` — **not** from the tool-call thread. For each submitted metric, present that metric's evidence bucket (its items in `metrics_source_content` — those whose `metric_labels` contains the label) plus the amenity-level Google-reviews block when reviews exist (R3.M2.1, shown to every metric). Append the resolution instruction and this evidence, then call the shared caller with the resolution schema and no tools (reviews are a labeled block, not a tool). Return a body matching the schema and covering exactly the submitted labels, or a typed per-amenity failure. Skip the call only when no metric has any usable evidence (see Skip rule).
+**Goal.** Write the amenity's Google reviews into `metrics_source_content` as one `google_reviews` item. Then, unless the skip rule applies, send one fresh resolution call built from `metrics_source_content` (not from the tool-call thread): one section per metric with that metric's own evidence, plus the shared reviews section. Keep every correctly returned metric entry, drop extra labels, and send one follow-up call for any submitted label the answer left out.
 
-**Problem.** The call can fail (provider error, truncation) or return an invalid body. The body can miss/repeat/add a label. D5: one amenity's failure must not stop the run. A no-evidence call is cost with no output.
+**Problem.** The call can fail (provider error, truncation). The answer can miss, repeat or add a label. D5: one amenity's failure must not stop the run. A call with no evidence costs money and produces nothing.
 
 **Three common approaches**
 1. Model validation, then label-set check (whole body rejected on any mismatch).
-2. Per-entry validation (valid entries kept; missing/extra/invalid → only those labels unresolved).
+2. Per-entry validation (correct entries kept; extra labels dropped; missing labels get one follow-up call). **Selected.**
 3. Hand-written dict validator, then label-set check.
 
+**Step order inside `_run_amenity_pipeline`**
+
+| Step | What | Detail |
+| --- | --- | --- |
+| (R3.M1.4) | `phase1_loop` | builds `metrics_source_content` (web items only; unchanged) |
+| Step 1 | `_record_review_evidence(rec, store, retrieved_at)` | writes the `google_reviews` item (see "Reviews item") |
+| Step 2 | Skip rule | see "Skip rule" |
+| Step 3 | `render_resolution_input` → `call_structured` | see "Resolution input" |
+| Step 4 | parse + label coverage (+ follow-up) | see "Label coverage" |
+
 **Decisions — generally mandatory**
-- **Fallback rule.** The shared caller falls back on provider errors and truncation; never for an invalid body.
-- **Typed errors.** Validation failures carry `stage` and a reason (`schema` or `label_coverage`).
-- **Logging.** `metric_resolution.validated` and `metric_resolution.rejected`.
+- **Errors and fallback.** Only a provider-chain failure raises (`MetricResolutionProviderError`, with `stage` and `cause`). The shared caller falls back on provider errors and truncation, never on a label-coverage problem. Label-coverage problems never raise.
+- **Unparseable body (safety line, not expected).** Strict mode guarantees the format (see "Strict mode guarantees schema validity"). If `MetricResolutionResult.model_validate` still fails, no fallback is possible because the provider chain has already finished. It is handled like a provider failure: the metrics that call was resolving become `unresolved(resolution_call_failed)`, with no retry.
+- **Logging.**
+
+  | Event | When |
+  | --- | --- |
+  | `metric_resolution.validated` | Once per call, with the counts of kept, dropped and missing labels |
+  | `metric_resolution.extra_label_dropped` | An extra label was removed |
+  | `metric_resolution.duplicate_label` | A label appeared more than once |
+  | `metric_resolution.missing_label_retry` | A follow-up call is sent, with the labels it asks for |
+  | `metric_resolution.rejected` | A label is still missing after the follow-up (`resolution_body_invalid`) |
 
 **Decisions — problem-specific**
-- **Evidence source & shape (finalized).** Resolution reads the amenity's `metrics_source_content`, a **normalized evidence set** of items `{ evidence_id, source_kind ∈ web|scrape|google_reviews, url, shaped_text, retrieved_at, metric_labels }` (shape defined in R3.M1.4), with **Google reviews** as one amenity-level item (empty `metric_labels`) passed to **every** metric. The prompt is assembled **per metric** from that metric's bucket — the items whose `metric_labels` contains the label (+ reviews) — so the model sees each metric's own evidence instead of one flat pool and does not re-derive cross-metric relevance semantically. Same-URL/different-`shaped_text` web items stay distinct and never collapse. The tool-call thread is **not** the resolution input.
-- **Skip rule (deterministic structural gate — finalized).** Run the call whenever the amenity has **any** evidence to reason over: at least one metric has web/scrape evidence **or** a Google-reviews block exists for the amenity. Skip only when **both** are absent (no web/scrape evidence for any metric **and** no reviews block). The gate is **purely structural** — R3.M2.2 never reads `verification` text to judge review eligibility; when reviews exist the call runs and the **resolution LLM** applies each metric's per-`verification` review-eligibility rule (R3.M2.1 is the single authority for that semantic judgment). The gate errs permissive by design: skipping too eagerly would emit a false `no_evidence`, whereas running a call that happens to resolve nothing (e.g. reviews present but every metric factual) costs only one bounded call. A skipped amenity's metrics are all `unresolved(no_evidence)`.
-- **Failure result (D5, D6).** A provider-chain failure or invalid body for one amenity → `value = None`, `status = unresolved`, reason `resolution_call_failed` or `resolution_body_invalid`. Run continues. The resolution call checks the circuit breaker first; a provider failure here (including `cause = circuit_open`) follows the R3.M1.4 amenity-level outcome.
-- **Run-level raise.** Defined once in R3.M1.5 "Run-level raise (provider failure)."
-- **Default carried from spec.** Label coverage rejects the whole body, no fill (Approach 2 would change this default).
-- **Prompt size.** The resolution prompt is the per-metric evidence buckets (+ reviews) from `metrics_source_content`, not the full thread; its size rests on the R3.M1 caps that bound what the buckets contain. No separate token accounting.
+- **Reviews item (finalized).**
+  - **Input.** `rec.reviews` from the `PredefinedMetricsRecord` the pipeline already receives (`rec`, read from `state.predefined_records`). No new fetch, no new argument.
+  - **Function.** `_record_review_evidence` sits next to `_record_web_evidence` and follows the same pattern.
+  - **What it writes.** One `store.record(...)` call: `source_kind = "google_reviews"`, `url = None`, `shaped_text` = the formatted block (below), `metric_label = None` (so `metric_labels` stays empty and the reviews stay out of every metric bucket).
+  - **`retrieved_at`.** `PredefinedMetricsRecord` has no fetch timestamp, so the item uses the time Step 1 records it (slightly later than the fetch, same run).
+  - **Writes nothing when** `rec` is None, `rec.reviews` is None or empty, or no review has text. The renderer then shows `google_reviews: null`.
+  - **Why Step 1.** The skip rule and the follow-up call both need the item, so it is written once before both.
+  - **Text format.** One numbered entry per review, in Google's order, separated by a blank line: `Review 1 (★3): <text>`, blank line, `Review 2 (★5): <text>`, and so on.
 
-> *Validation approach (1 / 2 / 3) is open for discussion — note the whole-body-reject default favors Approach 1/3.*
+    | Field | Rule | Why |
+    | --- | --- | --- |
+    | Text | `text.text` as is; if missing, `original_text.text`. Copied verbatim, including emojis and line breaks. | R3.M2.4 checks quotes as substrings of this exact text |
+    | Rating | Whole number (`3.0` → `★3`). Missing rating → `Review N:` with no star. | A short signal of the review's tone |
+    | Label `Review N` | Numbered in Google's order, counting only the reviews written | Review texts can contain blank lines, so the number marks where each review starts |
+    | Left out | Author name, photo, links, publish time | Not evidence; R3.M2.1 source rules ignore age; names add personal data with no benefit |
+    | Rating-only review (no text) | Skipped | Nothing to quote |
+    | Number of reviews | All that Google returns (up to 5), no cap | Small and already bounded |
+
+    Source shape: a Google review carries `rating`, `text.text`, `original_text.text`, `relative_publish_time_description`, `author_attribution`, `publish_time` (see `sample_outputs.py`).
+- **Skip rule (finalized).** Send the call when at least one metric has web/scrape evidence **or** a `google_reviews` item exists. Skip only when both are absent; every metric is then `unresolved(no_evidence)`. The rule is purely structural: R3.M2.2 never reads `verification` text. Whether reviews may be used for a metric is decided by the resolution LLM (R3.M2.1 rules).
+- **Resolution input (finalized).**
+  - **Fresh call.** The static resolution instruction (schema and worked examples included, R3.M2.1) is the system message. The rendered evidence (`render_resolution_input`) is the user turn. No tools; reviews are a labeled block, not a tool.
+  - **One section per metric.** Each section holds that metric's bucket: the items in `metrics_source_content` (shape in R3.M1.4) whose `metric_labels` contains the label. Same-URL items with different `shaped_text` stay separate.
+  - **Shared reviews section.** The `google_reviews` item appears once, outside the metric sections. The instruction says only `experiential` metrics may use it (R3.M2.1 source rules). Repeating it per metric would multiply its tokens for no gain.
+  - **Amenity identity.** Name, address and `website_url` (or "none"). `website_url` tells official-site evidence apart from third-party evidence; name and address are what the identity-proof check is made against.
+  - **Prompt size.** Bounded by the R3.M1 caps on what the buckets contain. No separate token accounting.
+- **Label coverage (finalized, Approach 2).** The schema cannot force the answer to return exactly the submitted labels, so labels are checked entry by entry. Correct entries are never discarded.
+
+  **Step 1. Sort every returned entry by its label.**
+
+  | Case | Meaning | Result |
+  | --- | --- | --- |
+  | Correct | label was submitted and appears once | **kept**, passed on to R3.M2.3 |
+  | Extra | label was never submitted | **dropped**; the rest is kept |
+  | Duplicate | a submitted label appears more than once | all copies dropped, treated as **missing** (the app cannot tell which copy is right) |
+  | Missing | submitted, not in the answer | goes to the follow-up call |
+
+  **Step 2. One follow-up call for the missing labels only.**
+  - Built like the first call, listing only the missing metrics (`render_resolution_input` with the missing `MetricSpec`s).
+  - The skip rule runs on those metrics first. If none has web/scrape evidence and no reviews item exists, no call is sent and they become `unresolved(no_evidence)`.
+  - Its answer is sorted with the same Step 1 rules. Its correct entries are merged with the kept ones. Kept entries are never re-asked or overwritten.
+
+  **Step 3. Final outcome.** A label still missing after the follow-up becomes `unresolved(resolution_body_invalid)`. No second follow-up: at most **2 resolution calls** per amenity.
+
+  | ID | Decision | Final answer | Consequence for the build |
+  | --- | --- | --- | --- |
+  | LC1 | Is the reason a label is still missing recorded? | One reason, `resolution_body_invalid`, for every case. The detail (never returned / duplicate) goes to the logs only. | The record stays simple; downstream services only need "unresolved". |
+  | LC2 | If most of the answer is bad, is the follow-up still sent? | **Yes, always**, whatever the number of missing labels. | No threshold logic; cost stays capped at 2 calls per amenity. |
+  | LC3 | Do label-coverage problems count toward the circuit breaker? | **No.** The breaker counts availability failures only (R3.M1.5). | A bad answer never stops the run; only provider outages do. |
+- **Failure result (D5, D6).** Each resolution call (first and follow-up) checks the circuit breaker first. A provider-chain failure (including `cause = circuit_open`) on the **first** call makes every metric of the amenity `unresolved(resolution_call_failed)`, `value = None`. On the **follow-up** call, only its metrics become `unresolved(resolution_call_failed)`; kept entries stand. The run continues.
+- **Run-level raise.** Defined once in R3.M1.5 "Run-level raise (provider failure)."
+
+> *R3.M2.2 finalized: Approach 2 (per-entry label coverage, one follow-up, max 2 calls), LC1–LC3, reviews item written in Step 1.*
 
 ## R3.M2.3 — Conform Values and Apply the Verification Gate
 
@@ -992,7 +1189,7 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 
 **Decisions — problem-specific**
 - **Verification gate.** `verification_met = false` → `unresolved(verification_unmet)`, even when a scrape value exists. The scrape value decides which value wins; it does not commit a value that fails verification.
-- **Scrape override check.** When `scrape_value` is non-null, `final_value` must equal it after normalization. A mismatch means the model broke D7 → `unresolved(basis_inconsistent)`, nothing repaired in code. Adds one reason to the output contract (recorded by R3.M2.5).
+- **Scrape override check.** When `scrape_value` is non-null, `final_value` must equal it after normalization. A mismatch means the model broke D7 → `unresolved(basis_inconsistent)`, nothing repaired in code. Adds one reason to the output contract (recorded by R3.M2.5). The other source rules (official web excerpt over third-party, identity proof, no visitor accounts for factual metrics) are applied by the resolution LLM under R3.M2.1 and are **not** re-checked in code here.
 - **Unresolved reasons set here.** `type_violation`, `enum_violation`, `verification_unmet`, `basis_inconsistent`.
 
 > *Conformer approach (1 / 2 / 3) is open for discussion.*
@@ -1011,10 +1208,10 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 **Decisions — generally mandatory**
 - **Normalization.** Whitespace collapse + case folding. No other rewriting.
 - **`metrics_source_content` content.** The shaped text actually sent to the LLM (R3.M1.2), stored in the normalized evidence set (R3.M1.4): one item per distinct `(source_kind, url, shaped_text)`, attributed to metrics via `metric_labels`, with the `google_reviews` item carrying none.
-- **URL rule.** A quote's URL must be one of the URLs in **that metric's** `metrics_source_content` bucket (or the amenity-level reviews block).
+- **URL rule.** A quote's URL must be one of the URLs in **that metric's** `metrics_source_content` bucket, or the amenity-level reviews block for an `experiential` metric only. A factual metric citing the reviews block fails this rule.
 
 **Decisions — problem-specific**
-- **`support`.** `both_sources` when surviving quotes cite both `web` and `scrape`; otherwise `single_source`. `google_reviews` alone is `single_source`.
+- **`support` (redefined for the current scope).** `both_sources` when surviving quotes come from **two or more independent sources that agree on the value**. Independent means different sites (registrable domains), any of web or scrape. The Google-reviews block never counts toward it (rule below). Otherwise `single_source`. Why: with phase 2 deferred there is no scrape evidence, so the old rule ("quotes cite both `web` and `scrape`") would make every value `single_source`, and the field would carry no trust signal. The new rule keeps it meaningful now and still holds if phase 2 returns. The name `both_sources` is kept so the output contract does not change.
 - **Google reviews.** Can be cited as supporting text; never count as the second source.
 - **`as_of`.** Latest `retrieved_at` among the `metrics_source_content` entries the surviving quotes cite.
 - **Failure result.** A resolved value with no surviving quote → `unresolved(quote_unverified)`, `value = None`.
@@ -1044,10 +1241,10 @@ A single static schema (not generated per amenity). `final_value` is a **typed u
 - **`SpecificMetricsRecord` fields.** `category_id`, `taxonomy_node`, `depth`, `place_id` + `specific_metrics: dict[label, ResolvedMetric]`.
 - **`AmenityMetricsRecord` fields.** `predefined: PredefinedMetricsRecord` (always present) and `specific: SpecificMetricsRecord | None`.
 - **`AmenityMetricsSet` fields.** `contract_version: str` and `records: dict[category_id][place_id] → AmenityMetricsRecord`.
-- **`ResolvedMetric` fields.** `label`, `status` (`resolved`/`unresolved`), `value` (float/bool/str/None), `unit`, `support`, `evidence` (source, url, quote, `retrieved_at`), `as_of`, `unresolved_reason`.
+- **`ResolvedMetric` fields.** `label`, `status` (`resolved`/`unresolved`), `value` (float/bool/str/None), `unit`, `opinion_mixed` (bool; from R3.M2.1 "Mixed opinion", always `false` when unresolved), `support`, `evidence` (source, url, quote, `retrieved_at`), `as_of`, `unresolved_reason`.
 - **Unresolved reasons.** `no_evidence`, `verification_unmet`, `type_violation`, `enum_violation`, `quote_unverified`, `basis_inconsistent`, `resolution_call_failed`, `resolution_body_invalid`. `resolution_call_failed` covers any LLM provider failure in the amenity pipeline, including a breaker skip; the failing step and cause are in the logs, not the record (R3.M1.5).
 - **Null-policy boundary.** R3.M2 emits `resolved`/`unresolved(reason)`, `value None` when unresolved. C4.1 alone maps to `null`/`"unknown"` via `null_policy`.
-- **Downstream changes.** C4.1's "inline enforcement at R3.M2" wording no longer matches. C4.2 consumes `AmenityMetricsSet` (pairing already done here) → its "merge" goal needs rewording; it must carry `support`, `evidence`, `as_of` into the assembled record.
+- **Downstream changes.** C4.1's "inline enforcement at R3.M2" wording no longer matches. C4.2 consumes `AmenityMetricsSet` (pairing already done here) → its "merge" goal needs rewording; it must carry `support`, `evidence`, `as_of` and `opinion_mixed` into the assembled record. Scoring and display must read `opinion_mixed`: the value is still used for scoring, and the user is shown that opinion is mixed, with both sides' quotes.
 - **Other changes outside M3.** M1.3 now writes `state.predefined_records` as a plain dict (no envelope/version; spec updated in `deep_search_context.md`). Code: rename `AmenityRecord` → `PredefinedMetricsRecord`, remove `AmenityRecordSet`, add new record types, add two state fields, retype `amenity_records`.
 - **Metric identity.** `(category_id, place_id, label)`. `label` unique per category (Mechanism 6 rule K5).
 
@@ -1071,12 +1268,13 @@ These are the places the draft still leaves a choice (everything else is a locke
 
 - **C3.1.1** — ✅ **FINALIZED** (see section). Gateway **extended** with `map_site` + `scrape_page` (crawl **retained**, unused by M3); capability check requires map + scrape only (crawl unchecked); map/scrape parsers (scrape → top-level `markdown` + `metadata.sourceURL`; map → link objects, string-form tolerated); **connect-time shape probe**; `structuredContent` decode attribute confirmed; Parallel web path verified. (C3.1.2 is implemented and matches spec.)
 - **R3.M1.3** — ✅ **FINALIZED** (see section). Approach 2 (LLM selection), binary host rule, app-injected crawl URL / host-clamp removed, `gather`+semaphore batch discovery, empty/failed + Pydantic-retry rules, Google-URL officiality gate (`official_url_gate`: `tldextract` SLD-match + exact-set denylist fast-reject, pinned offline PSL, strict by asymmetry), selection-turn **candidate id-indirection** (anti-hallucination; LLM returns a `selected_id`/`none`, app resolves, verdict validated at the body — not the tool-call guard) + `state.discovery_search_results` storage for eval. *Resolved:* postal-code handling is LLM-instructed — full `address` passed verbatim, use postal code only, degrade to locality/name when absent; app parses nothing.
-- **R3.M1.4** — ✅ **FINALIZED** (see section). Split loops (`phase1_loop → triage → phase2_loop`); triage via a separate strict-schema no-tools request; loop decisions aligned to R3.M1.1/R3.M1.2/R3.M1.3; `metrics_source_content` shape fixed. **Phase-2 scrape redesign finalized:** per-metric scrape (one page per phase-2-eligible — unresolved + `factual` — metric), `metric_label` required (≥1, multi allowed), explicit dedup + fan-out (fetch per URL, attribute per metric), hard ceiling of **8** distinct scrapes/amenity, candidate list bounded to **50**; best-effort accepted (attempt ≠ guaranteed evidence). **Failure handling finalized:** tool-call failures continue; an LLM provider-chain failure stops the step and ends the amenity (`resolution_call_failed`, evidence discarded); `cause` on the error (C3.1.2); run-level circuit breaker and run-level raise (R3.M1.5).
+- **R3.M1.4** — ✅ **FINALIZED** (see section). Split loops (`phase1_loop → triage → phase2_loop`); triage via a separate strict-schema no-tools request; loop decisions aligned to R3.M1.1/R3.M1.2/R3.M1.3; `metrics_source_content` shape fixed. **Phase-2 scrape redesign finalized:** per-metric scrape (one page per phase-2-eligible — unresolved + `factual` — metric), `metric_label` required (≥1, multi allowed), explicit dedup + fan-out (fetch per URL, attribute per metric), hard ceiling of **8** distinct scrapes/amenity, candidate list bounded to **50**; best-effort accepted (attempt ≠ guaranteed evidence). **Failure handling finalized:** tool-call failures continue; an LLM provider-chain failure stops the step and ends the amenity (`resolution_call_failed`, evidence discarded); `cause` on the error (C3.1.2); run-level circuit breaker and run-level raise (R3.M1.5). **Triage source rules added** (applies R3.M2.1 "Evidence source rules"; Mechanism 6 verification-bar prerequisite). **Current scope (2026-11-02): Triage and Phase 2 DEFERRED**; the pipeline is `phase1_loop → resolution`. The question of a factual metric skipping phase 2 after a third-party answer is closed: it doesn't apply while phase 2 is deferred, and the consequence is recorded as accepted for re-enabling. When to bring phase 2 back is decided later.
 - **R3.M1.5** — ✅ **FINALIZED** (see section). Approach 1 (pre-indexed `gather`, `return_exceptions=True`); hard barrier before R3.M2.5; per-amenity failure isolation; pre-loop discovery batch; no shared crawl (D4 revised); provider-failure circuit breaker (counts `availability` only, default N = 3) and run-level raise when no pipeline completes its LLM steps.
-- **R3.M2.1** — ✅ **FINALIZED** (see section). Approach 2: one static schema with a typed-union `final_value` (`string|number|boolean|null`); descriptive fields as strings; per-metric enum/unit/type conformance deferred to R3.M2.3. Enums trimmed (`relation`: 4; `basis`: 5, incl. `google_reviews`); **Google reviews added as a verification-gated fallback value source** (eligibility gated by `evidence_class`; RC10 revised).
-- **R3.M2.2** — evidence source ✅ **finalized**: resolution reads the normalized-evidence-set `metrics_source_content` (reviews as an unlinked item; per-metric buckets derived via `metric_labels`), not the thread. **Body validation** still open: whole-body reject / per-entry / dict validator (default favors whole-body reject).
+- **R3.M2.1** — ✅ **FINALIZED** (see section). Approach 2: one static schema with a typed-union `final_value` (`string|number|boolean|null`); descriptive fields as strings; per-metric enum/unit/type conformance deferred to R3.M2.3. Enums trimmed (`relation`: 4; `basis`: 5, incl. `google_reviews`; **`both` replaced by `web_and_reviews`**); **Google reviews are an equal source for experiential metrics** (read together with web evidence, not a fallback; eligibility gated by `evidence_class`; RC10 revised). **Source-value fields defined** (one short phrase per source; state the split when a source's items disagree). **Factual same-tier conflicts:** majority, then the more credible source, and `opinion_mixed = true` (the flag now covers both classes). R3.M2.5's downstream note still describes `opinion_mixed` as opinion only and needs a wording check later. **`reviews_value` added; fields reordered to match a numbered decision order** (`verification_met` now before `final_value`). **`relation` now compares the two source kinds behind the value** (web vs scrape, or web vs reviews), so web + reviews gives `agree` / `conflict`. R3.M2.2 onwards not yet aligned to this: R3.M2.4 still says reviews never count as a second source for `support`, and R3.M2.3's relation/basis check still treats `conflict` as "scrape must have won". **Evidence source rules added** (official / third-party / visitor account; identity proof; official wins for factual (D7 revised); experiential conflict reported as mixed; age ignored; reviews never for factual). **Mixed opinion finalized:** `final_value` keeps the leaning side; a new boolean `opinion_mixed` flags disagreement; both sides' quotes are kept. No Mechanism 6 change. Tie rule: on an even split, the more credible, detailed and clear side wins.
+- **R3.M2.2** — evidence source ✅ **finalized**: resolution reads the normalized-evidence-set `metrics_source_content` (reviews as an unlinked item; per-metric buckets derived via `metric_labels`), not the thread. **Body validation** ✅ **finalized — Approach 2 (per-entry):** correct entries kept, extra labels dropped, duplicate labels treated as missing, one follow-up call for missing labels only (still missing → `unresolved(resolution_body_invalid)`), max 2 resolution calls per amenity; LC1 one reason code, LC2 follow-up always sent, LC3 not counted by the breaker; unparseable body → `resolution_call_failed`, no retry. Skip rule unchanged (skip only when no web/scrape evidence and no reviews). **Reviews item** ✅ **finalized:** `_record_review_evidence` writes one `google_reviews` item in R3.M2.2 Step 1 (before the skip rule), numbered `Review N (★r): text` format, `retrieved_at` = record time.
 - **R3.M2.3** — conformer: ordered guards / dynamic model / registry.
-- **R3.M2.4** — provenance match: substring / fuzzy / span (draft decisions describe substring).
+- **R3.M2.4** — provenance match: substring / fuzzy / span (draft decisions describe substring). `support` redefined: `both_sources` = two or more independent sites agree (no scrape in the current scope).
+- **C3.1.1** — Firecrawl connection deferred: `open()` starts Parallel only while phase 2 is deferred (code change, NOT DONE).
 
 ---
 
@@ -1090,8 +1288,8 @@ left open above; each stays open and owned by its sub-component:
   verbatim; the instruction directs it to use only the postal code for locality scoping (the app parses
   nothing) and to degrade `postal code → locality/city → name-only` when Google returns none. The earlier
   inject-vs-instruct choice is settled on *instruct*.
-- **R3.M2.2 — resolution body validation.** Whole-body reject / per-entry / hand-written dict
-  validator (default favours whole-body reject).
+- **R3.M2.2 — resolution body validation (resolved: per-entry).** Correct entries kept, extra labels
+  dropped, one follow-up call for missing labels only (see R3.M2.2 "Label coverage").
 - **R3.M2.3 — value conformer.** Ordered guard functions / dynamic per-metric Pydantic model /
   table-driven registry.
 - **R3.M2.4 — provenance match.** Normalized substring / fuzzy / span references (draft decisions
