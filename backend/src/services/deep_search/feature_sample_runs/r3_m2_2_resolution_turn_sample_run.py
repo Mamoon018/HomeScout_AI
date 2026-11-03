@@ -22,7 +22,7 @@ From `backend/` (needs OPENAI_API_KEY and/or GROQ_API_KEY; no web or Firecrawl c
     real phase-1 data:   ... --from-sample-outputs [PATH]   (combinable with the flags above)
 
 `--from-sample-outputs` seeds from the LATEST "R3.M1.3 + R3.M1.4 PHASE 1 - OBJECT TRACE" dump in
-`deep_search/sample_outputs.py` (or PATH) instead of the dummy seed: that run's category plan
+`deep_search/sample_output/sample_outputs.py` (or PATH) instead of the dummy seed: that run's category plan
 (`MetricSpec`s), its `PredefinedMetricsRecord`s, its website verdicts, and each completed amenity's
 real phase-1 `MetricsSourceContent` (rebuilt through `.record()` in dumped order). The dump is
 parsed as JSON, never imported. The R3.M1.4 run seeded `reviews=None`, so by default each museum
@@ -228,7 +228,9 @@ def _phase1(store: MetricsSourceContent) -> Phase1Result:
 # --------------------------------------------------------------------------------------------------
 # Seed from a real R3.M1.4 run (`--from-sample-outputs`).
 # --------------------------------------------------------------------------------------------------
-DEFAULT_SAMPLE_OUTPUTS = Path(__file__).resolve().parents[1] / "sample_outputs.py"
+DEFAULT_SAMPLE_OUTPUTS = (
+    Path(__file__).resolve().parents[1] / "sample_output" / "sample_outputs.py"
+)
 # The section header the R3.M1.4 runner writes before its JSON dump (the latest one is used).
 _PHASE1_DUMP_MARKER = "R3.M1.3 + R3.M1.4 PHASE 1 - OBJECT TRACE"
 
@@ -743,7 +745,7 @@ def main() -> int:
     parser.add_argument("--from-sample-outputs", nargs="?", const=str(DEFAULT_SAMPLE_OUTPUTS),
                         default=None, metavar="PATH",
                         help="seed from the latest R3.M1.4 run dump instead of the dummy seed "
-                             "(default PATH: deep_search/sample_outputs.py)")
+                             "(default PATH: deep_search/sample_output/sample_outputs.py)")
     parser.add_argument("--no-dummy-reviews", action="store_true",
                         help="with --from-sample-outputs: keep the dump's records as they are "
                              "(no runner-supplied reviews)")

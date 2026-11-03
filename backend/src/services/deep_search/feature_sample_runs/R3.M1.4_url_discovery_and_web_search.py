@@ -24,7 +24,7 @@ OBJECT TRACE: `_ObjectWatcher` wraps the service's helpers at runtime (this file
 code is untouched). Every watched call records its inputs (snapshotted before the call, so later
 mutation of the shared message list cannot change them) and its output or raised error, tagged with
 the amenity and turn. At the end, even when the run fails, the trace + seed inputs + final state
-stores are appended as one section to `deep_search/sample_outputs.py` (or `--output PATH`).
+stores are appended as one section to `deep_search/sample_output/sample_outputs.py` (or `--output PATH`).
 
 From `backend/` (needs PARALLEL_API_KEY and FIRECRAWL_API_KEY for open() + searches;
 OPENAI_API_KEY / GROQ_API_KEY for the LLM turns):
@@ -75,7 +75,7 @@ from src.services.deep_search.specific_metric_resolution import (
 )
 
 _RULE = "=" * 78
-DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "sample_outputs.py"
+DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "sample_output" / "sample_outputs.py"
 
 
 # --------------------------------------------------------------------------------------------------
