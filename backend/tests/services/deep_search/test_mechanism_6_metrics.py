@@ -84,9 +84,11 @@ def _metric(label: str = "Service speed", **overrides) -> dict:
         "value_type": "enum",
         "unit": None,
         "enum_values": ["slow", "mixed", "fast"],
+        "evidence_class": "experiential",
         "resolution_source": {
             "web_target": "typical service speed and wait time at the venue",
-            "scrape_target": "about or service section on the official site",
+            "scrape_target": None,
+            "review_target": "mentions of service speed or wait time in customer reviews",
         },
         "verification": "dominant sentiment across at least 5 reviews mentioning wait time",
         "null_policy": "unknown",
@@ -102,9 +104,11 @@ def _specific_metric(label: str = "Dedicated platform present", **overrides) -> 
         question="The customer named a platform as a requirement: does the gym have one?",
         value_type="boolean",
         enum_values=[],
+        evidence_class="factual",
         resolution_source={
             "web_target": "availability of a dedicated platform at the gym",
             "scrape_target": "facilities page on the official site",
+            "review_target": None,
         },
         verification="listed on the official facilities page",
         band="specific_attributes",
@@ -439,9 +443,25 @@ async def test_no_provider_answers_raises_provider_error() -> None:
         (
             _metric(
                 "Blank target",
-                resolution_source={"web_target": " ", "scrape_target": "menu page"},
+                resolution_source={
+                    "web_target": " ",
+                    "scrape_target": None,
+                    "review_target": "some reviews",
+                },
             ),
             "text_completeness",
+        ),
+        (
+            _metric(
+                "Off-class target",
+                evidence_class="factual",
+                resolution_source={
+                    "web_target": "typical service speed and wait time at the venue",
+                    "scrape_target": "about or service section on the official site",
+                    "review_target": "mentions of service speed in customer reviews",
+                },
+            ),
+            "resolution_source_class_mismatch",
         ),
         (
             _metric("No unit", value_type="number_with_unit", unit=None, enum_values=[]),
@@ -453,7 +473,14 @@ async def test_no_provider_answers_raises_provider_error() -> None:
             "value_type_parameters",
         ),
     ],
-    ids=["K1_question", "K1_target", "K2_no_unit", "K2_one_enum_value", "K2_boolean_unit"],
+    ids=[
+        "K1_question",
+        "K1_target",
+        "K_class_mismatch",
+        "K2_no_unit",
+        "K2_one_enum_value",
+        "K2_boolean_unit",
+    ],
 )
 async def test_failing_metric_is_dropped_and_neighbor_is_kept(bad: dict, rule: str) -> None:
     good = _metric("Neighbor")
@@ -475,9 +502,11 @@ async def test_failing_metric_is_dropped_and_neighbor_is_kept(bad: dict, rule: s
 async def test_firecrawl_is_allowed_in_the_operating_details_band() -> None:
     fetched = _metric(
         "Menu price range",
+        evidence_class="factual",
         resolution_source={
             "web_target": "typical menu price range at the restaurant",
             "scrape_target": "menu page on the official site",
+            "review_target": None,
         },
     )
     provider = FakeStructuredProvider(bodies=[_body(_entry(0, _metric(), fetched), _entry(1, _metric()))])
@@ -637,49 +666,59 @@ def test_instruction_lists_fixed_dimensions_cap_and_tools() -> None:
     assert "firecrawl is only for the specific_attributes band" not in instruction
 
 
-def test_instruction_mandates_the_verification_source_clause() -> None:
-    # The source-acceptability clause is the factual/experiential switch M3's C3.2.1
-    # Google-reviews fallback reads, so the contract must require it, not merely show it.
+def test_instruction_states_the_evidence_class_partition() -> None:
+    # Review-eligibility and the second resolution target are read off evidence_class, not a
+    # verification clause, so the contract defines the partition and keeps verification the bar
+    # only — the retired source-acceptability clauses must be gone.
     instruction = build_metric_definition_instruction(metric_definition_json_schema())
 
-    assert "first-party/authoritative source only" in instruction
-    assert "customer-review evidence acceptable" in instruction
-    assert "Exactly one\n  clause, never both, never neither." in instruction
+    assert "evidence_class: factual | experiential" in instruction
+    assert "scrape_target" in instruction and "review_target" in instruction
+    assert "No source-acceptability clause" in instruction
+    assert "first-party/authoritative source only" not in instruction
+    assert "customer-review evidence acceptable" not in instruction
 
 
-def test_every_few_shot_verification_carries_exactly_one_source_clause() -> None:
-    # The worked examples teach the convention; a clauseless example would model behavior
-    # that violates the contract. Every metric's verification must carry exactly one clause.
-    factual = "first-party/authoritative source only"
-    experiential = "customer-review evidence acceptable"
+def test_every_few_shot_metric_carries_evidence_class_and_matching_target() -> None:
+    # The worked examples teach the new contract: each metric carries an evidence_class and the
+    # one class-appropriate second target (the other null), and verification no longer carries a
+    # source-acceptability clause.
+    clauses = ("first-party/authoritative source only", "customer-review evidence acceptable")
 
     metrics_seen = 0
     for _sample_input, expected in build_metric_definition_few_shot_examples():
         body = json.loads(expected)
         for category in body["categories"]:
             for metric in category["metrics"]:
-                verification = metric["verification"]
-                assert (verification.count(factual) + verification.count(experiential)) == 1, (
-                    f"{metric['label']!r} verification lacks exactly one source clause: "
-                    f"{verification!r}"
-                )
+                evidence_class = metric["evidence_class"]
+                source = metric["resolution_source"]
+                assert evidence_class in ("factual", "experiential")
+                assert source["web_target"]
+                if evidence_class == "factual":
+                    assert source["scrape_target"] and source["review_target"] is None
+                else:
+                    assert source["review_target"] and source["scrape_target"] is None
+                assert all(clause not in metric["verification"] for clause in clauses)
                 metrics_seen += 1
     assert metrics_seen == 11
 
 
-def test_wire_schema_carries_both_web_and_scrape_targets_and_no_tool() -> None:
-    # RC10: every LLM-defined metric carries both sources. The wire shape is two string
-    # targets, the tool is implied by the field, and there is no selectable tool enum.
+def test_wire_schema_carries_class_conditional_targets_and_evidence_class() -> None:
+    # RC10 (revised): web_target is always a string; scrape_target and review_target are both
+    # present but nullable (one is null per class, enforced in code); evidence_class is a closed
+    # enum on the metric. The tool is implied by the field; there is no selectable tool enum.
     schema = metric_definition_json_schema()
 
     entry = schema["$defs"]["ResolutionSourceEntry"]
-    assert set(entry["properties"]) == {"web_target", "scrape_target"}
+    assert set(entry["properties"]) == {"web_target", "scrape_target", "review_target"}
     assert entry["properties"]["web_target"]["type"] == "string"
-    assert entry["properties"]["scrape_target"]["type"] == "string"
-    # Both required and the object closed (strict rules).
-    assert set(entry["required"]) == {"web_target", "scrape_target"}
+    # All three required (strict rules) and the object closed; the secondaries accept null.
+    assert set(entry["required"]) == {"web_target", "scrape_target", "review_target"}
     assert entry["additionalProperties"] is False
     assert "tool" not in entry["properties"]
+
+    metric = schema["$defs"]["MetricEntry"]
+    assert metric["properties"]["evidence_class"]["enum"] == ["factual", "experiential"]
 
 
 # Sub-component 6 / 7: pre-defined catalog and per-category metric compilation.

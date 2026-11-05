@@ -21,6 +21,7 @@ from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import (
     CategoryMappingProviderError,
     CategoryMappingValidationError,
+    ClarificationAnswerError,
     ClarificationProviderError,
     ClarificationValidationError,
     DepthAssignmentProviderError,
@@ -83,6 +84,8 @@ from src.services.deep_search.feature_schemas.schemas import (
     CategoryMetricPlan,
     CategoryMetricSet,
     CategoryResolutionRoute,
+    ClarificationAnswer,
+    ClarificationQuestion,
     ClarificationResult,
     DepthAssignmentResult,
     DepthLevel,
@@ -97,6 +100,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     MetricResolutionSource,
     MetricSpec,
     PayloadRecord,
+    R1StartOutcome,
     RequirementInterpretationState,
     ResolvedCategory,
     ResolvedRequirements,
@@ -166,11 +170,152 @@ class UserRequirementsInterpretation:
         self._providers = caller.providers
 
     async def interpret(self, raw_input: str) -> RequirementInterpretationState:
-        """Responsibility entry point; sequences the mechanisms and returns the state."""
-        state = await self.parse_unstructured_input(raw_input)
-        state = await self.run_explicit_category_resolution(state)
-        state = await self.run_persona_driven_category_inference(state)
-        state = await self.run_per_category_depth_calibration(state)
+        """One-call entry point: input check, start, terminal answers, resume.
+
+        Runs the same code as the web path (`start` then `resume`); only the source of the
+        answers differs (the terminal prompts here, the request body over HTTP).
+        """
+        payload = self.intake_and_assemble_payload(raw_input)
+        outcome = await self.start(payload)
+        if outcome.status == "finished":
+            return outcome.state
+        answers = _prompt_clarification_answers(outcome.state, outcome.state.clarification_questions)
+        return await self.resume(outcome.state, answers)
+
+    # ---------------------------------------------------------------------------------
+    # Resumable entry points (C1): start, pause with questions, resume with answers.
+    # ---------------------------------------------------------------------------------
+
+    async def start(self, payload: PayloadRecord) -> R1StartOutcome:
+        """Run extraction, 2A pass 1 and the router; finish, or pause with stored questions.
+
+        Takes a payload that already passed `intake_and_assemble_payload`, so the input check
+        runs once. LLM calls happen in the same order as the one-call run.
+        """
+        instruction = self.build_extraction_instruction(extraction_json_schema())
+        extracted = await self.execute_and_validate(payload, instruction)
+        state = self.assemble_handoff(payload, extracted)
+
+        await self.resolve_explicit_categories(state)
+        route = self.inspect_category_resolution(state)
+        if route == "mechanism_3":
+            await self.complete_interpretation(state)
+            return R1StartOutcome(status="finished", state=state)
+
+        await self.generate_clarification_questions(state)
+        return R1StartOutcome(status="needs_answers", state=state)
+
+    async def generate_clarification_questions(
+        self,
+        state: RequirementInterpretationState,
+    ) -> list[ClarificationQuestion]:
+        """2B Stages 1-2: build the instruction, make the call, store the questions on the state."""
+        instruction = self.build_clarification_questions_instruction(
+            clarification_questions_json_schema()
+        )
+        result = await self.execute_clarification_questions(state, instruction)
+        state.clarification_questions = list(result.questions)
+        return state.clarification_questions
+
+    def record_clarification_answers(
+        self,
+        state: RequirementInterpretationState,
+        answers: list[ClarificationAnswer],
+    ) -> None:
+        """Turn raw answers into one UserResponse per stored question, in flag order.
+
+        Every answer is checked against the stored questions before anything is written, so a
+        rejected set leaves `state.user_responses` as it was. The stored response is the chosen
+        option's text, or the customer's description when "other" is chosen.
+        """
+        resolved = state.resolved
+        assert resolved is not None  # start always runs 2A before the pause.
+
+        questions_by_id = {question.category_id: question for question in state.clarification_questions}
+        answer_ids = [answer.category_id for answer in answers]
+        duplicates = sorted({cid for cid in answer_ids if answer_ids.count(cid) > 1})
+        unknown = sorted(set(answer_ids) - set(questions_by_id))
+        missing = sorted(set(questions_by_id) - set(answer_ids))
+        if duplicates or unknown or missing:
+            raise ClarificationAnswerError(
+                "Answers must cover each question exactly once "
+                f"(duplicates={duplicates}, unknown={unknown}, missing={missing})"
+            )
+
+        answers_by_id = {answer.category_id: answer for answer in answers}
+        responses: dict[int, UserResponse] = {}
+        for flag in resolved.ambiguity_flags:
+            if flag.target != "category" or flag.category_id not in questions_by_id:
+                continue
+            question = questions_by_id[flag.category_id]
+            answer = answers_by_id[flag.category_id]
+            if answer.option > len(question.options):
+                raise ClarificationAnswerError(
+                    f"Answer for category {flag.category_id} picks option {answer.option}, "
+                    f"but the question has {len(question.options)} options"
+                )
+            selected = question.options[answer.option - 1]
+            description = (answer.description or "").strip()
+            if selected == "other":
+                if not description:
+                    raise ClarificationAnswerError(
+                        f"Answer for category {flag.category_id} chose 'other' without a description"
+                    )
+                response_text = description
+            else:
+                if answer.description is not None:
+                    raise ClarificationAnswerError(
+                        f"Answer for category {flag.category_id} carries a description, "
+                        "but only 'other' takes one"
+                    )
+                response_text = selected
+            responses[flag.category_id] = UserResponse(
+                question=question.question,
+                options=list(question.options),
+                response=response_text,
+            )
+
+        state.user_responses.update(responses)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "clarification.answers_recorded",
+                    "timestamp": _timestamp(),
+                    "response_count": len(state.user_responses),
+                    "category_ids": sorted(state.user_responses),
+                }
+            )
+        )
+
+    async def resume(
+        self,
+        state: RequirementInterpretationState,
+        answers: list[ClarificationAnswer],
+    ) -> RequirementInterpretationState:
+        """Record the answers, then run the steps after answer recording."""
+        self.record_clarification_answers(state, answers)
+        return await self.continue_after_answers(state)
+
+    async def continue_after_answers(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Flag resolution, the second router call, then inference, depth and metrics.
+
+        Never generates questions. A retry calls this directly on the saved state, whose
+        answers are already recorded.
+        """
+        await self.resolve_category_flags(state)
+        self.inspect_category_resolution(state)
+        return await self.complete_interpretation(state)
+
+    async def complete_interpretation(
+        self,
+        state: RequirementInterpretationState,
+    ) -> RequirementInterpretationState:
+        """Mechanisms 4-6: inference, depth, metrics. Shared by every path to the end."""
+        await self.run_persona_driven_category_inference(state)
+        await self.run_per_category_depth_calibration(state)
         return await self.run_per_category_metric_definition(state)
 
     async def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
@@ -405,20 +550,9 @@ class UserRequirementsInterpretation:
     # Mechanism 2 — Category resolution loop (2A, router, 2B)
     # ---------------------------------------------------------------------------------
 
-    async def run_explicit_category_resolution(
-        self,
-        state: RequirementInterpretationState,
-    ) -> RequirementInterpretationState:
-        """Mechanism 2 workflow: 2A pass 1, router, maybe 2B and 2A pass 2, then return."""
-        await self.resolve_explicit_categories(state)
-        route = self.inspect_category_resolution(state)
-        if route == "mechanism_3":
-            return state
-
-        await self.clarify_unmapped_categories(state)
-        await self.resolve_category_flags(state)
-        self.inspect_category_resolution(state)
-        return state
+    # The Mechanism 2 sequence (2A pass 1, router, 2B, 2A pass 2, router) is split across
+    # `start` (up to the pause) and `continue_after_answers` (after the answers), so the web
+    # path and `interpret` run it from the same code.
 
     def inspect_category_resolution(
         self,
@@ -454,12 +588,9 @@ class UserRequirementsInterpretation:
         return route
 
     async def clarify_unmapped_categories(self, state: RequirementInterpretationState) -> None:
-        """Generate questions, collect answers, persist them on the state."""
-        instruction = self.build_clarification_questions_instruction(
-            clarification_questions_json_schema()
-        )
-        result = await self.execute_clarification_questions(state, instruction)
-        self.collect_clarification_responses(state, result)
+        """Generate and store the questions, then collect answers from the terminal."""
+        questions = await self.generate_clarification_questions(state)
+        self.collect_clarification_responses(state, ClarificationResult(questions=questions))
 
     def build_clarification_questions_instruction(self, json_schema: dict) -> str:
         """2B Stage 1: assemble rules, closed schema, and two worked pairs. No taxonomy."""
@@ -576,39 +707,10 @@ class UserRequirementsInterpretation:
         state: RequirementInterpretationState,
         result: ClarificationResult,
     ) -> None:
-        """2B Stage 3: numbered CLI; persist one UserResponse per category flag."""
-        resolved = state.resolved
-        assert resolved is not None
-
-        questions_by_id = {question.category_id: question for question in result.questions}
-        submitted_flags = [
-            flag for flag in resolved.ambiguity_flags if flag.target == "category"
-        ]
-
-        for flag in submitted_flags:
-            assert flag.category_id is not None
-            question = questions_by_id[flag.category_id]
-            selected = _prompt_clarification_option(flag.phrase, question.question, question.options)
-            if selected == "other":
-                response_text = _prompt_other_description()
-            else:
-                response_text = selected
-            state.user_responses[flag.category_id] = UserResponse(
-                question=question.question,
-                options=list(question.options),
-                response=response_text,
-            )
-
-        logger.info(
-            json.dumps(
-                {
-                    "event": "clarification.collected",
-                    "timestamp": _timestamp(),
-                    "response_count": len(state.user_responses),
-                    "category_ids": sorted(state.user_responses),
-                }
-            )
-        )
+        """2B Stage 3: numbered CLI answers, recorded through the same method as the web path."""
+        state.clarification_questions = list(result.questions)
+        answers = _prompt_clarification_answers(state, result.questions)
+        self.record_clarification_answers(state, answers)
 
     def _validate_clarification_schema(self, body: dict, *, provider: str) -> ClarificationResult:
         """Independent second check: reject a body that is not a closed ClarificationResult."""
@@ -2043,15 +2145,27 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
     K4 (tool fits band) is retired: an LLM-defined metric may use `parallel_web_search` or
     `firecrawl` in either band, and `google_maps` is not in the wire tool set at all.
     """
+    # The second resolution target is class-conditional: factual carries scrape_target,
+    # experiential carries review_target. Validate the class-appropriate one is present and
+    # the off-class one is absent (exactly one secondary, per RC10 revised).
+    resolution = entry.resolution_source
+    if entry.evidence_class == "factual":
+        second_target, off_class_target = resolution.scrape_target, resolution.review_target
+    else:
+        second_target, off_class_target = resolution.review_target, resolution.scrape_target
+
     texts = (
         entry.label,
         entry.question,
         entry.verification,
-        entry.resolution_source.web_target,
-        entry.resolution_source.scrape_target,
+        resolution.web_target,
+        second_target or "",
     )
     if any(not text.strip() for text in texts):
         return "text_completeness"
+
+    if off_class_target and off_class_target.strip():
+        return "resolution_source_class_mismatch"
 
     has_unit = bool(entry.unit and entry.unit.strip())
     enum_members = [member.strip() for member in entry.enum_values if member.strip()]
@@ -2070,17 +2184,30 @@ def _metric_rule_failure(entry: MetricEntry, depth: DepthLevel) -> str | None:
 
 
 def _to_metric_spec(entry: MetricEntry) -> MetricSpec:
-    """Wire metric to stored metric, text trimmed."""
+    """Wire metric to stored metric, text trimmed.
+
+    The stored resolution source keeps only the class-appropriate second target: scrape_target
+    for a factual metric, review_target for an experiential one (the other stays None).
+    """
+    web_target = entry.resolution_source.web_target.strip()
+    if entry.evidence_class == "factual":
+        resolution_source = MetricResolutionSource(
+            web_target=web_target,
+            scrape_target=(entry.resolution_source.scrape_target or "").strip(),
+        )
+    else:
+        resolution_source = MetricResolutionSource(
+            web_target=web_target,
+            review_target=(entry.resolution_source.review_target or "").strip(),
+        )
     return MetricSpec(
         label=entry.label.strip(),
         question=entry.question.strip(),
         value_type=entry.value_type,
         unit=entry.unit.strip() if entry.unit and entry.unit.strip() else None,
         enum_values=[member.strip() for member in entry.enum_values],
-        resolution_source=MetricResolutionSource(
-            web_target=entry.resolution_source.web_target.strip(),
-            scrape_target=entry.resolution_source.scrape_target.strip(),
-        ),
+        evidence_class=entry.evidence_class,
+        resolution_source=resolution_source,
         verification=entry.verification.strip(),
         null_policy=entry.null_policy,
         band=entry.band,
@@ -2136,8 +2263,35 @@ _CLARIFICATION_PREFACE = (
 )
 
 
-def _prompt_clarification_option(category: str, question: str, options: list[str]) -> str:
-    """Print one question and block until the customer types a valid option index."""
+def _prompt_clarification_answers(
+    state: RequirementInterpretationState,
+    questions: list[ClarificationQuestion],
+) -> list[ClarificationAnswer]:
+    """Ask each stored question in category-flag order; return the answers as option numbers."""
+    resolved = state.resolved
+    assert resolved is not None
+
+    questions_by_id = {question.category_id: question for question in questions}
+    answers: list[ClarificationAnswer] = []
+    for flag in resolved.ambiguity_flags:
+        if flag.target != "category":
+            continue
+        assert flag.category_id is not None
+        question = questions_by_id[flag.category_id]
+        chosen = _prompt_clarification_option(flag.phrase, question.question, question.options)
+        description = (
+            _prompt_other_description() if question.options[chosen - 1] == "other" else None
+        )
+        answers.append(
+            ClarificationAnswer(
+                category_id=flag.category_id, option=chosen, description=description
+            )
+        )
+    return answers
+
+
+def _prompt_clarification_option(category: str, question: str, options: list[str]) -> int:
+    """Print one question and block until the customer types a valid option number."""
     while True:
         print(_CLARIFICATION_PREFACE)
         print(f"Category: {category}")
@@ -2153,7 +2307,7 @@ def _prompt_clarification_option(category: str, question: str, options: list[str
             continue
         if chosen < 1 or chosen > len(options):
             continue
-        return options[chosen - 1]
+        return chosen
 
 
 def _prompt_other_description() -> str:

@@ -1,91 +1,84 @@
-import logging
+"""Auth endpoints. Declarations only: each one maps to its controller function.
 
-from fastapi import APIRouter, Depends, Request
+`response_model` and `responses` only document the bodies for Swagger; the controllers build
+the actual responses (and set the session cookies) themselves.
+"""
+
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 from supabase import Client
 
+from src.app.api.controllers import auth as controllers
 from src.app.api.dependencies.supabase import get_supabase_client
-from src.core.config import get_settings
 from src.schemas.login import LoginError, LoginRequest, LoginResponse
 from src.schemas.refresh import RefreshResponse
-from src.services.auth.login import LoginOutcome, authenticate
-from src.services.auth.refresh import RefreshOutcome, refresh_session
-from src.services.auth.session_cookies import (
-    REFRESH_TOKEN_COOKIE_POLICY,
-    REFRESH_TOKEN_MAX_AGE,
-    apply_session_cookies,
-    clear_session_cookies,
-)
 
 router = APIRouter()
-logger = logging.getLogger("homescout.auth")
+
+_SESSION_COOKIES_NOTE = (
+    "Also sets two HttpOnly, Secure, SameSite=Strict cookies: `access_token` (path `/`) and "
+    "`refresh_token` (path `/auth/refresh`)."
+)
 
 
-@router.post("/api/auth/login")
+@router.post(
+    "/api/auth/login",
+    response_model=LoginResponse,
+    response_description=f"Signed in. {_SESSION_COOKIES_NOTE} `user_name` is null when the "
+    "account has no full name.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": LoginError,
+            "description": "Wrong email or password, any other sign-in error from Supabase, "
+            "or a missing or failed captcha when captcha is enabled. No cookies are set.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "invalid_credentials": {"value": {"error": "Invalid email or password"}},
+                        "captcha_required": {
+                            "value": {
+                                "error": "Please complete the captcha challenge and try again."
+                            }
+                        },
+                    }
+                }
+            },
+        },
+        status.HTTP_429_TOO_MANY_REQUESTS: {
+            "model": LoginError,
+            "description": "Five failed attempts for this email. The count resets on a "
+            "successful login or a server restart.",
+            "content": {
+                "application/json": {
+                    "example": {"error": "Too many login attempts. Please try again later."}
+                }
+            },
+        },
+    },
+)
 async def login(
     request: LoginRequest,
     supabase: Client = Depends(get_supabase_client),
 ) -> JSONResponse:
-    settings = get_settings()
-    result = authenticate(
-        supabase,
-        request.email,
-        request.password,
-        request.captcha_token,
-        captcha_required=settings.captcha_enabled,
-    )
-
-    if result.outcome == LoginOutcome.SUCCESS and result.identity is not None:
-        identity = result.identity
-        response = JSONResponse(
-            content=LoginResponse(
-                message=result.message or "",
-                user_id=identity.user_id,
-                user_name=identity.user_name,
-            ).model_dump(),
-            status_code=200,
-        )
-        apply_session_cookies(response, identity)
-        logger.info(
-            "login succeeded user_id=%s jwt_expires_in=%s access_cookie_max_age=%s",
-            identity.user_id,
-            identity.expires_in,
-            REFRESH_TOKEN_MAX_AGE,
-        )
-        return response
-
-    if result.outcome == LoginOutcome.RATE_LIMITED:
-        return JSONResponse(
-            content=LoginError(error=result.error or "").model_dump(exclude_none=True),
-            status_code=429,
-        )
-
-    return JSONResponse(
-        content=LoginError(error=result.error or "").model_dump(exclude_none=True),
-        status_code=401,
-    )
+    return await controllers.login(request, supabase)
 
 
-@router.post("/auth/refresh")
+@router.post(
+    "/auth/refresh",
+    response_model=RefreshResponse,
+    response_description=f"Session refreshed. {_SESSION_COOKIES_NOTE} Both are rotated.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": LoginError,
+            "description": "The `refresh_token` cookie is missing, invalid or expired. Both "
+            "session cookies are cleared, so the page should send the user to login.",
+            "content": {"application/json": {"example": {"error": "Not authenticated"}}},
+        },
+    },
+)
 async def refresh(
     request: Request,
     supabase: Client = Depends(get_supabase_client),
 ) -> JSONResponse:
     """Exchange the path-scoped refresh cookie for rotated session cookies."""
-    refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE_POLICY.name)
-    result = refresh_session(supabase, refresh_token)
-
-    if result.outcome == RefreshOutcome.SUCCESS and result.identity is not None:
-        response = JSONResponse(
-            content=RefreshResponse(message="Session refreshed").model_dump(),
-            status_code=200,
-        )
-        apply_session_cookies(response, result.identity)
-        return response
-
-    response = JSONResponse(
-        content=LoginError(error=result.error or "Not authenticated").model_dump(exclude_none=True),
-        status_code=401,
-    )
-    clear_session_cookies(response)
-    return response
+    return await controllers.refresh(request, supabase)
