@@ -35,7 +35,22 @@ class RunResponse(BaseModel):
 
 
 class RunErrorResponse(BaseModel):
+    """A run endpoint's error body. `run_id`, `status` and `retryable` are present when the error
+    belongs to a known run; `retryable` is always present when `status` is `failed`."""
+
     error: str
     run_id: str | None = None
     status: Literal["needs_answers", "finished", "failed"] | None = None
     retryable: bool | None = None
+
+
+class RequestValidationErrorItem(BaseModel):
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class RequestValidationErrorResponse(BaseModel):
+    """FastAPI's body for a request that fails schema validation (wrong or missing fields)."""
+
+    detail: list[RequestValidationErrorItem]

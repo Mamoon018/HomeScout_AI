@@ -11,6 +11,7 @@ from src.app.api.routes.requirement_interpretation import (
     router as requirement_interpretation_router,
 )
 from src.app.api.routes.welcome import router as welcome_router
+from src.app.request_logging import log_requests
 from src.clients.llm_provider import create_structured_llm_caller
 from src.clients.supabase import create_supabase_client, create_supabase_db_client
 from src.core.config import get_settings
@@ -74,6 +75,7 @@ OPENAPI_TAGS = [
 ]
 
 app = FastAPI(title="HomeScout Auth", lifespan=lifespan, openapi_tags=OPENAPI_TAGS)
+app.middleware("http")(log_requests)
 app.include_router(health_check_router, tags=["Health"])
 app.include_router(auth_router, tags=["Auth"])
 app.include_router(welcome_router, tags=["User"])
