@@ -271,3 +271,98 @@ class MetricResolutionValidationError(MetricResolutionError):
     """
 
     stage: ClassVar[str] = "build_tool_catalog"
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 1 over HTTP — pause/resume failure surface (C1, C2, C3, C4).
+# ---------------------------------------------------------------------------------
+
+
+class ClarificationAnswerError(Exception):
+    """Raised when submitted answers do not match the stored clarification questions."""
+
+    stage: ClassVar[str] = "record_clarification_answers"
+
+
+class StateVersionMismatchError(Exception):
+    """Raised when a saved R1 state carries a version other than the code's current one."""
+
+    stage: ClassVar[str] = "load_state"
+
+    def __init__(self, found: object, expected: int) -> None:
+        super().__init__(f"Saved state version {found!r} does not match current version {expected}")
+        self.found = found
+        self.expected = expected
+
+
+class RunStoreError(Exception):
+    """Raised when a `r1_runs` read or write could not be completed."""
+
+    stage: ClassVar[str] = "run_store"
+
+    def __init__(self, message: str, *, operation: str) -> None:
+        super().__init__(message)
+        self.operation = operation
+
+
+class RunNotFoundError(Exception):
+    """Raised when no run exists for this run_id and the verified user_id."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"Run {run_id} was not found")
+        self.run_id = run_id
+
+
+class RunConflictError(Exception):
+    """Raised when the run's current status does not allow the requested action."""
+
+    def __init__(self, message: str, *, run_id: str, status: str, retryable: bool | None) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.status = status
+        self.retryable = retryable
+
+
+class R1RunFailedError(Exception):
+    """Raised after a run was saved as failed, carrying what the page needs to show next."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str,
+        stage: str,
+        retryable: bool,
+        provider_unavailable: bool,
+        unexpected: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.stage = stage
+        self.retryable = retryable
+        # True when no LLM provider answered (503); False when a body failed validation (502).
+        self.provider_unavailable = provider_unavailable
+        # True when a non-R1 exception (a bug) failed the run (500).
+        self.unexpected = unexpected
+
+
+# Every typed error an R1 stage after the input check can raise. Each carries a `stage`.
+R1_STAGE_ERRORS: tuple[type[Exception], ...] = (
+    ExtractionProviderError,
+    ExtractionValidationError,
+    CategoryResolutionError,
+    ClarificationError,
+    InferenceError,
+    DepthAssignmentError,
+    MetricDefinitionError,
+)
+
+# The subset raised when no provider in the chain returned a body (mapped to 503).
+R1_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
+    ExtractionProviderError,
+    CategoryMappingProviderError,
+    ClarificationProviderError,
+    InferenceProviderError,
+    DepthAssignmentProviderError,
+    MetricDefinitionProviderError,
+)

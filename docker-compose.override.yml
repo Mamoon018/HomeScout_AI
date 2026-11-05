@@ -1,0 +1,16 @@
+# Local development extras. Docker Compose merges this file into docker-compose.yml
+# automatically on `docker compose up`. Production should start with only the main file:
+#   docker compose -f docker-compose.yml up -d
+services:
+  backend:
+    # Swagger at http://localhost:8000/docs (reachable from this machine only)
+    ports:
+      - "127.0.0.1:8000:8000"
+    # Use the live source instead of the copy baked into the image
+    volumes:
+      - ./backend/src:/app/src
+    # Restart the server when a file under src changes
+    command: ["uvicorn", "src.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src"]
+    environment:
+      # File-change events don't reach the container from Windows folders, so poll instead
+      WATCHFILES_FORCE_POLLING: "true"

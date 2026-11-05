@@ -1,0 +1,2 @@
+# Live suite only (spec C6): direct Postgres access for the migration re-run test.
+psycopg[binary]==3.2.12

@@ -871,6 +871,69 @@ class RequirementInterpretationState:
     inferred_categories: list[InferredCategory] = field(default_factory=list)
     category_metrics: list[CategoryMetricSet] = field(default_factory=list)
     category_metric_plans: list[CategoryMetricPlan] = field(default_factory=list)
+    # The 2B questions generated at the pause, kept so a later request can match answers to
+    # them. Empty when the run never paused.
+    clarification_questions: list[ClarificationQuestion] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 1 over HTTP — pause/resume contracts (C1, C3, C4).
+# ---------------------------------------------------------------------------------
+
+# The one status a run reports.
+R1RunStatus = Literal["needs_answers", "finished", "failed"]
+
+
+class ClarificationAnswer(BaseModel):
+    """One raw answer to a stored clarification question, from the web page or the terminal.
+
+    `option` is the 1-based number of the chosen option. When the chosen option is the literal
+    "other", `description` carries the customer's own meaning; otherwise it must be absent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    category_id: int = Field(description="The category_id of the question being answered.")
+    option: int = Field(ge=1, le=5, description="The chosen option number (1-5).")
+    description: str | None = Field(
+        default=None,
+        description="The customer's description, required only when 'other' is chosen.",
+    )
+
+
+@dataclass(frozen=True)
+class R1StartOutcome:
+    """What `start` returns: whether R1 paused for answers or finished, plus the state."""
+
+    status: Literal["needs_answers", "finished"]
+    state: RequirementInterpretationState
+
+
+@dataclass(frozen=True)
+class R1RunRecord:
+    """One `r1_runs` row as the coordinator reads it."""
+
+    run_id: str
+    user_id: str
+    status: R1RunStatus
+    state: RequirementInterpretationState | None
+    output: list[CategoryMetricPlan] | None
+    failure_stage: str | None
+    failure_message: str | None
+    retryable: bool
+    attempts: int
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class R1RunView:
+    """What the page needs for one run: questions while paused, the result once finished."""
+
+    run_id: str
+    status: R1RunStatus
+    questions: list[ClarificationQuestion] | None = None
+    result: list[CategoryMetricPlan] | None = None
+    retryable: bool | None = None
 
 
 # ---------------------------------------------------------------------------------
