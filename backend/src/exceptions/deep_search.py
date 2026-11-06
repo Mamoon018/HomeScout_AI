@@ -295,8 +295,22 @@ class StateVersionMismatchError(Exception):
         self.expected = expected
 
 
+class CheckpointMissingError(Exception):
+    """Raised when rebuilding a run reaches a step that has no saved result.
+
+    Rebuilding a paused or finished run never makes an LLM call, so a missing row means the
+    saved rows are inconsistent. It is raised instead of paying for an unplanned call.
+    """
+
+    stage: ClassVar[str] = "replay"
+
+    def __init__(self, step_id: str) -> None:
+        super().__init__(f"Step {step_id!r} has no saved result to rebuild the run from")
+        self.step_id = step_id
+
+
 class RunStoreError(Exception):
-    """Raised when a `r1_runs` read or write could not be completed."""
+    """Raised when a `r1_runs` / `r1_run_steps` read or write could not be completed."""
 
     stage: ClassVar[str] = "run_store"
 

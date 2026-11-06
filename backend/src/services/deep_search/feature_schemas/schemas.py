@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -877,11 +878,36 @@ class RequirementInterpretationState:
 
 
 # ---------------------------------------------------------------------------------
-# Responsibility 1 over HTTP — pause/resume contracts (C1, C3, C4).
+# Responsibility 1 over HTTP — run and step-checkpoint contracts (R1 Step Persistence).
 # ---------------------------------------------------------------------------------
 
-# The one status a run reports.
-R1RunStatus = Literal["needs_answers", "finished", "failed"]
+# The one status a run reports. `running` is set while a request works on the run.
+R1RunStatus = Literal["running", "needs_answers", "finished", "failed"]
+
+# The 8 non-reproducible steps of R1, in run order. Each one is one `r1_run_steps` row.
+R1StepId = Literal[
+    "extraction",
+    "taxonomy_mapping",
+    "clarification_questions",
+    "clarification_answers",
+    "flag_resolution",
+    "category_inference",
+    "depth_assignment",
+    "metric_definition",
+]
+R1_STEP_ORDER: tuple[R1StepId, ...] = (
+    "extraction",
+    "taxonomy_mapping",
+    "clarification_questions",
+    "clarification_answers",
+    "flag_resolution",
+    "category_inference",
+    "depth_assignment",
+    "metric_definition",
+)
+
+# A step row's status. `started` only exists while a retry works on its claimed step.
+R1StepStatus = Literal["started", "completed", "failed"]
 
 
 class ClarificationAnswer(BaseModel):
@@ -909,20 +935,74 @@ class R1StartOutcome:
     state: RequirementInterpretationState
 
 
+# The validated result one step saves: an `execute_*` result, or the customer's raw answers.
+StepResult = (
+    ExtractedRequirements
+    | TaxonomyMappingResult
+    | ClarificationResult
+    | list[ClarificationAnswer]
+    | FlagResolutionResult
+    | InferredCategoriesResult
+    | DepthAssignmentResult
+    | MetricDefinitionResult
+)
+
+
+@dataclass(frozen=True)
+class R1StepRecord:
+    """One `r1_run_steps` row, decoded. `output` is set only when the step is completed."""
+
+    step_id: R1StepId
+    status: R1StepStatus
+    output: Any = None
+    error_type: str | None = None
+    error_message: str | None = None
+    retryable: bool | None = None
+
+
 @dataclass(frozen=True)
 class R1RunRecord:
-    """One `r1_runs` row as the coordinator reads it."""
+    """One `r1_runs` row and all its step rows, as the coordinator reads them."""
 
     run_id: str
     user_id: str
     status: R1RunStatus
-    state: RequirementInterpretationState | None
-    output: list[CategoryMetricPlan] | None
-    failure_stage: str | None
-    failure_message: str | None
-    retryable: bool
+    raw_input: str
     attempts: int
     updated_at: str
+    steps: dict[R1StepId, R1StepRecord] = field(default_factory=dict)
+
+    @property
+    def completed(self) -> dict[R1StepId, Any]:
+        """The saved result of every completed step, keyed by step."""
+        return {
+            step_id: step.output
+            for step_id, step in self.steps.items()
+            if step.status == "completed"
+        }
+
+    @property
+    def failed_step(self) -> R1StepRecord | None:
+        """The step that failed, when one did."""
+        return next((step for step in self.steps.values() if step.status == "failed"), None)
+
+
+@dataclass
+class R1StepCheckpoints:
+    """What R1 sees of one run's saved steps during one request.
+
+    `completed` holds the saved result of each completed step; a step found here is returned
+    without an LLM call. With `allow_calls` False, reaching an unsaved step raises instead of
+    calling (used to rebuild a paused or finished run). `claimed_step` is the failed step a retry
+    claimed, so its save updates the existing row. `in_flight` names the step being called, so a
+    failure can be recorded against it. `on_completed` saves a new result; None saves nothing.
+    """
+
+    completed: dict[R1StepId, Any] = field(default_factory=dict)
+    allow_calls: bool = True
+    claimed_step: R1StepId | None = None
+    in_flight: R1StepId | None = None
+    on_completed: Callable[[R1StepId, Any], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)

@@ -43,7 +43,9 @@ async def lifespan(app: FastAPI):
         interpretation = create_requirement_interpretation(settings, llm_caller=llm_caller)
         db_client = await create_supabase_db_client(settings)
         app.state.r1_run_coordinator = create_r1_run_coordinator(
-            interpretation, R1RunStore(db_client)
+            interpretation,
+            R1RunStore(db_client),
+            stale_after_seconds=settings.r1_stale_after_seconds,
         )
     else:
         logging.getLogger(DEEP_SEARCH_LOGGER_NAME).warning(

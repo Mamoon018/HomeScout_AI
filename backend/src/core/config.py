@@ -34,6 +34,13 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="SUPABASE_DB_TIMEOUT_SECONDS",
     )
+    # A run still `running` after this long was cut off (crash, restart) and is reported as
+    # failed, not retryable. A full R1 request makes at most 7 LLM calls, well inside 3 minutes.
+    r1_stale_after_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        validation_alias="R1_STALE_AFTER_SECONDS",
+    )
     google_maps_api: str = Field(validation_alias="GOOGLE_MAPS_API")
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
