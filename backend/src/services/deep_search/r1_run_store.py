@@ -19,6 +19,7 @@ from supabase import AsyncClient
 from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import RunStoreError, StateVersionMismatchError
 from src.services.deep_search.feature_schemas.schemas import (
+    CategoryMetricPlan,
     ClarificationAnswer,
     ClarificationResult,
     DepthAssignmentResult,
@@ -62,6 +63,19 @@ _STEP_ADAPTERS: dict[str, TypeAdapter] = {
 }
 
 _STATE_ADAPTER = TypeAdapter(RequirementInterpretationState)
+
+# R1's finished output (`r1_runs.output`, R2-P1). Plain JSON; its shape follows `workflow_version`.
+_OUTPUT_ADAPTER = TypeAdapter(list[CategoryMetricPlan])
+
+
+def dump_r1_output(plans: list[CategoryMetricPlan]) -> list:
+    """The finished run's `category_metric_plans` as JSON-ready data."""
+    return _OUTPUT_ADAPTER.dump_python(list(plans), mode="json")
+
+
+def load_r1_output(data: list) -> list[CategoryMetricPlan]:
+    """Rebuild the typed plans from `r1_runs.output`."""
+    return _OUTPUT_ADAPTER.validate_python(data)
 
 
 def dump_step_output(step_id: R1StepId, result: Any) -> dict:
@@ -128,6 +142,44 @@ class R1RunStore:
             .eq("status", expected),
         )
         return len(rows) == 1
+
+    async def mark_finished(
+        self, run_id: str, user_id: str, *, plans: list[CategoryMetricPlan]
+    ) -> bool:
+        """Set `finished` and the output in one update, only while `running` (R2-P1)."""
+        rows = await self._execute(
+            "mark_finished",
+            self._client.table(R1_RUNS_TABLE)
+            .update({"status": "finished", "output": dump_r1_output(plans)})
+            .eq("run_id", run_id)
+            .eq("user_id", user_id)
+            .eq("status", "running"),
+        )
+        return len(rows) == 1
+
+    async def get_finished_output(
+        self, run_id: str, user_id: str
+    ) -> list[CategoryMetricPlan] | None:
+        """One read of a finished run's plans, for R2. None unless finished with an output.
+
+        A run finished before the `output` column existed has `output = null` and reads as None.
+        A run saved under another `workflow_version` raises (its output shape is unknown).
+        """
+        rows = await self._execute(
+            "get_finished_output",
+            self._client.table(R1_RUNS_TABLE)
+            .select("output, workflow_version")
+            .eq("run_id", run_id)
+            .eq("user_id", user_id)
+            .eq("status", "finished")
+            .limit(1),
+        )
+        if not rows or rows[0].get("output") is None:
+            return None
+        found = rows[0].get("workflow_version")
+        if found != R1_WORKFLOW_VERSION:
+            raise StateVersionMismatchError(found, R1_WORKFLOW_VERSION)
+        return load_r1_output(rows[0]["output"])
 
     async def claim_retry(self, run_id: str, user_id: str, *, expected_attempts: int) -> bool:
         """Count the retry and set `running` in one update. False if another retry won."""

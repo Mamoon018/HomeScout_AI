@@ -109,31 +109,33 @@ Two more rules sit on top of these:
 ## Two Facts the Code Showed (corrections to the Problem Context)
 
 - **R2's input is not only R1's output.** R1's finished output gives `category_metric_plans`. The search **origin** (`GeoPoint`) and **radius** are not part of R1's output, so the R2 start request has to supply them. `radius_km` falls back to `DEFAULT_RADIUS_KM` (2.0).
-- **R2 is short and R3 is long.** R2 asks for at most `DISCOVERY_MAX_RESULTS = 10` places per category, then runs one routing re-search per category per mode (walk, drive, cycle) and one transit matrix per 100 places, all concurrently, so it takes seconds. R3 runs LLM turns and web searches for every amenity, so it takes minutes. "Runs take minutes" holds for R3 only, and this changes the execution-model choice between them (R2-C6 vs R3-C7).
+- **R2 is short and R3 is long.** R2 asks for at most `DISCOVERY_MAX_RESULTS = 10` places per category, then runs one routing re-search per category per mode (walk, drive, cycle) and one transit matrix per 100 places, all concurrently, so it takes seconds. R3 runs LLM turns and web searches for every amenity, so it takes minutes. "Runs take minutes" holds for R3 only. Run length alone would let R2 run inside the request, but R2-C6 Iteration 2 moves R2 to a background task as well, so a refresh can't stop a run (R2-C6 vs R3-C7).
 
 ---
 
 # R2. Amenity Search — Feature Process Flow
 
-R2 takes a finished R1 run plus a search origin, and produces one `PredefinedMetricsRecord` per discovered place per category. It needs **8 components**. R2's three step methods are reused exactly as they are.
+R2 takes a finished R1 run plus a search origin, and produces one `PredefinedMetricsRecord` per discovered place per category. It needs **8 components**, plus one prerequisite change in R1 (**R2-P1**, the finished output column). R2's three step methods are reused exactly as they are.
 
 ## R2 Runtime Flow
 
 1. The customer (or the page, after R1 finishes) sends `POST /api/amenity-search/runs` with `r1_run_id`, `origin` and an optional `radius_km`.
 2. The login check verifies the user. The request model checks that `origin` is a finite coordinate and `radius_km` is positive, and rejects bad input with `422` before any row exists.
-3. The coordinator reads R1's **finished** output through `R1RunStore.get_finished_output(r1_run_id, user_id)`. A missing run gives `404`, and a run that is not finished gives `409`.
-4. The coordinator builds `AmenitySearchState(origin, radius_km, category_metric_plans)` and creates the `r2_runs` row with status `running`, `attempts = 0`, `completed_step = null` and this initial state saved.
-5. **Step `discovery`** (M1.1, `run_place_discovery`) runs. When it completes, the state is saved as a checkpoint, `completed_step = "discovery"`.
-6. **Step `enrichment`** (M1.2, `run_accessibility_enrichment`) runs. No save follows, because the next step has no I/O (see the persistence rule).
-7. **Step `attachment`** (M1.3, `run_result_attachment`) runs in memory.
-8. The **finish write** saves the final state and the output (`category_metric_plans`, `discovered_places`, `predefined_records`) and sets `finished`. The response is `201` with `result`.
-9. **On any failure,** the run is saved as `failed` with its stage, message and `retryable` flag. The saved state and `completed_step` are left untouched.
-10. **Retry:** `POST /api/amenity-search/runs/{run_id}/retry` (no body).
+3. The coordinator reads R1's **finished** output through `R1RunStore.get_finished_output(r1_run_id, user_id)` (new, R2-P1). This is one read of the `r1_runs.output` column. A run that is missing, another user's, not finished, finished before the column existed, or on another `workflow_version` gives `404`. A database error or the 10 s timeout gives `503`. No row exists yet in any of these cases.
+4. The coordinator builds `AmenitySearchState(origin, radius_km, category_metric_plans)` and creates the `r2_runs` row with status `running`, `attempts = 0`, `completed_step = null` and this initial state saved. A database error here gives `503`, with no row.
+5. The coordinator starts the run as a **background task**, keeps it in `app.state.r2_tasks`, and replies `202 {run_id, status: "running"}` at once (R2-C6 Iteration 2). The page saves `run_id` and polls the status endpoint. Steps 6–10 run in the task.
+6. **Step `discovery`** (M1.1, `run_place_discovery`) runs. When it completes, the state is saved as a checkpoint, `completed_step = "discovery"`, and a `completed` `discovery` row is added to `r2_run_steps` (R2-C4 Iteration 1).
+7. **Step `enrichment`** (M1.2, `run_accessibility_enrichment`) runs. No save follows, because the next step has no I/O (see the persistence rule).
+8. **Step `attachment`** (M1.3, `run_result_attachment`) runs in memory.
+9. The **finish write** saves the final state and the output (`category_metric_plans`, `discovered_places`, `predefined_records`) and sets `finished`. A `completed` `enrichment` row is then added to `r2_run_steps`. The page sees it on its next poll.
+10. **On any failure,** the run is saved as `failed` with its stage, message and `retryable` flag. The saved state and `completed_step` are left untouched. If `discovery` or `enrichment` was running, that step gets a `failed` row in `r2_run_steps`. The page sees it on its next poll.
+11. **Retry:** `POST /api/amenity-search/runs/{run_id}/retry` (no body).
     - The store claims the run in **one conditional update**: it must be `failed` and retryable, or `running` and stale. On success it becomes `running` with `attempts + 1`.
-    - A losing request gets `409`.
-    - The coordinator loads the saved state and resumes at the **first step after `completed_step`**.
-11. **Status:** `GET /api/amenity-search/runs/{run_id}` returns `status`, `completed_step`, and `result` or `retryable`. It is read-only.
-12. **R3** reads the finished output by `run_id` and `user_id` (R2-C4 "Get the finished output").
+    - A missing run or another user's gives `404`. A finished run, a run that is not retryable or has used its retry, a `running` run that is not stale yet, a version mismatch (saved as failed, not retryable), and a losing request all get `409`.
+    - If the step it resumes at has a `failed` row in `r2_run_steps`, that row is claimed (`failed → started`), as in R1.
+    - The winner replies `202 {run_id, status: "running", completed_step}`. A background task loads the saved state and resumes at the **first step after `completed_step`**.
+12. **Status:** `GET /api/amenity-search/runs/{run_id}` returns `status`, `completed_step`, and `result` or `retryable`. It is read-only. It first checks `app.state.r2_tasks`: a live task of this user's answers `running` with no database read, and another user's gives `404`. Otherwise it reads the row: `404` clears the page's `sessionStorage` (back to SCREEN R1), a version mismatch reads as `failed`, not retryable (no write), and a database error gives `503`. The page polls it every ~2 s while `status` is `running`.
+13. **R3** reads the finished output by `run_id` and `user_id` (R2-C4 "Get the finished output").
 
 ## What Already Exists and Is Reused As-Is
 
@@ -141,10 +143,32 @@ R2 takes a finished R1 run plus a search origin, and produces one `PredefinedMet
 |---|---|---|
 | M1.1 / M1.2 / M1.3 step methods | `AmenitySearch.run_place_discovery`, `run_accessibility_enrichment`, `run_result_attachment` | Every step that produces a value |
 | R2's typed errors, each with a `stage` | `PlaceDiscoveryError`, `AccessibilityEnrichmentError`, `ResultAttachmentError` in `src/exceptions/deep_search.py` | Failure stage and the retryable split |
-| R1 finished-output read | `R1RunStore.get_finished_output` | R2's input |
 | R1 HTTP pattern: coordinator, store, controller, routes, `get_authenticated_user`, `user_id` filter, `RunConflictError` / `RunNotFoundError` / `RunStoreError`, `retryable` in every failed body | `r1_run_coordinator.py`, `r1_run_store.py`, `app/api/...` | The shape every R2 piece copies |
 | Async service-role Supabase client, migrations folder | `create_supabase_db_client`, `backend/supabase/migrations/` | The `r2_runs` table |
-| `create_amenity_search` factory | `amenity_search.py` | Building R2 once at app startup |
+| `create_amenity_search` factory | `amenity_search.py` | Building a new `AmenitySearch` per run from the shared clients (R2-C2 Iteration 1) |
+
+## R2-P1. R1 Finished Output Column (prerequisite change in R1)
+
+### Goal of Component
+R2 reads a finished R1 run's `category_metric_plans` in one read of one column, without loading R1's steps or replaying R1.
+
+### Problem It Aims to Solve
+The code showed that `R1RunStore.get_finished_output` does not exist. The current `r1_runs` table (`create_r1_run_steps.sql`) has no `output` column: R1's result lives only in the `r1_run_steps` rows, and R1's own status endpoint rebuilds it by replay. R2 would have to copy that replay to get its input.
+
+**Traces to:** "R2 takes a finished R1 run" and the handoff between independent services.
+
+### Mandatory Sub-Tasks
+- **Migration** `<ts>_add_r1_runs_output.sql`, safe to re-run: add `output jsonb` (nullable) to `r1_runs`, and add the CHECK `(status = 'finished') = (output is not null)`.
+- **Atomic finish:** R1's move to `finished` writes `status = 'finished'` and `output` (`category_metric_plans`) in **one** UPDATE, still guarded by `expected = 'running'`. No separate write sets one without the other.
+- **New store method** `R1RunStore.get_finished_output(run_id, user_id)`: one SELECT of `output` and `workflow_version`, filtered on `run_id`, `user_id` and `status = 'finished'`. It returns the decoded `category_metric_plans`, or `None`.
+
+### Critical Decision Choices
+- **Database guard:** the CHECK constraint enforces "a `finished` run always has an output, and no other run has one" in the database, not only in code.
+- **Shape version:** the JSON shape of `output` is tied to `workflow_version`. A row with a different version is treated as a version mismatch, as R1 does today. For R2's start this gives `404` (start R1 again).
+- **Runs finished before the column:** they have `output = null` and read as `404`. The customer starts R1 again. No backfill (MVP).
+- **R1's own status endpoint (E3):** reads `output` for a finished run instead of replaying the steps. It's the same data and a separate change from R2's needs, but it is agreed.
+- **Step rows stay:** `r1_run_steps` remain R1's checkpoints for retry. `output` is only the compiled final result and does not replace them.
+- **Read behavior:** the read is idempotent and has no retry. A database error or the 10 s client timeout gives `503` ("try again"), kept distinct from `404` ("go back to R1"). It uses the shared async service-role client built in `lifespan`.
 
 ## Component Order
 
@@ -223,7 +247,7 @@ Nothing defines R2's steps as resumable units or which of them are saved, so a r
 
 ### Critical Factors (from our context)
 - **Zero change to the service:** R2's three steps are *already* separate public methods.
-- **No run-scoped resources:** R2 holds no session or breaker that has to live across steps. The Places/Routes clients are long-lived and shared.
+- **No run-scoped resources:** R2 holds no session or breaker that has to live across steps. The Places/Routes clients are long-lived and shared. (Iteration 1 adds a per-run `AmenitySearch` that holds only its own semaphore.)
 - **Exact resume position:** a step's output being empty is a valid result (a category can have zero places).
 
 ### Reasoning
@@ -235,6 +259,35 @@ Nothing defines R2's steps as resumable units or which of them are saved, so a r
 - **General — where the step list lives:** in the R2 coordinator, as a module-level ordered tuple, so the resume rule and the step order can't drift apart.
 - **Context-specific — enrichment checkpoint:** left out on purpose, by rule 2 of the persistence rule. **Risk accepted:** a hard crash in the moment between enrichment ending and the finish write would repeat enrichment on retry.
 - **Context-specific — the empty-place shortcut:** `run_accessibility_enrichment` returns early when no place has a location. This is unchanged, and the plan treats it as a completed step.
+
+### Iteration 1 — Places Concurrency: Per-Run Limit Plus One Global Cap (step `discovery`)
+
+**What changed.** The original design built one `AmenitySearch` at startup and shared it across every run. Its one Places semaphore of 3 then capped **all customers together**, so one customer's run queued behind every other customer's. This iteration picks a middle ground: a limit per run plus one global cap.
+
+**Design**
+
+- **App level (`lifespan`):** build the Places and Routes clients once, as today, and also **one global Places semaphore of 15**. Store all three on `app.state` and pass them to the R2 coordinator.
+- **Instance level (per run):** for each run, the coordinator builds a **new `AmenitySearch`** from the shared clients and the shared global semaphore. The constructor still creates its own semaphore of 3.
+- **Slot order:** each Places call takes its **run slot first, then a global slot**, and releases both when it returns.
+- **Result:** each customer gets up to 3 Places calls at a time, and the whole process never has more than 15 in flight.
+
+**Mandatory sub-tasks**
+
+- `AmenitySearch.__init__` gets two optional keyword arguments, with defaults that keep today's behavior for standalone use and the existing suites:
+  - `global_places_semaphore: asyncio.Semaphore | None = None`: when it's set, every Places call (`execute_discovery` and the routing re-search) takes it inside the run semaphore.
+  - `owns_clients: bool = True`: when it's `False`, `aclose()` doesn't close the shared Places/Routes clients. The per-run instance is built with `owns_clients=False` and `owns_caller=False`.
+- `lifespan` closes the shared Places and Routes clients on shutdown, after it has cancelled and awaited the R2 tasks (R2-C6 Iteration 2). No run closes them.
+- R2-C7's startup builds the shared clients and the global semaphore, not a single `AmenitySearch`.
+
+**Why the slot order matters.** A run waiting on its own limit of 3 never holds a global slot, so a busy run can't hold global slots it isn't using. Five runs at full speed fill the 15. A sixth waits only for the global cap.
+
+**Critical Decision Choices**
+
+- **General — the global cap's size (15):** five customers at full per-run speed. This stays well below Places' per-minute quota at MVP traffic.
+- **Context-specific — what the global cap covers:** Places calls only (discovery and the routing re-search, which share the Places semaphore). The Routes transit matrix keeps only its per-run limit of 3. Its call count is ⌈P/100⌉ per run, so it's too small to need a global cap at MVP.
+- **Context-specific — one process:** the cap is per process. With several workers, the real cap is 15 × workers. Accepted for MVP (one process). Revisit with more workers or with Places `429`s.
+- **Context-specific — effect on R2-C2's "zero change to the service":** the step methods and their logic are unchanged. Only the constructor (two optional arguments) and `aclose` are touched. Run-scoped state is still none apart from the run semaphore, so Approach 1 (the coordinator's step list) still holds.
+- **Risk accepted:** when the global cap is full, the wait for a slot lengthens the run (traceflow A19). Since R2-C6 Iteration 2 the run is a background task, so the wait no longer holds a request open.
 
 ---
 
@@ -308,10 +361,11 @@ R2 has no table and no write path.
 | **Claim for retry** | The conditional update from R2-C5. |
 | **Load a run** | Reads the row, including `state` (via R2-C3), `completed_step`, `attempts`, `retryable` and `updated_at`. |
 | **Get the finished output** | R2's output for R3, or nothing unless the status is `finished`. |
+| **Step rows (Iteration 1)** | `insert_step`, `save_step_failed`, `claim_failed_step`, `complete_claimed_step` on `r2_run_steps`, as in R1. `load_run` also returns the step rows. |
 
 ### Three Common Approaches
 1. **One row per run: the whole state as one versioned jsonb, plus a `completed_step` column. (Finalized)** Each checkpoint rewrites `state`.
-2. **A run row plus a step-output table** `r2_run_steps(run_id, step, output jsonb, primary key (run_id, step))`. Each step's own output is inserted once, and a resume rebuilds the state from the rows. This is the durable-workflow "operation outputs" pattern.
+2. **A run row plus a step-output table** `r2_run_steps(run_id, step, output jsonb, primary key (run_id, step))`. Each step's own output is inserted once, and a resume rebuilds the state from the rows. This is the durable-workflow "operation outputs" pattern. (Iteration 1 adds such a table as a per-step record only; resume still reads `state` and `completed_step`.)
 3. **One row with a column per step output** (`discovered_places jsonb`, `predefined_records jsonb`, …) in place of one `state` blob.
 
 ### Critical Factors (from our context)
@@ -330,6 +384,51 @@ R2 has no table and no write path.
 - **Context-specific — Google Places content is stored.** The saved state and output hold Places fields: name, address, location, reviews and others. Google Maps Platform terms allow lat/lng to be cached for up to **30 consecutive days**, and place IDs are covered by the Places API Policies. Other content has narrower rules. **Decision:** the data is kept in the database with no expiry for now. A retention policy (for example the 30-day limit) will be decided in a later phase and is not built in this feature.
 - **Context-specific — deleting an R1 run:** it cascades to its R2 runs, so an output can never point at a missing input.
 
+### Iteration 1 — A Step Table `r2_run_steps`, Filled as R1 Fills `r1_run_steps`
+
+**What changed.** R2 gets a second table, `r2_run_steps`, with one row per non-reproducible step, written the same way R1 writes `r1_run_steps`. Every other R2 decision stays as it is: `r2_runs` keeps `state`, `completed_step`, `output`, the failure columns, `retryable`, `attempts` and fencing, and **`r2_runs` alone decides where a retry resumes**. The step table is a per-step record next to it, not a second source of truth.
+
+**The table** (migration `<ts>_create_r2_run_steps.sql`, safe to re-run, copied from `create_r1_run_steps.sql`):
+
+- `run_id` (references `r2_runs`, `on delete cascade`), `step_id`, `status`, `output`, `error_type`, `error_message`, `retryable`, `created_at`;
+- primary key `(run_id, step_id)`;
+- `step_id` in (`discovery`, `enrichment`): the two non-reproducible steps. `attachment` is pure, so it has no row, as R1 has no row for its recomputed steps;
+- `status` in (`started`, `completed`, `failed`);
+- the checks `(status = 'completed') = (output is not null)` and `(status = 'failed') = (error_type is not null and retryable is not null)`;
+- `output` in R1's envelope `{"schema_version", "data"}`: `discovered_places` for `discovery`, `enrichment` for `enrichment`;
+- RLS on with no policies, and a trigger that rejects any change to a `completed` row.
+
+**How it is filled (R1's four operations)**
+
+| R1 operation | R2 use |
+|---|---|
+| `insert_step` (new `completed` row; a duplicate key means another execution) | `discovery` right after the checkpoint write succeeds. `enrichment` right after the finish write succeeds. |
+| `save_step_failed` (new `failed` row, or `started → failed` on a claimed step) | When `discovery` or `enrichment` fails: the step that was running gets a `failed` row with `error_type`, `error_message` and the same `retryable` as the run. |
+| `claim_failed_step` (`failed → started`, error cleared) | After the run claim (R2-C5) wins, if the step R2 resumes at has a `failed` row, it is claimed. |
+| `complete_claimed_step` (`started → completed` with the output) | The claimed step's row is completed at its write point (checkpoint for `discovery`, finish for `enrichment`). |
+
+**Write order.** The `r2_runs` write goes first, fenced as today. The step row follows only when that write matched. So:
+
+- a lost fence writes no step row;
+- a duplicate step row or a claimed row that moved is logged (`r2_run.step_conflict`) and stops the execution, as R1 does;
+- a store failure on the step row is logged only. The run row is already right, so the run carries on.
+
+**Why `enrichment`'s row waits for the finish write.** A completed row can never change. If `enrichment` were recorded the moment it completed and `attachment` then failed, a retry would rerun `enrichment` (the resume point is still `discovery`) and collide with its own completed row.
+
+**Mandatory sub-tasks**
+
+- `R2RunStore` adds `insert_step`, `save_step_failed`, `claim_failed_step` and `complete_claimed_step`, with R1's signatures and the same `dump_step_output` / `load_step_output` envelope.
+- `load_run` reads the run with its step rows embedded, as R1's `load_run` does, and fails loudly if the embed is missing.
+- The coordinator calls them at the points in the table above, with no change to the step plan, the resume rule or the retryable split.
+- R2-C8 adds the step-table tests (see R2-C8).
+
+**Critical Decision Choices**
+
+- **Context-specific — the run row stays the truth:** resume uses `completed_step`, and status uses `r2_runs.status`. If a crash lands between the run write and the step write, the step row is missing. That gap is in the record only, and no decision reads the step table.
+- **Context-specific — the same data is stored twice:** `discovered_places` is in `state` and in the `discovery` row, and `enrichment` is in the final `state` and in the `enrichment` row. That is accepted as a cost. The Google Places content rule (above, traceflow A16) covers both tables: kept with no expiry for now.
+- **Context-specific — a crashed run has no `failed` row:** a stale `running` run that is reclaimed has nothing to claim, so the resumed step is inserted as a new row, as on a first run.
+- **Context-specific — atomicity:** as in R1, the run write and the step write are separate statements (PostgREST has no transaction across them). The write order above keeps the run row correct whichever one fails.
+
 ---
 
 ## R2-C5. Single-Execution Guard (Claim, Stale Run, Fencing)
@@ -347,6 +446,7 @@ Only one execution of a run is ever active, even with duplicate or simultaneous 
 - **One conditional update decides the winner**, as in R1's `mark_retry_started`: only one request can match. The loser gets `409` ("Another retry of this run already started") and runs nothing.
 - **Fencing on every write after the claim:** checkpoint, finish and fail all filter on `attempts = <this execution's attempts>`. An older execution that wakes up late can't overwrite the newer one's data. Its write matches nothing, and it stops.
 - **Retry limit:** `MAX_RETRY_ATTEMPTS = 1`, as in R1. Reclaiming a stale run counts as the retry.
+- **Step-row claim (R2-C4 Iteration 1):** after the run claim wins, a `failed` row for the step the retry resumes at moves to `started`, as R1's `claim_failed_step`. If that row has moved, the run is set `failed`, not retryable, and the retry returns `409` ("start again"), as R1's `step_conflict`. A stale-reclaimed crash has no `failed` row, so there is nothing to claim.
 
 ### Three Common Approaches
 1. **R1's guard as-is.** Rows start as "failed, not retryable". Retry is allowed only for `failed` + retryable, via a conditional update. No crash recovery.
@@ -362,19 +462,19 @@ Only one execution of a run is ever active, even with duplicate or simultaneous 
 ### Reasoning
 - **Approach 1** fails *crash recovery*: a crash leaves the run unretryable, so all saved work is lost.
 - **Approach 3** recovers fastest, but adds a timer task per run, a lease column, and renewal failure handling. That is more moving parts than the risk justifies here.
-- **Approach 2** recovers from crashes, still stops overlapping retries (a live run is never stale), and needs one timestamp comparison in the update R1 already has. Fencing covers the rare case where a run is slower than `stale_after`. A clean shutdown doesn't even wait, because the coordinator saves the run as failed and retryable on cancellation (R2-C6).
+- **Approach 2** recovers from crashes, still stops overlapping retries (a live run is never stale), and needs one timestamp comparison in the update R1 already has. Fencing covers the rare case where a run is slower than `stale_after`. A clean shutdown doesn't even wait: `lifespan` cancels the run's task, and the task saves the run as failed with `retryable = attempts < MAX` (R2-C6 Iteration 2).
 
 ### Critical Decision Choices
 - **General — whose clock:** `updated_at` is set by the database trigger. The stale cutoff is computed in the backend and passed as a filter. A small clock skew only shifts the wait slightly. The value must be much longer than the skew.
 - **Context-specific — `stale_after` for R2:** **10 minutes**, as a setting. R2's longest step takes seconds, so this is very generous.
-- **Context-specific — what a lost fence does:** the old execution logs `r2_run.superseded`, makes no further writes, and returns `409` if it is still attached to a request.
+- **Context-specific — what a lost fence does:** the old execution logs `r2_run.superseded`, makes no further writes, and stops. Since R2-C6 Iteration 2 it runs in a background task with no request attached, so nothing is returned; the page sees the newer execution's result through the status endpoint.
 
 ---
 
 ## R2-C6. R2 Run Coordinator
 
 ### Goal of Component
-One service runs R2's step plan around the store. Start: check inputs → load R1 output → create the row → run the steps → checkpoint → finish. Retry: claim → load → resume after `completed_step` → finish. Any R2 error saves the run as failed with its stage and `retryable` flag.
+One service runs R2's step plan around the store. Start: check inputs → load R1 output → create the row → start a background task and reply `202` → (in the task) run the steps → checkpoint → finish. Retry: load → pre-check → claim → start a background task and reply `202` → (in the task) resume after `completed_step` → finish. Any R2 error saves the run as failed with its stage and `retryable` flag (Iteration 2).
 
 ### Problem It Aims to Solve
 C2 knows the steps and C4/C5 know the database, but nothing applies the status, retry and fencing rules. In the HTTP layer they couldn't be tested without a server.
@@ -387,38 +487,118 @@ C2 knows the steps and C4/C5 know the database, but nothing applies the status, 
 
   | Error | Retryable | Why |
   |---|---|---|
-  | `PlaceDiscoveryCallError`, `RoutingRetrievalError`, `TransitRetrievalError` | Yes, while `attempts < MAX_RETRY_ATTEMPTS` | Provider failure; a second call may succeed |
+  | `PlaceDiscoveryCallError`, `RoutingRetrievalError`, `TransitRetrievalError` | Yes, while `attempts < MAX_RETRY_ATTEMPTS`, **unless the config-error check finds a config cause** (Iteration 1) | Provider failure; a second call may succeed |
+  | The same three, with Google's original error `InvalidArgument`, `FailedPrecondition` or `PermissionDenied` (Iteration 1) | No | Our setup or request is wrong (bad key, API off, request rejected); it fails again |
   | `PlaceDiscoveryRequestError` | No | Bad input (empty taxonomy node, no `places.*` targets); it fails again |
   | `ResultAssemblyError` | No | The plans and the places don't match; it fails again |
   | `StateVersionMismatchError` | No | Start again (R2-C3) |
   | Any other exception | No, stage `unexpected` | A bug |
-  | Cancellation (shutdown, client gone) | Yes | Best-effort save as failed, then re-raise |
+  | Cancellation (shutdown; since Iteration 2 a client leaving no longer cancels the run) | Yes, while `attempts < MAX_RETRY_ATTEMPTS` (a cancelled retry is not retryable) | Best-effort save as failed, then re-raise |
 
-- `R2_STAGE_ERRORS` / `R2_PROVIDER_ERRORS` tuples next to R1's, with `502` vs `503` mapped as R1 does.
+- `R2_STAGE_ERRORS` / `R2_PROVIDER_ERRORS` tuples next to R1's, with `502` vs `503` mapped as R1 does. Since Iteration 2 these codes are not sent to the page; the failure is saved on the row and read through the status endpoint.
 - An `R2RunFailedError` that carries `run_id`, `stage`, `retryable` and `provider_unavailable`, mirroring `R1RunFailedError`.
-- "Save as failed quietly": if the store is down too, log it and keep the R2 error as the answer, as in R1.
+- "Save as failed quietly": if the store is down too, log it, as in R1. The row stays `running` and can be reclaimed after `stale_after` (R2-C5). Since Iteration 2 there is no reply to return the error in.
 
 ### Three Common Approaches
-1. **Run inside the request. (Finalized for R2)** As R1 does: the start or retry request waits until R2 finishes or fails and gets the result in the response.
-2. **`202 Accepted` + in-process background task + status polling.**
+1. **Run inside the request.** As R1 does: the start or retry request waits until R2 finishes or fails and gets the result in the response. (Chosen first; replaced by approach 2 in Iteration 2.)
+2. **`202 Accepted` + in-process background task + status polling. (Finalized for R2, Iteration 2)**
 3. **An external job queue and worker** (for example arq with Redis): the request queues a job and a worker process runs it.
 
 ### Critical Factors (from our context)
 - **Run length:** R2 takes seconds, not minutes (see the corrections above).
-- **Consistency with R1:** the same request/response model for the page.
+- **Consistency:** R1 runs inside the request; R3 runs in a background task with polling (R3-C7).
+- **Refresh recovery (Iteration 2):** a refresh must not lose the `run_id`, stop the run, or leave the page waiting with nothing to poll.
 - **Proportionate simplicity:** no new infrastructure exists (no Redis or worker).
 - **Crash recovery** is already handled by R2-C5, whichever model is used.
 
 ### Reasoning
 - **Approach 3** survives process loss best and scales out, but it brings new infrastructure and a deployment unit for a step that takes seconds.
-- **Approach 2** is right for runs that outlast proxy and browser timeouts (R3-C7). For R2 it would only add polling to the page for no benefit.
-- **Approach 1** fits a seconds-long run, matches R1, and loses nothing: if the connection drops, the handler either finishes and saves (and the page reads it with `GET`), or it is cancelled and saved as retryable.
+- **Approach 2** is right for runs that outlast proxy and browser timeouts (R3-C7). The first reasoning held that for R2 it would only add polling for no benefit. Iteration 2 reverses that, for refresh recovery (below).
+- **Approach 1** fits a seconds-long run and matches R1. It was the first choice, on the view that it loses nothing when the connection drops. Iteration 2 shows two gaps it leaves: a refresh before the reply leaves the page with no `run_id` (A2), and after a refresh the page waits on a reply that no longer exists.
+- **Approach 2 (Iteration 2)** reuses R3's model, which is already in the design (R3-C7). The request only checks inputs and creates the row, so the page gets `run_id` in milliseconds, and the run never depends on the connection.
 
 ### Critical Decision Choices
-- **General — what the response carries:** `result` = `predefined_records` (what the page shows), plus `run_id`, `status` and `completed_step`.
-- **Context-specific — the R1 run must be the same user's and `finished`:** `get_finished_output` already filters on both, and returns nothing otherwise. The coordinator then loads the R1 row to tell apart `404` (no such run for this user) and `409` (not finished).
-- **Context-specific — whether a client disconnect cancels the handler:** `log_requests` is an `http` middleware, so this must be confirmed in verification. Either way the result is safe: the run is saved, or it is saved as failed and retryable.
+- **General — what the response carries:** `result` = `predefined_records` (what the page shows), plus `run_id`, `status` and `completed_step`. Since Iteration 2, `result` comes from the status endpoint; start and retry reply `202` with `run_id` and `status: running`.
+- **Context-specific — the R1 run must be the same user's and `finished`:** `get_finished_output` (R2-P1) filters on both, and returns nothing otherwise. Every such case gives `404`, with no second read. There is no `409` path: the page only offers R2 after R1 is finished, so an unfinished R1 is not designed for, and the `finished` filter still stops it.
+- **Context-specific — whether a client disconnect cancels the handler:** resolved by Iteration 2. Starlette 1.6 doesn't cancel the handler when the client leaves, and the run no longer depends on the handler anyway: it is a background task.
 - **Context-specific — two R2 runs for the same R1 run:** allowed. Each is its own run, since starting twice is a deliberate customer action and not a retry. Not deduplicated (not in the problem statement).
+
+### Iteration 1 — Config Errors Are Not Retryable (steps `discovery` and `enrichment`)
+
+**The problem.** R2 wraps every Google error in its own error type. By the time the coordinator sees it, a "bad key" error and a "Google is down" error both look like `RoutingRetrievalError` (or `PlaceDiscoveryCallError` / `TransitRetrievalError`), so both are marked retryable. The customer gets a Retry button that can't work, uses up the one retry, and then hits "Start again", which fails the same way.
+
+**What `__cause__` is.** When Python wraps one error in another (`raise X from Y`), it keeps the original in `X.__cause__`. In R2 this forms a chain:
+
+```
+RoutingRetrievalError          ← what the coordinator sees
+  └─ __cause__: PlacesClientError
+       └─ __cause__: PermissionDenied   ← the real reason, from Google
+```
+
+The same chain holds for discovery (`PlaceDiscoveryCallError` → `PlacesClientError` → Google) and transit (`TransitRetrievalError` → `RoutesClientError` → Google).
+
+**The fix.** One small helper in the coordinator follows that chain down to Google's original error:
+
+- **It finds `InvalidArgument`, `FailedPrecondition` or `PermissionDenied`:** our setup or request is wrong, and retrying won't help. Save the run with `retryable = false` and log `r2_run.config_error` (ERROR, with the step and the Google error class) so we notice.
+- **Anything else:** keep today's rule (`retryable = true` while `attempts < MAX_RETRY_ATTEMPTS`).
+
+**Mandatory sub-tasks**
+
+- The helper `_is_config_error(exc) -> bool` walks `__cause__` (with a depth limit, so a cycle can't loop) and checks each link against the three `google.api_core.exceptions` types.
+- The coordinator's failure handling calls it before applying the retryable table, for all three provider error types.
+- The failure keeps its stage ("other R2 error", `502` before Iteration 2). Only `retryable` changes.
+- R2-C8 adds one test per step: an injected `PermissionDenied` under each of the three R2 errors gives `retryable: false` and one `r2_run.config_error` log. An injected `ServiceUnavailable` still gives `retryable: true`.
+
+**Why this way**
+
+- **One helper covers both steps:** discovery and enrichment errors are wrapped the same way.
+- **R2's code stays unchanged:** only the coordinator's decision changes, so the "reused as-is" rule for the step methods holds.
+- **Result:** the customer never sees a Retry button that can't work, and we see the config problem in the logs.
+
+**Critical Decision Choices**
+
+- **Context-specific — the Routes API case:** Places and Routes are enabled separately. If Routes is off, or the key isn't allowed to call it, discovery passes and is saved, and then every enrichment fails in transit. Without this check, that run would be retryable and fail again. With it, the run ends as not retryable at once.
+- **Context-specific — `ResourceExhausted` (rate limit) stays retryable:** a per-minute quota recovers by the time the customer clicks Retry.
+- **Risk accepted:** the check depends on R2 and the clients keeping `raise … from exc`. If a future change drops the cause, the run falls back to today's rule (retryable). The R2-C8 tests catch that.
+
+### Iteration 2 — Run in a Background Task + Polling (start and retry)
+
+**The problem.** With approach 1, the run lives inside the request, and that leaves two gaps:
+
+- **A2, no `run_id` to recover:** the page gets `run_id` only with the final reply. A refresh during the run leaves it nothing to call E3 with, so the customer is sent back to SCREEN R1 while the run may still finish on the server.
+- **The waiting reply:** after a refresh the page shows "waiting" from E3, but the reply it was waiting for is gone, and nothing tells it to look again.
+
+**The new flow**
+
+1. **Start (E1):** login check → input check → read R1's finished output → create the row. Then start the run as a task, reply `202 {run_id, status: "running"}`.
+2. **Retry (E2):** load → pre-check → claim. Then start the resumed run as a task, reply `202 {run_id, status: "running", completed_step}`.
+3. **The task** runs the step plan as before (discovery → checkpoint → enrichment → attachment → finish write), and saves `finished` or `failed` to the row. Nothing is sent to the page.
+4. **The page** saves `run_id` as soon as the `202` arrives, then polls E3 every ~2 s while `status` is `running`, and shows SCREEN R2, F or S from the row.
+
+**Mandatory sub-tasks**
+
+- **The task set:** `app.state.r2_tasks`, keyed by `run_id`, holding `(task, user_id)`. The entry is added when the task starts and removed by a done callback. It keeps the task referenced, so it can't be garbage-collected mid-run (as R3-C7).
+- **Shutdown rule:** `lifespan` cancels every task in `r2_tasks` and awaits them, with a short timeout, **before** it closes the shared Places and Routes clients. Each task saves its run as failed with `retryable = attempts < MAX` on `CancelledError` (the cancellation row above), the same as R3.
+- **In-memory check in E3:** before the database read, E3 looks up `run_id` in `r2_tasks`:
+  - found, same `user_id` → `200 {run_id, status: "running"}`, no database read;
+  - found, another user's → `404`, as the database read would give;
+  - not found → the database read as before (finished, failed, a crashed run, or a run owned by another process).
+- **Errors after the `202`:** the run's `502`/`503`/`500` codes no longer reach the page. The failure is saved on the row (`failure_stage`, `retryable`) and E3 reports it. A lost fence (a newer execution owns the row) is logged only.
+- **R2-C8** adds a background lifecycle test and an E3 memory-check test (see R2-C8).
+
+**Why this way**
+
+- **R3's model, reused:** the task set, the shutdown rule and polling are already decided for R3 (R3-C7, R3-C8). R2 copies them, so there is one execution model for both services.
+- **A refresh never stops a run:** the run doesn't depend on the request, so A4 (does a disconnect cancel the handler?) is no longer a risk.
+- **The `run_id` arrives in milliseconds:** A2's window shrinks from the whole run to the time it takes to create the row.
+- **Polling is cheap:** a run of ~30 s polled every ~2 s is about 15 requests. The memory check answers most of them with no database read.
+
+**Critical Decision Choices**
+
+- **Context-specific — the memory check is per process:** a run started by another worker isn't in this process's set, so E3 falls back to the database. That is correct, only slower. At MVP there is one process.
+- **Context-specific — the order of save and removal:** the task saves its final status before the done callback removes it, so a poll never sees "not in memory" while the row still says `running` for a live run.
+- **Context-specific — the memory reply has no `completed_step`:** it is only read from the row. The page shows plain "waiting" for R2, which is short enough.
+- **Still open — A5:** a run that crashed (process killed) is gone from memory and reads as `running` from the row until it is stale (10 min). The memory check can't tell this apart in another process, so A5 stays as it is.
 
 ---
 
@@ -433,7 +613,7 @@ No R2 routes exist, and app startup doesn't build R2 or its store.
 **Traces to:** "started, tracked and retried for a specific user", "behave like R1 in how they are started, report status … and handle retries".
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
-- **Startup:** at app startup (`lifespan`), build `AmenitySearch` (`create_amenity_search`, with the shared LLM caller injected), `R2RunStore` and the coordinator once. Close the Places/Routes clients on shutdown, and set `app.state.r2_run_coordinator = None` when the service-role key is missing (giving `503`, as R1 does).
+- **Startup:** at app startup (`lifespan`), build the shared Places and Routes clients, the global Places semaphore of 15 (R2-C2 Iteration 1), `R2RunStore` and the coordinator once. The coordinator builds a new `AmenitySearch` per run from these, with the shared LLM caller injected. Also create the task set `app.state.r2_tasks` (R2-C6 Iteration 2). On shutdown, cancel and await the tasks in `r2_tasks` (short timeout) first, then close the Places/Routes clients. Set `app.state.r2_run_coordinator = None` when the service-role key is missing (giving `503`, as R1 does).
 - **Layers:** a dependency `get_r2_run_coordinator`, a routes file of declarations only, and a controllers file that maps typed errors to codes, copying R1's split.
 - **Models:** `StartAmenitySearchRequest { r1_run_id: UUID, origin: {latitude, longitude}, radius_km?: float > 0 }`, plus a response that adds `completed_step`.
 - **Bodies:** every failed body carries `retryable`.
@@ -444,9 +624,11 @@ No R2 routes exist, and app startup doesn't build R2 or its store.
 
    | Purpose | Method and path | Success | Errors |
    |---|---|---|---|
-   | Start | `POST /api/amenity-search/runs` | `201` + `result` | `422` bad origin/radius; `404` R1 run not found; `409` R1 not finished; `502`/`503` R2 failed (`retryable`); `500` unexpected |
-   | Retry | `POST /api/amenity-search/runs/{run_id}/retry` (no body) | `200` + `result` | `404`; `409` not failed/not retryable/claim lost/stale not yet; `502`/`503`/`500` |
-   | Status | `GET /api/amenity-search/runs/{run_id}` | `200` + `status`, `completed_step`, `result` or `retryable` | `404`; `503` store down |
+   | Start | `POST /api/amenity-search/runs` | `202` + `run_id`, `status: running` | `422` bad origin/radius; `404` R1 run not found or not finished; `503` store down |
+   | Retry | `POST /api/amenity-search/runs/{run_id}/retry` (no body) | `202` + `run_id`, `status: running`, `completed_step` | `404`; `409` finished/not retryable/limit used/stale not yet/claim lost, or version mismatch (saved as failed, not retryable); `503` store down |
+   | Status | `GET /api/amenity-search/runs/{run_id}` | `200` + `status`, `completed_step`, `result` or `retryable`. First checks `app.state.r2_tasks`: a live task of this user's gives `running` with no database read | `404` (including another user's live task); `503` store down. A version mismatch reads as `200` `failed`, `retryable: false`, with no write |
+
+   Run failures (`502`/`503`/`500` before Iteration 2) are saved on the row and reported by the status endpoint as `status: failed` with `retryable` (R2-C6 Iteration 2).
 2. **Nested under the R1 run:** `POST /api/requirement-interpretation/runs/{r1_run_id}/amenity-search`.
 3. **One generic endpoint for every service:** `POST /api/deep-search/runs?service=r2`.
 
@@ -462,7 +644,7 @@ No R2 routes exist, and app startup doesn't build R2 or its store.
 
 ### Critical Decision Choices
 - **General — status codes:** as in the table. A `running` run on retry that is not stale yet gets `409` with `status: running`.
-- **Context-specific — refresh recovery:** the page stores `run_id` in `sessionStorage` and calls `GET`, as with R1.
+- **Context-specific — refresh recovery:** the page stores `run_id` in `sessionStorage` as soon as the `202` arrives, and calls `GET`. While `status` is `running`, it polls `GET` every ~2 s, as with R3.
 
 ---
 
@@ -483,36 +665,68 @@ A missing field after the split, a wrong resume point, a lost fence or a wrong `
 | Resume parity | A failure injected in `enrichment`, then a retry, gives the same final state as a run that never failed. **Discovery is called once in total.** |
 | No checkpoint after enrichment | After an injected failure in `attachment`, `completed_step` is still `discovery`. |
 | Failed keeps checkpoint | "Save as failed" leaves `state` and `completed_step` unchanged. |
-| Round trip | The initial, after-discovery and finished states, and the output, come back equal, including real `Place.to_dict` data. |
+| Round trip | The initial, after-discovery and finished states, and the output, come back equal, including a saved fixture of real `Place.to_dict` data. |
 | Version mismatch | Rejected as failed, not retryable. |
-| Concurrent retries | Two retries sent at the same time: exactly one runs, the other gets `409`. |
+| Concurrent retries | Two retries sent at the same time against the fake store: exactly one runs, the other gets `409`. |
 | Stale reclaim | A `running` row older than `stale_after` can be claimed; a fresh one can't. |
 | Fencing | A write made with an old `attempts` changes nothing. |
 | Retry limit | After one retry, a second failure is saved with `retryable: false`. |
 | Retryable split | Each error in the R2-C6 table gives the listed `retryable`. |
-| Ownership | Every read and write for another user's run finds nothing; RLS blocks the publishable key. |
-| Migration | Re-running it changes nothing. |
+| Ownership | Every read and write for another user's run finds nothing (coordinator, routes and fake store). RLS is not tested automatically (Iteration 1). |
+| Migration | Not automated: checked by hand on the dev database when written (Iteration 1). |
+| R1 finished output (R2-P1) | A finished R1 run returns its `category_metric_plans` from one read. A `running`, `needs_answers` or `failed` run, another user's run, and a run finished before the column existed all return `None` (`404`). The CHECK constraint is checked by hand on the dev database (Iteration 1). |
+| Step rows (R2-C4 Iteration 1) | A clean run leaves `completed` rows for `discovery` and `enrichment` and none for `attachment`. A failure in `enrichment` leaves a `failed` row with the run's `retryable`; the retry moves it `started → completed`. A failure in `attachment`, then a retry, adds `enrichment` once. A lost fence adds no row. |
+| Background lifecycle (R2-C6 Iteration 2) | Start and retry return `202` before discovery starts. A shutdown mid-run saves `failed` + `retryable`, before the shared clients close. `r2_tasks` is empty after completion. |
+| E3 memory check (R2-C6 Iteration 2) | While a run's task is live, E3 answers `running` with no database read. Another user's `run_id` gets `404`, live or not. After the task ends, E3 reads the row and shows `finished` or `failed`. |
 | HTTP | Each status code in R2-C7, including `401` without the cookie. |
 | Regression | The existing R2 tests and sample runs pass after the state split. |
 
 ### Three Common Approaches
-1. **Real providers and the real dev Supabase, with record/replay of provider responses, in `backend/tests_live/`. (Finalized)** R1's method, extended to the Places/Routes clients.
-2. **Fakes for the providers and the store, in `tests/` only.**
+1. **Real providers and the real dev Supabase, with record/replay of provider responses, in `backend/tests_live/`.** R1's method, extended to the Places/Routes clients. (Chosen first; replaced by approach 2 in Iteration 1.)
+2. **Fakes for the providers and the store, in `tests/` only. (Finalized, Iteration 1)**
 3. **Contract tests at the HTTP layer only.**
 
 ### Critical Factors (from our context)
-- **The output can't be reproduced** live, so parity needs replay.
-- **The guard is a database behavior:** the conditional update and the trigger can only be proven on Postgres.
+- **The output can't be reproduced** live, so parity needs fixed provider responses.
+- **The guard is a database behavior:** the conditional update and the trigger can only be fully proven on Postgres.
 - **Consistency with R1's C6.**
+- **Cost and speed (Iteration 1):** the suite runs on every change, with no paid Places/Routes calls and no dev database.
 
 ### Reasoning
-- **Approach 2** can't prove the conditional update, the trigger, RLS or the migration.
+- **Approach 1** proves both the database rules and parity, but every run needs the dev Supabase and paid or recorded provider calls.
 - **Approach 3** can't show *which* step reran.
-- **Approach 1** proves both the database rules and parity, and the replay keeps parity exact.
+- **Approach 2 (Iteration 1)** proves the coordinator's logic, the resume point, the retryable split and parity with fixed fake responses, fast and free. It can't prove the SQL itself (see Iteration 1).
 
 ### Critical Decision Choices
-- **General — cost and time:** live runs make paid Places/Routes calls. The replayed paths make none.
-- **Context-specific — call counting:** the recording wrapper also counts calls per step, which is the evidence for "discovery runs once".
+- **General — cost and time:** no test makes a paid Places/Routes call or touches a real database.
+- **Context-specific — call counting:** the fake Places/Routes clients count calls per step, which is the evidence for "discovery runs once".
+
+### Iteration 1 — Fakes in `tests/` Instead of Live Runs
+
+**What changed.** R2-C8 moves from approach 1 (live providers + dev Supabase in `backend/tests_live/`) to approach 2: every R2 test runs in `backend/tests/` against fakes.
+
+**The fakes**
+
+- **Fake Places and Routes clients:** return fixed responses per request and count calls per step. They can raise any Google error (`PermissionDenied`, `ServiceUnavailable`, …) wrapped the way the real clients wrap it, so the config-error check (R2-C6 Iteration 1) is tested on the real `__cause__` chain.
+- **Fake `R2RunStore` and fake `R1RunStore.get_finished_output`:** in-memory rows that apply the same rules as the SQL: the `user_id` filter, the `attempts = n` fence, the claim condition (failed ∧ retryable, or running ∧ stale), and "save as failed never touches `state`". A test clock drives `updated_at`, so stale reclaim is tested without waiting.
+- **HTTP tests:** the FastAPI app with the fake store and fake clients injected into `app.state`, so status codes, the `202`, the task set and the E3 memory check are tested through real routes.
+
+**What the tests still prove:** parity and resume parity (same fixed responses in, same final state out), the step plan and resume rule, the retryable split, fencing and the claim **logic**, the retry limit, the background lifecycle, the E3 memory check, ownership in the coordinator and the routes, the state round trip, and every HTTP code.
+
+**What they no longer prove (risk accepted):**
+
+- the real conditional UPDATE through supabase-py / PostgREST, including the `or_()` filter and timestamp format (traceflow A6);
+- the `updated_at` trigger;
+- RLS blocking the publishable key;
+- the migrations being safe to re-run, and the `output` CHECK constraints on `r2_runs` and `r1_runs` (R2-P1);
+- two real concurrent requests racing on Postgres.
+
+The fake store can only show that the coordinator obeys these rules, not that the SQL enforces them. These are checked by hand on the dev database when the store and migrations are first written.
+
+**Critical Decision Choices**
+
+- **Context-specific — the fake store must mirror the SQL rules exactly:** if they drift, the tests pass while the real store doesn't. The fake keeps its filters next to a comment naming the SQL condition it copies.
+- **Context-specific — test rows that depended on Postgres** (concurrent retries, stale reclaim, fencing, ownership/RLS, migration, R1 finished output) now run against the fakes and prove the logic only. RLS and migration have no automated test.
 
 ---
 
@@ -523,7 +737,7 @@ R3 takes a finished R2 run. For each discovered place whose category has `specif
 ## R3 Runtime Flow
 
 1. The page sends `POST /api/specific-metric-resolution/runs` with `r2_run_id`.
-2. The login check verifies the user. The coordinator reads R2's **finished** output through `R2RunStore.get_finished_output(r2_run_id, user_id)`. A missing run gives `404`, and a run that is not finished gives `409`.
+2. The login check verifies the user. The coordinator reads R2's **finished** output through `R2RunStore.get_finished_output(r2_run_id, user_id)`. A run that is missing, another user's or not finished gives `404`.
 3. The coordinator builds `SpecificMetricResolutionState(category_metric_plans, discovered_places, predefined_records)` from that output and creates the `r3_runs` row with `running`, `attempts = 0`, `completed_step = null` and this initial state saved.
 4. The response is **`202 Accepted`** with `run_id` and `status: running`. The run continues in a background task (R3-C7).
 5. The background task builds a **fresh R3 instance with its own tool gateway** (R3-C2) and calls `run_specific_metric_resolution(state, resume_after=None, on_step_completed=…)`.
@@ -812,7 +1026,7 @@ R3 takes minutes, which is longer than typical proxy and browser request timeout
 - The per-run R3 instance (R3-C2) is closed in the task's `finally`.
 
 ### Three Common Approaches
-1. **Run inside the request,** as R1 and R2 do.
+1. **Run inside the request,** as R1 does (and R2 did before R2-C6 Iteration 2).
 2. **`202 Accepted` + an in-process background task (`asyncio.create_task`) + status polling. (Finalized for R3)**
 3. **An external job queue and worker** (arq/Redis, or Celery).
 
@@ -823,14 +1037,14 @@ R3 takes minutes, which is longer than typical proxy and browser request timeout
 - **Consistency with R1** in endpoints, store and error bodies, if not in timing.
 
 ### Reasoning
-- **Approach 1** is right for R1 and R2 (seconds), but for R3 it turns normal runs into client timeouts.
+- **Approach 1** is right for R1 (seconds), but for R3 it turns normal runs into client timeouts.
 - **Approach 3** gives the strongest isolation, but its main benefit, surviving process loss, is already covered by the stale reclaim and the step checkpoint, and it adds Redis and a worker deployment.
 - **Approach 2** needs only the status endpoint R1 already has, and fits the existing single FastAPI process.
 
 ### Critical Decision Choices
 - **General — keeping tasks alive:** tasks are held in a set on `app.state`, so they aren't garbage-collected, and removed when done.
 - **General — shutdown:** `lifespan` cancels the running tasks and awaits them (with a short timeout). Each task saves its run as failed and retryable on `CancelledError`.
-- **Context-specific — the input must be the same user's finished R2 run:** checked before the row is created, so a bad `r2_run_id` gets `404`/`409` and no run is created.
+- **Context-specific — the input must be the same user's finished R2 run:** checked before the row is created, so a bad `r2_run_id` gets `404` (missing, another user's or not finished; no `409` path, as in R2-C6) and no run is created.
 - **Context-specific — this departs from R1:** the start and retry responses are `202` with `status: running`, not a result. The page polls `GET` (or uses refresh recovery) to see the result.
 
 ---
@@ -856,7 +1070,7 @@ No R3 routes exist, and app startup doesn't build R3's factory, store, coordinat
 
    | Purpose | Method and path | Success | Errors |
    |---|---|---|---|
-   | Start | `POST /api/specific-metric-resolution/runs` | `202` + `run_id`, `status: running` | `404` R2 run not found; `409` R2 not finished; `503` store down |
+   | Start | `POST /api/specific-metric-resolution/runs` | `202` + `run_id`, `status: running` | `404` R2 run not found or not finished; `503` store down |
    | Retry | `POST /api/specific-metric-resolution/runs/{run_id}/retry` (no body) | `202` + `status: running` | `404`; `409` not failed/not retryable/claim lost/still running and not stale |
    | Status | `GET /api/specific-metric-resolution/runs/{run_id}` | `200` + `status`, `completed_step`, and `result` (finished) or `retryable` (failed) | `404`; `503` store down |
 2. **Nested under the R2 run:** `POST /api/amenity-search/runs/{r2_run_id}/specific-metric-resolution`.
@@ -898,20 +1112,22 @@ R3 is the costliest and least reproducible service, so a wrong resume point or a
 | Tuple-key round trip | The four keyed dicts come back equal, including a `place_id` containing `,`, in the same order. |
 | Per-run instance | Two R3 runs at the same time: one finishing doesn't close the other's gateway. |
 | Background lifecycle | Start returns `202` before STEP 1. A shutdown mid-run saves `failed` + `retryable`. The task set is empty after completion. |
-| Concurrent retries / stale reclaim / fencing / retry limit | As in R2-C8, against `r3_runs`. |
+| Concurrent retries / stale reclaim / fencing / retry limit | The same checks as R2-C8, but live against `r3_runs` on the dev Supabase (R3 keeps approach 1). |
 | Retryable split | Each error in the R3-C7 table gives the listed `retryable`. |
-| Ownership, RLS, migration, HTTP codes | As in R2-C8, for R3's table and endpoints. |
+| Ownership, RLS, migration, HTTP codes | Live on the dev Supabase: another user's run finds nothing, RLS blocks the publishable key, re-running the migration changes nothing, and each status code in R3-C8 holds. |
 | STEP 4 duration | Recorded on live runs, to confirm `stale_after` (R3-C6). |
 
 ### Three Common Approaches
-Same three as R2-C8: **(1) real providers + dev Supabase with record/replay (Finalized)**, (2) fakes only, (3) HTTP contract tests only.
+The three listed in R2-C8: **(1) real providers + dev Supabase with record/replay (Finalized for R3)**, (2) fakes only, (3) HTTP contract tests only. R2-C8 Iteration 1 moved R2 to approach 2; R3 keeps approach 1.
 
 ### Critical Factors (from our context)
 - **LLM and web output vary per call,** so parity needs replay.
 - **A live STEP 4 is expensive,** so the tests must keep live runs to a few amenities.
 
 ### Reasoning
-As R2-C8. R3 adds one more reason: only live runs show real STEP 4 durations, and those set `stale_after`.
+- **Approach 2** can't prove the conditional update, the trigger, RLS or the migration.
+- **Approach 3** can't show *which* step reran.
+- **Approach 1** proves both the database rules and parity, and the replay keeps parity exact. R3 adds one more reason: only live runs show real STEP 4 durations, and those set `stale_after`.
 
 ### Critical Decision Choices
 - **Context-specific — keep live runs small:** use one or two categories with specific metrics and three places each, so a live run stays within a few minutes and a small token budget.
@@ -928,7 +1144,7 @@ As R2-C8. R3 adds one more reason: only live runs show real STEP 4 durations, an
 - **Approaches are real alternatives:** each one listed would meet its component's goal on its own. Mandatory work (fencing, `user_id` filters, version envelopes, round-trip tests) sits under Mandatory Sub-Tasks, not among the approaches.
 - **Where R2 and R3 differ on purpose:**
   - **Step entry:** R2 is driven by the coordinator; R3 has one entry with a callback. The reason is R3's run-scoped gateway and breaker.
-  - **Execution:** R2 runs inside the request (seconds); R3 runs in the background (minutes).
+  - **Execution:** R2 and R3 both run in the background (R2-C6 Iteration 2, R3-C7). R2 takes seconds and R3 minutes, so R2's stale cutoff is shorter (10 vs 30 min).
   - **Serialization:** R3 needs tuple-key encoding.
   - **Instances:** R3 needs one instance per run.
 - **Unchanged:** every step method body, every state object's fields and types, every degradation and edge-case rule, and `DeepSearch` (it calls R1 only).

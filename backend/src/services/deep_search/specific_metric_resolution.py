@@ -90,7 +90,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     WEBSITE_SELECTION_SCHEMA_NAME,
     AmenityPipelineOutcome,
     AmenityResolutionRecord,
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CategoryMetricPlan,
     DepthLevel,
     DiscoveryCandidate,
@@ -341,8 +341,8 @@ class SpecificMetricResolution:
         self._resolution_instruction = build_resolution_instruction(self._resolution_schema)
 
     async def run_specific_metric_resolution(
-        self, state: AmenitySearchState
-    ) -> AmenitySearchState:
+        self, state: SpecificMetricResolutionState
+    ) -> SpecificMetricResolutionState:
         """R3 entry point — built through STEP 5; each pipeline runs phase 1 then R3.M2.2.
 
         Opens the gateway, builds `plan_index` (STEP 1), derives the eligible work items (STEP 2),
@@ -390,14 +390,14 @@ class SpecificMetricResolution:
 
     # ---- STEP 1 / STEP 2 (deterministic spine) -------------------------------------------------
     def _build_plan_index(
-        self, state: AmenitySearchState
+        self, state: SpecificMetricResolutionState
     ) -> dict[int, CategoryMetricPlan]:
         """STEP 1: index the category plans by `category_id` once."""
         return {plan.category_id: plan for plan in state.category_metric_plans}
 
     def _derive_work_items(
         self,
-        state: AmenitySearchState,
+        state: SpecificMetricResolutionState,
         plan_index: dict[int, CategoryMetricPlan],
     ) -> list[_DiscoveryWorkItem]:
         """STEP 2 (RC7): one work item per discovered (cat, place) whose category has specifics."""
@@ -433,7 +433,7 @@ class SpecificMetricResolution:
     # ---- STEP 3 (R3.M1.3 discovery batch) ------------------------------------------------------
     async def _run_discovery_batch(
         self,
-        state: AmenitySearchState,
+        state: SpecificMetricResolutionState,
         work_items: list[_DiscoveryWorkItem],
         raw_tool_definitions: RawToolDefinitions,
         *,
@@ -517,7 +517,7 @@ class SpecificMetricResolution:
 
     def _discovery_pre_pass(
         self,
-        state: AmenitySearchState,
+        state: SpecificMetricResolutionState,
         work_items: list[_DiscoveryWorkItem],
         batch_id: str,
     ) -> list[_DiscoveryWorkItem]:
@@ -820,7 +820,7 @@ class SpecificMetricResolution:
     # ---- STEP 4 (amenity pipelines: R3.M1.4 phase 1, then R3.M2.2 resolution) ----------------
     async def _run_amenity_pipelines(
         self,
-        state: AmenitySearchState,
+        state: SpecificMetricResolutionState,
         work_items: list[_DiscoveryWorkItem],
         catalog: list[dict],
         breaker: _CircuitBreaker,
@@ -1575,7 +1575,7 @@ class SpecificMetricResolution:
 
     def _log_batch_done(
         self,
-        state: AmenitySearchState,
+        state: SpecificMetricResolutionState,
         work_items: list[_DiscoveryWorkItem],
         batch_id: str,
     ) -> None:

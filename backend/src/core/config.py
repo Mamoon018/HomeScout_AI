@@ -41,6 +41,13 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="R1_STALE_AFTER_SECONDS",
     )
+    # An R2 run still `running` with no write for this long crashed (restart, killed process) and
+    # can be reclaimed by a retry (R2-C5). R2's longest step takes seconds, so 10 minutes is generous.
+    r2_stale_after_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        validation_alias="R2_STALE_AFTER_SECONDS",
+    )
     google_maps_api: str = Field(validation_alias="GOOGLE_MAPS_API")
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")

@@ -412,7 +412,16 @@ class R1RunCoordinator:
     ) -> R1RunView:
         """Move the run from `running` to `needs_answers` or `finished`."""
         state = outcome.state
-        if not await self._store.set_status(run_id, user_id, to=outcome.status, expected="running"):
+        if outcome.status == "finished":
+            # Status and output in one update, so a finished run always carries its output (R2-P1).
+            moved = await self._store.mark_finished(
+                run_id, user_id, plans=list(state.category_metric_plans)
+            )
+        else:
+            moved = await self._store.set_status(
+                run_id, user_id, to=outcome.status, expected="running"
+            )
+        if not moved:
             current = await self._store.load_run(run_id, user_id)
             status = current.status if current is not None else "failed"
             self._log(logging.INFO, "r1_run.rejected", run_id, user_id, reason="cas_lost", status=status)

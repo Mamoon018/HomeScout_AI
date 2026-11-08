@@ -1155,7 +1155,9 @@ class PredefinedMetricsRecord:
     contact_phone: str | None
     rating: float | None
     review_volume: int | None
-    price_level: str | None
+    # The Places `PriceLevel` enum value as `Place.to_dict` returns it (an int). The annotation
+    # was `str | None`; the value never changed, and the R2 state codec needs the true type.
+    price_level: int | None
     reviews: list | None
     routing: dict[str, RouteView | None]
     transit: TransitView | None
@@ -1573,17 +1575,17 @@ class AmenityResolutionRecord:
 
 @dataclass
 class AmenitySearchState:
-    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
+    """Responsibility 2 (R2) state: its inputs and its own outputs only (R2-C1).
 
+    M1.1 writes `discovered_places`, M1.2 writes `enrichment`, M1.3 writes `predefined_records`.
     `discovered_places` is keyed category_id then place_id, so dedup is within a category
     only (a place matching two categories is one record per category). `enrichment` is keyed by
     the deduplicated union of place_ids across categories (routing/transit from a fixed origin do
     not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM.
 
     `predefined_records` is the M1.3 output: a plain nested dict (no envelope, no version) keyed
-    category_id then place_id, None-free (an empty dict until M1.3 runs). `specific_records` is
-    the Mechanism 3 output, same keying, populated by C3.2.5. `amenity_records` holds the
-    combined, versioned `AmenityMetricsSet`, None until C3.2.5 runs.
+    category_id then place_id, None-free (an empty dict until M1.3 runs). R3's fields live in
+    `SpecificMetricResolutionState`; R3 receives `AmenitySearchOutput`.
     """
 
     origin: GeoPoint
@@ -1591,6 +1593,33 @@ class AmenitySearchState:
     category_metric_plans: list[CategoryMetricPlan]
     discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     enrichment: dict[str, EnrichmentBundle] = field(default_factory=dict)
+    predefined_records: dict[int, dict[str, PredefinedMetricsRecord]] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True)
+class AmenitySearchOutput:
+    """The R2 → R3 handoff (R2-C1): exactly what R3 reads. `enrichment` is not handed over."""
+
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]]
+    predefined_records: dict[int, dict[str, PredefinedMetricsRecord]]
+
+
+@dataclass
+class SpecificMetricResolutionState:
+    """Responsibility 3 (R3) state: R2's handoff fields plus R3's own outputs (R3-C1).
+
+    The inputs are copied from `AmenitySearchOutput` at R3 start. The output fields moved here
+    unchanged from the old shared state, with the same names, types and defaults.
+    `specific_records` is the Mechanism 3 output, same keying as `predefined_records`, populated
+    by C3.2.5. `amenity_records` holds the combined, versioned `AmenityMetricsSet`, None until
+    C3.2.5 runs.
+    """
+
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     predefined_records: dict[int, dict[str, PredefinedMetricsRecord]] = field(
         default_factory=dict
     )
@@ -1614,3 +1643,59 @@ class AmenitySearchState:
     resolution_results: dict[tuple[int, str], AmenityResolutionRecord] = field(
         default_factory=dict
     )
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 over HTTP — run and step-record contracts (R2-C2, R2-C4, R2-C6).
+# ---------------------------------------------------------------------------------
+
+# The run status the page reads. `running` covers a live task and a crashed, not-yet-stale run.
+R2RunStatus = Literal["running", "finished", "failed"]
+
+# R2's step plan, in run order (R2-C2). Only `discovery` is checkpointed on `r2_runs`.
+R2StepName = Literal["discovery", "enrichment", "attachment"]
+
+# The two non-reproducible steps that get an `r2_run_steps` row (attachment is pure).
+R2StepId = Literal["discovery", "enrichment"]
+
+# A step row's status. `started` only exists while a retry works on its claimed step.
+R2StepStatus = Literal["started", "completed", "failed"]
+
+
+@dataclass(frozen=True)
+class R2StepRecord:
+    """One `r2_run_steps` row, as the coordinator reads it (outputs are not loaded)."""
+
+    step_id: R2StepId
+    status: R2StepStatus
+    error_type: str | None = None
+    retryable: bool | None = None
+
+
+@dataclass(frozen=True)
+class R2RunRecord:
+    """One `r2_runs` row with its step rows, decoded. `output` is set only when finished."""
+
+    run_id: str
+    user_id: str
+    r1_run_id: str
+    status: R2RunStatus
+    state: AmenitySearchState
+    completed_step: Literal["discovery"] | None
+    attempts: int
+    retryable: bool
+    updated_at: str
+    output: AmenitySearchOutput | None = None
+    failure_stage: str | None = None
+    steps: dict[R2StepId, R2StepRecord] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class R2RunView:
+    """What the page needs for one R2 run: progress, the records once finished, or retryable."""
+
+    run_id: str
+    status: R2RunStatus
+    completed_step: Literal["discovery"] | None = None
+    result: dict[int, dict[str, PredefinedMetricsRecord]] | None = None
+    retryable: bool | None = None

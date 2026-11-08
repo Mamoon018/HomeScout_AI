@@ -44,6 +44,7 @@ from src.services.deep_search.feature_schemas.schemas import (
 from src.services.deep_search.r1_run_coordinator import R1RunCoordinator
 from src.services.deep_search.r1_run_store import (
     R1_WORKFLOW_VERSION,
+    dump_r1_output,
     dump_step_output,
     load_step_output,
 )
@@ -231,6 +232,14 @@ class _MemoryRunRows:
             return False
         self.run.update(status=to, updated_at=self._now())
         self.writes.append(f"r1_runs: status {expected} -> {to}")
+        return True
+
+    async def mark_finished(self, run_id, user_id, *, plans) -> bool:
+        if not self._owned(run_id, user_id) or self.run["status"] != "running":
+            return False
+        output = json.loads(json.dumps(dump_r1_output(plans)))
+        self.run.update(status="finished", output=output, updated_at=self._now())
+        self.writes.append(f"r1_runs: status running -> finished, output {len(output)} plans")
         return True
 
     async def claim_retry(self, run_id, user_id, *, expected_attempts) -> bool:

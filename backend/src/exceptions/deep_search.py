@@ -310,7 +310,7 @@ class CheckpointMissingError(Exception):
 
 
 class RunStoreError(Exception):
-    """Raised when a `r1_runs` / `r1_run_steps` read or write could not be completed."""
+    """Raised when a run-table read or write (`r1_runs`, `r2_runs` and their step tables) failed."""
 
     stage: ClassVar[str] = "run_store"
 
@@ -379,4 +379,24 @@ R1_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     InferenceProviderError,
     DepthAssignmentProviderError,
     MetricDefinitionProviderError,
+)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 over HTTP — retryable split (R2-C6).
+# ---------------------------------------------------------------------------------
+
+# Every typed error an R2 step can raise. Each carries a `stage`.
+R2_STAGE_ERRORS: tuple[type[Exception], ...] = (
+    PlaceDiscoveryError,
+    AccessibilityEnrichmentError,
+    ResultAttachmentError,
+)
+
+# The provider failures (Places / Routes call failed after its retries). Retryable once, unless
+# the cause chain shows a config error (bad key, API off, request rejected).
+R2_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
+    PlaceDiscoveryCallError,
+    RoutingRetrievalError,
+    TransitRetrievalError,
 )

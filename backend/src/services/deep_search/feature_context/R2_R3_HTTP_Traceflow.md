@@ -31,7 +31,7 @@ Stage tags
   [UA]    user action on the page                   [BIZ]   coordinator / service work
   [AUTH]  login check (get_authenticated_user)      [DATA]  database read or write (store)
   [API]   FastAPI route, request model              [RESP]  HTTP response sent to the page
-  [BG]    background task (R3 only)                 [UA→]   what the user can do next
+  [BG]    background task (R2, R3)                  [UA→]   what the user can do next
 
 Box shape
   ┌─ [TAG] ID · name ──────────     one step
@@ -86,7 +86,7 @@ work is covered by the **finish write**. A step whose output was degraded by an 
 ---
 ---
 
-# Part A — R2 · Amenity Search (runs inside the request)
+# Part A — R2 · Amenity Search (runs in a background task)
 
 ## A1 — The whole customer journey on one page
 
@@ -100,28 +100,30 @@ work is covered by the **finish write**. A step whose output was degraded by an 
                                            │  E1  POST /api/amenity-search/runs
                                            │      { r1_run_id, origin, radius_km? }
                                            ▼
-                            ┌─ SCREEN W: waiting (R2 work in request, seconds) ─┐
-                            └──┬──────────────┬───────────────┬────────────┬────┘
-              422 bad origin / │  404 / 409   │ 201 finished  │ 502/503/500 failed
-              radius (no run)  │  R1 run not  │               │
-                    ▼          │  found / not │               ▼
-              fix input        │  finished    │      retryable:true ──▶ SCREEN F: "Retry"
-                               ▼              ▼      retryable:false ─▶ SCREEN S: "Start again"
-                         SCREEN R1     SCREEN R2: predefined_records          │
-                                       (run finished; R3 may read it          │
-                                        by run_id)                            │
-                                              ▲                               │
-                                              │   E2 POST .../runs/{run_id}/retry (no body)
-                                              │                               ▼
-                                              │                ┌─ SCREEN W: waiting ─┐
-                                              │  200 finished  └──┬─────────────┬────┘
-                                              └───────────────────┘             │ 409 still
-                                                                                │ running / lost
-                                                       502/503 failed,          │ claim ──▶ E3
-                                                       retryable:false ──▶ SCREEN S
+              422 bad origin / radius (no run) ──▶ fix input
+              404 no finished R1 output for user ──▶ SCREEN R1
+              503 store down (no run) ──▶ try again
+                                           │ 202 { run_id, status:"running" }  (milliseconds)
+                                           │ page saves run_id in sessionStorage
+                                           ▼
+             ┌─ SCREEN W: waiting (R2 runs in a background task, seconds) ─┐
+             │  poll E3 GET /api/amenity-search/runs/{run_id} every ~2 s  │◀──┐
+             └──┬───────────────────────┬──────────────────────┬───────────┘   │
+                │ running               │ finished             │ failed         │
+                └──▶ poll again ────────┼──────────────────────┼────────────────┘
+                                        ▼                      ▼
+                           SCREEN R2: predefined_records   retryable:true ──▶ SCREEN F: "Retry"
+                           (run finished; R3 may read it   retryable:false ─▶ SCREEN S: "Start again"
+                            by run_id)                               │
+                                                                     │ E2 POST .../runs/{run_id}/retry
+                                                                     ▼ (no body)
+                                                   202 { run_id, status:"running", completed_step }
+                                                     ──▶ SCREEN W (polls E3 again)
+                                                   409 not retryable / still running / lost claim
+                                                     ──▶ E3
 
-   At any time:  page refresh ──▶ E3 GET /api/amenity-search/runs/{run_id}  (sessionStorage)
-                 ──▶ re-renders SCREEN W (running), R2, F or S from the saved row. Nothing changes.
+   At any time:  page refresh ──▶ E3 (run_id from sessionStorage) ──▶ re-renders SCREEN W
+                 (and keeps polling), R2, F or S from the saved row. The run is not affected.
 ```
 
 **Run status as the customer sees it** (`r2_runs.status`, R2-C4): three values, `running`,
@@ -135,9 +137,16 @@ page how far the run got. ✅ R2-C5, R2-C7
 **Purpose.** Turn a finished R1 run plus a search origin into one `PredefinedMetricsRecord` per
 place per category, saving discovery as soon as it completes.
 
+**Shape (R2-C6 Iteration 2).** E1 has two parts. The **request part** (A-E1.0 to A-E1.3b) checks
+the input, creates the row, starts a background task and replies `202` in milliseconds. The
+**background part** (A-E1.4 to A-E1.10b) runs the steps and saves the outcome to the row. The
+page learns the outcome only by polling E3 (A-E1.11).
+
 **Trigger.** On SCREEN R1 the customer (or the page automatically) starts the amenity search.
 
 **Endpoint.** `POST /api/amenity-search/runs` · body `{ "r1_run_id": "<uuid>", "origin": {"latitude": .., "longitude": ..}, "radius_km": 2.0 }`
+
+### A2.1 The request part (returns in milliseconds)
 
 ```
 ┌─ [UA] A-E1.0 · Start amenity search ────────────────────────────────────────────
@@ -145,7 +154,8 @@ place per category, saving discovery as soon as it completes.
 │ do:   page shows SCREEN W, sends POST with credentials (cookie)
 │ exit: ✔ request sent ──▶ G1 ──▶ G2
 │ ⚠ A1 where the page gets `origin` from is outside this feature
-│ ⚠ A2 no R2 run_id exists until the reply; a refresh now leaves the page nothing to recover
+│ ⚠ A2 no R2 run_id exists until the 202; a refresh in that window (milliseconds,
+│      Iteration 2) leaves the page nothing to recover
 └──────────────────────────────────────────────────────────────────────────────────
         │ r1_run_id, origin, radius_km, user_id
         ▼
@@ -158,15 +168,26 @@ place per category, saving discovery as soon as it completes.
 └──────────────────────────────────────────────────────────────────────────────────
         │
         ▼
-┌─ [DATA] A-E1.2 · Read R1's finished output ──────────────────── R1RunStore (as-is) ──
+┌─ [DATA] A-E1.2 · Read R1's finished output ────────── R1RunStore (NEW method, R2-P1) ──
 │ in:   r1_run_id, user_id
-│ do:   R1RunStore.get_finished_output(r1_run_id, user_id)
-│       None → R1RunStore.load_run to tell the two cases apart
+│ do:   R1RunStore.get_finished_output(r1_run_id, user_id)   (one read, no second lookup)
+│       SELECT output, workflow_version FROM r1_runs
+│       WHERE run_id AND user_id AND status = "finished"     (only the column R2 needs)
+│       decode output → category_metric_plans; workflow_version must match
 │ exit: ✔ category_metric_plans ──▶ A-E1.3
-│       ✖ no R1 row for this user        ──▶ 404
-│       ✖ R1 row exists, not `finished`  ──▶ 409 (status of the R1 run in the body)
-│       ✖ database error                 ──▶ 503 "Run storage is unavailable"
+│       ✖ None (missing, another user's, not finished, or finished before
+│         the output column existed) ──▶ 404
+│       ✖ workflow_version mismatch ──▶ 404 (output shape is unknown; start R1 again)
+│       ✖ database error / timeout (10 s) ──▶ 503 "Run storage is unavailable"
 │ ✅ R2-C6 "the R1 run must be the same user's and finished"
+│ ✅ decided: no 409 path. The page only offers R2 after R1 is finished, so an
+│    unfinished R1 reaching here is not designed for; the `finished` filter still
+│    stops it, as a 404.
+│ ✅ decided (R2-P1): R1 writes its final result to `r1_runs.output` in the same
+│    UPDATE that sets `finished`; a CHECK makes `output` non-null iff `finished`.
+│    No step rows are loaded and nothing is replayed here.
+│ RULE  read is idempotent and has no retry; 503 means "try again", 404 means
+│       "go back to R1". Same shared async client and 10 s timeout as R1.
 └──────────────────────────────────────────────────────────────────────────────────
         │ category_metric_plans
         ▼
@@ -176,32 +197,77 @@ place per category, saving discovery as soon as it completes.
 │ do:   INSERT r2_runs { run_id, user_id, r1_run_id, status:"running", attempts:0,
 │                        completed_step:null, state: {version, state}, retryable:false }
 │       run_id_var = run_id (every log line carries it)
-│ exit: ✔ row exists ──▶ A-E1.4
+│ exit: ✔ row exists ──▶ A-E1.3a
 │       ✖ database error ──▶ 503 (no row, nothing to retry)
 │ ✅ R2-C5: a working run is `running`, not R1's "failed, not retryable" placeholder
 └──────────────────────────────────────────────────────────────────────────────────
         │ run_id, state, attempts = 0
         ▼
+┌─ [BIZ] A-E1.3a · Start the background task ─────────────── R2-C6 Iteration 2 ──
+│ in:   run_id, user_id, state, attempts = 0
+│ do:   task = asyncio.create_task(coordinator.execute(run_id, user_id, state,
+│                                  attempts=0, resume_after=None))
+│       app.state.r2_tasks[run_id] = (task, user_id)
+│       task.add_done_callback(→ remove run_id from r2_tasks)
+│ exit: ✔ ──▶ A-E1.3b (the request part)   and   ──▶ A-E1.4 (the task)
+│ ✅ R2-C6 Iteration 2 "the task set": a referenced task can't be garbage-collected
+│    mid-run; the user_id is kept for the E3 ownership check (A-E3.0a)
+└──────────────────────────────────────────────────────────────────────────────────
+        ▼
+┌─ [RESP] A-E1.3b · Accepted ───────────────────────────────────────────── R2-C7 ──
+│ 202 { run_id, status:"running" }
+│ [UA→] ──▶ A-E1.11 (save run_id, SCREEN W, poll E3)
+│ The request ends here. A refresh or closed tab from now on never touches the run.
+└──────────────────────────────────────────────────────────────────────────────────
+```
+
+### A2.2 The background part (seconds)
+
+```
 ┌─ [BIZ] A-E1.4 · Step `discovery` ─────────────────── AmenitySearch.run_place_discovery ──
 │ in:   state (origin, radius_km, category_metric_plans)
+│       this run's AmenitySearch (built by the coordinator for this run, R2-C2 Iteration 1)
 │ do:   per category, concurrently:  build request → searchNearby → canonical place set   PAID
+│       each searchNearby: take a RUN slot (this run's semaphore, 3)
+│                          then a GLOBAL slot (app-wide Places semaphore, 15)
+│                          → call → release both
 │       → state.discovered_places[category_id] = {place_id: CanonicalPlace}
 │ exit: ✔ ──▶ A-E1.5
-│       ✖ PlaceDiscoveryCallError     (provider)  ──▶ A-E1.9  retryable
+│       ✖ PlaceDiscoveryCallError     (provider)  ──▶ A-E1.9  retryable, unless the
+│         config-error check finds a config cause (same helper as A-E1.6, R2-C6 Iteration 1)
 │       ✖ PlaceDiscoveryRequestError  (bad plan)  ──▶ A-E1.9  not retryable
 │ ✅ R2-C2 (method reused as-is; called by the coordinator's step list)
+│ ✅ R2-C2 Iteration 1: per-run limit 3 + one global cap 15
+│    · lifespan builds the Places client, the Routes client and the global
+│      semaphore ONCE, keeps them on app.state and passes them to the coordinator
+│    · each run gets a NEW AmenitySearch from those shared objects; its
+│      constructor still makes its own semaphore of 3; it does not own the
+│      shared clients (closing the run never closes them)
+│    · result: one customer ≤ 3 Places calls in flight; the process ≤ 15
+│    · run slot first, then global slot: a run waiting on its own limit never
+│      holds a global slot, so at most 5 runs share the 15 at full speed
+│ ⚠ A19 waiting for a global slot lengthens the run (the task, not a request)
 └──────────────────────────────────────────────────────────────────────────────────
         │
         ▼
 ┌─ [DATA] A-E1.5 · Checkpoint after discovery ────────────────────── SAVE · FENCE ──
 │ in:   state with discovered_places
-│ do:   UPDATE r2_runs SET state = R2-C3 JSON, completed_step = "discovery"
-│       WHERE run_id AND user_id AND status = "running" AND attempts = <mine>
-│ exit: ✔ 1 row ──▶ A-E1.6
-│       ✖ 0 rows (a newer execution owns the row) ──▶ log r2_run.superseded, stop, 409
-│       ✖ database error ──▶ A-E1.9 (save failed quietly; the row may stay `running`
-│                            ──▶ reclaimable after stale_after)
+│ do:   1. UPDATE r2_runs SET state = R2-C3 JSON, completed_step = "discovery"
+│          WHERE run_id AND user_id AND status = "running" AND attempts = <mine>
+│       2. only if 1 matched, the step row (R2-C4 Iteration 1):
+│          first run / reclaimed crash → insert_step: INSERT r2_run_steps
+│                                        { run_id, "discovery", completed, output }
+│          claimed retry step          → complete_claimed_step: started → completed
+│          output = {schema_version, data: discovered_places}
+│ exit: ✔ 1 row (+ step row saved) ──▶ A-E1.6
+│       ✖ 0 rows (a newer execution owns the row) ──▶ log r2_run.superseded, stop,
+│         NO step row (no reply: the request ended at A-E1.3b)
+│       ✖ database error on 1 ──▶ A-E1.9 (save failed quietly; the row may stay
+│                                 `running` ──▶ reclaimable after stale_after)
+│       ✖ step row duplicate / claimed row moved ──▶ log r2_run.step_conflict, stop
+│       ✖ database error on 2 ──▶ log only, carry on ──▶ A-E1.6 (run row is right) ⚠ A24
 │ ✅ R2-C2 table: discovery is costly + non-reproducible + external work follows
+│ ✅ R2-C4 Iteration 1: run row first, step row second; the run row decides resume
 └──────────────────────────────────────────────────────────────────────────────────
         │
         ▼
@@ -210,10 +276,23 @@ place per category, saving discovery as soon as it completes.
 │ do:   unique place index (drop places with no location)
 │       concurrently: routing re-search per category × mode (walk/drive/cycle)   PAID
 │                     transit matrix per ≤100 places                              PAID
+│       (routing re-search takes the same run slot + global slot as A-E1.4;
+│        the transit matrix takes only this run's Routes semaphore of 3)
 │       → state.enrichment[place_id] = EnrichmentBundle
 │       (no place with a location → returns early; counts as completed)
-│ exit: ✔ ──▶ A-E1.7   (NO save here)
-│       ✖ RoutingRetrievalError / TransitRetrievalError (provider) ──▶ A-E1.9 retryable
+│ exit: ✔ ──▶ A-E1.7   (NO save here; the `enrichment` step row waits for A-E1.8)
+│       ✖ RoutingRetrievalError / TransitRetrievalError ──▶ A-E1.9, retryable decided
+│         by the coordinator's config-error check (R2-C6 Iteration 1):
+│           follow __cause__ down to Google's original error
+│             RoutingRetrievalError / TransitRetrievalError   ← coordinator sees
+│               └─ PlacesClientError / RoutesClientError
+│                    └─ google_exceptions.<X>                  ← real reason
+│           X ∈ {InvalidArgument, FailedPrecondition, PermissionDenied}
+│             ──▶ config error: retryable = false, log r2_run.config_error ──▶ SCREEN S
+│           anything else (timeout, unavailable, rate limit, …)
+│             ──▶ provider failure: retryable = true (while attempts < MAX) ──▶ SCREEN F
+│ ✅ R2-C6 Iteration 1: one helper, R2's code unchanged; covers a Routes API that is
+│    disabled or not allowed for the key, which passes discovery and fails here
 │ ✅ R2-C2 "no separate save: the next step has no I/O"
 │ ⚠ A3 on a resume, the routing re-search runs minutes/hours after the saved discovery
 └──────────────────────────────────────────────────────────────────────────────────
@@ -225,7 +304,7 @@ place per category, saving discovery as soon as it completes.
 │       (place never enriched → all-null routing, WARN attachment.accessibility_degraded)
 │ exit: ✔ ──▶ A-E1.8
 │       ✖ ResultAssemblyError (a discovered category has no plan) ──▶ A-E1.9 not retryable
-│ ✅ R2-C2 (pure, covered by the finish write)
+│ ✅ R2-C2 (pure, covered by the finish write); no step row (pure step, as R1)
 └──────────────────────────────────────────────────────────────────────────────────
         │
         ├────────────────────────────────────────────┐
@@ -238,47 +317,74 @@ place per category, saving discovery as soon as it completes.
 │            predefined_records }            │  │ retryable = rule (R2-C6 table) AND             │
 │ retryable = false                          │  │             attempts < MAX_RETRY_ATTEMPTS (1)  │
 │ completed_step unchanged                   │  │ state, completed_step UNTOUCHED                │
+│ then, only if it matched, step row:        │  │ then, only if it matched, step row for the     │
+│   "enrichment" completed, output =         │  │ step that was running (R2-C4 Iteration 1):     │
+│   {schema_version, data: enrichment}       │  │   discovery / enrichment → save_step_failed    │
+│   (insert_step, or complete_claimed_step   │  │     { error_type, error_message, retryable =   │
+│    for a claimed retry step)               │  │       the run's }  (insert, or started→failed  │
+│   enrichment returned early (no place      │  │       for a claimed step)                      │
+│   located) → still a completed row         │  │   attachment / no step running → no step row   │
 │ ✔ ──▶ A-E1.10a                             │  │ ✔ / store down (logged only) ──▶ A-E1.10b      │
-│ ✖ 0 rows ──▶ superseded, 409               │  │ ✅ R2-C4 "save as failed never touches state"  │
-│ ✖ db error ──▶ 503; row stays running      │  │                                                │
+│ ✖ 0 rows ──▶ superseded (log only),        │  │ ✅ R2-C4 "save as failed never touches state"  │
+│   no step row                              │  │ store down → row stays running                 │
+│ ✖ db error ──▶ log; row stays running      │  │   ──▶ reclaimable after stale_after            │
+│   ──▶ reclaimable after stale_after        │  │ step row error ──▶ log only (⚠ A24)            │
+│ ✖ step row error ──▶ log only (⚠ A24)      │  │                                                │
 │ ✅ R2-C4 output column for R3              │  │                                                │
 └────────────────────────────────────────────┘  └────────────────────────────────────────────────┘
         │                                            │
         ▼                                            ▼
-┌─ [RESP] A-E1.10a ──────────────────────────┐  ┌─ [RESP] A-E1.10b ──────────────────────────────┐
-│ 201 { run_id, status:"finished",           │  │ 503 provider unavailable · 502 other R2 error  │
-│       completed_step:"discovery",          │  │ 500 unexpected                                 │
-│       result: predefined_records }         │  │ { run_id, status:"failed", retryable }         │
+┌─ [BG] A-E1.10a · Saved to the row ─────────┐  ┌─ [BG] A-E1.10b · Saved to the row ─────────────┐
+│ row: status finished, completed_step       │  │ row: status failed, failure_stage, retryable   │
+│      "discovery", output with              │  │ (provider unavailable / other R2 error /       │
+│      predefined_records                    │  │  unexpected are kept as failure_stage; the     │
+│ NO reply: the page reads it through E3     │  │  502/503/500 codes no longer reach the page)   │
+│ task ends ──▶ removed from r2_tasks        │  │ task ends ──▶ removed from r2_tasks            │
+│ (after the save, never before)             │  │ (after the save, never before)                 │
 └────────────────────────────────────────────┘  └────────────────────────────────────────────────┘
         │                                            │
-        ▼                                            ▼
-┌─ [UA→] A-E1.11 · What the page does with the reply ─────────────────────────────
-│ always: save run_id in sessionStorage
-│ finished              ──▶ SCREEN R2 (render predefined_records)
+        └──────────────────────┬─────────────────────┘
+                               ▼ (next E3 poll)
+┌─ [UA→] A-E1.11 · Save the run_id, start polling ────────────────────────────────
+│ on the 202 (A-E1.3b): save run_id in sessionStorage ──▶ SCREEN W
+│ poll E3 every ~2 s while status is running (A4)
+│ finished                ──▶ SCREEN R2 (render predefined_records)
 │ failed, retryable:true  ──▶ SCREEN F "Retry" (──▶ E2)
 │ failed, retryable:false ──▶ SCREEN S "Start again" (new E1)
+│ ✅ R2-C7 "refresh recovery"
 └──────────────────────────────────────────────────────────────────────────────────
 ```
 
-**Cancellation inside E1** (shutdown, or the client disconnects if that cancels the handler, ⚠ A4):
-whichever box is running raises `CancelledError`. The coordinator saves the run as failed with
-`retryable = attempts < MAX` (best effort), then re-raises. ✅ R2-C6 table
+**Shutdown during A2.2** (deploy, restart): `lifespan` cancels each task in `r2_tasks` and
+awaits it (short timeout), **before** it closes the shared Places and Routes clients.
+`CancelledError` lands at the current `await`, and the task saves the run as failed with
+`retryable = attempts < MAX` (best effort), then re-raises. A client leaving never cancels the
+task. ✅ R2-C6 table, R2-C6 Iteration 2 "shutdown rule" (⚠ A21)
 
 **A-E1 exits at a glance**
+
+Request part (the HTTP reply to E1):
 
 | Exit | HTTP | Row after it | Screen next |
 |---|---|---|---|
 | Not logged in / token expired | 401 | none | login, or refresh then resend |
 | Bad origin / radius / body | 422 | none | fix input |
-| R1 run missing or another user's | 404 | none | SCREEN R1 / start again |
-| R1 run not finished | 409 | none | finish R1 first |
+| R1 run missing, another user's, or not finished | 404 | none | SCREEN R1 / start again |
 | Database down before the row | 503 | none | try again later |
-| Finished | 201 | `finished`, `completed_step=discovery`, state + output | SCREEN R2 |
-| Places/Routes failure in discovery | 502/503 | `failed`, `retryable:true`, `completed_step=null` | SCREEN F |
-| Places/Routes failure in enrichment | 502/503 | `failed`, `retryable:true`, `completed_step=discovery` | SCREEN F |
-| Bad plan (request / assembly error) | 502 | `failed`, `retryable:false` | SCREEN S |
-| Unexpected error | 500 | `failed`, `retryable:false`, stage `unexpected` | SCREEN S |
-| Lost fence | 409 | owned by the newer execution | call E3 |
+| Row created, task started | 202 | `running`, `completed_step=null` | SCREEN W, poll E3 |
+
+Background part (no HTTP reply; the page sees the row through E3):
+
+| Outcome | Row after it | Screen next (via E3) |
+|---|---|---|
+| Finished | `finished`, `completed_step=discovery`, state + output | SCREEN R2 |
+| Places/Routes failure in discovery | `failed`, `retryable:true`, `completed_step=null` | SCREEN F |
+| Places/Routes failure in enrichment | `failed`, `retryable:true`, `completed_step=discovery` | SCREEN F |
+| Config error in discovery or enrichment (bad key, API off, request rejected) | `failed`, `retryable:false`, logs `r2_run.config_error` | SCREEN S |
+| Bad plan (request / assembly error) | `failed`, `retryable:false` | SCREEN S |
+| Unexpected error | `failed`, `retryable:false`, stage `unexpected` | SCREEN S |
+| Shutdown mid-run | `failed`, `retryable = attempts < MAX` | SCREEN F (or S if the retry was used) |
+| Lost fence | owned by the newer execution (log only) | whatever the newer execution saves |
 
 ---
 
@@ -301,8 +407,11 @@ offers Retry after a run stayed `running` past `stale_after` (⚠ A5).
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [DATA] A-E2.1 · Load the run ────────────────────────────────── R2-C4 + R2-C3 ──
-│ do:   SELECT r2_runs WHERE run_id AND user_id; decode state + version check
-│ exit: ✔ status, retryable, attempts, completed_step, updated_at, state ──▶ A-E2.2
+│ do:   SELECT r2_runs WHERE run_id AND user_id, with its r2_run_steps rows embedded
+│       (as R1's load_run); decode state + version check
+│ exit: ✔ status, retryable, attempts, completed_step, updated_at, state,
+│         step rows ──▶ A-E2.2
+│       ✖ step rows missing from the reply ──▶ 503 (fail loudly, as R1)
 │       ✖ no row / other user's ──▶ 404
 │       ✖ version mismatch      ──▶ save failed, retryable:false ──▶ 409 (as R1)
 └──────────────────────────────────────────────────────────────────────────────────
@@ -324,20 +433,36 @@ offers Retry after a run stayed `running` past `stale_after` (⚠ A5).
 │         WHERE run_id AND user_id AND attempts = n
 │           AND ( (status = "failed" AND retryable = true)
 │              OR (status = "running" AND updated_at < cutoff) )
-│ exit: ✔ 1 row  ──▶ A-E2.4   (this execution's fence value is now n + 1)
+│       then, if the step the retry resumes at has a `failed` row
+│       (discovery when completed_step = null, else enrichment):
+│         claim_failed_step: UPDATE r2_run_steps SET status = "started", error cleared
+│         WHERE run_id AND step_id AND status = "failed"
+│       (a stale-reclaimed crash has no failed row: nothing to claim; the step is
+│        inserted as new at its write point)
+│ exit: ✔ 1 row (+ step claimed, or nothing to claim) ──▶ A-E2.4
+│         (this execution's fence value is now n + 1)
 │       ✖ 0 rows ──▶ 409 "Another retry of this run already started"; runs nothing
+│       ✖ step row moved ──▶ set run failed, not retryable ──▶ 409 "start again"
+│         (as R1's step_conflict)
 │ ✅ R2-C5 Approach 2 · same shape as R1's mark_retry_started
+│ ✅ R2-C5 "step-row claim" (R2-C4 Iteration 1)
 │ ⚠ A6 the OR of two conditions has to be expressed through supabase-py / PostgREST
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
-┌─ [BIZ] A-E2.4 · Resume the step plan ─────────────────────────────── R2-C2 ──
-│ in:   state from A-E2.1, completed_step
-│ do:   completed_step = null        → A-E1.4 discovery → A-E1.5 SAVE → A-E1.6 → A-E1.7
+┌─ [BIZ] A-E2.4 · Start the resumed task, reply 202 ─────── R2-C2 + R2-C6 Iteration 2 ──
+│ in:   state from A-E2.1, completed_step, fence n + 1
+│ do:   task = create_task(coordinator.execute(run_id, user_id, state,
+│                          attempts = n + 1, resume_after = completed_step))
+│       app.state.r2_tasks[run_id] = (task, user_id)   (removed by the done callback)
+│ exit: ✔ ──▶ 202 { run_id, status:"running", completed_step } ──▶ SCREEN W (polls E3)
+│ background (A2.2 boxes, every write with FENCE attempts = n + 1):
+│       completed_step = null        → A-E1.4 discovery → A-E1.5 SAVE → A-E1.6 → A-E1.7
 │       completed_step = "discovery" → A-E1.6 enrichment → A-E1.7          (discovery NOT rerun)
-│       every write uses FENCE attempts = n + 1
-│ exit: ✔ ──▶ A-E1.8 save finished ──▶ 200 { run_id, finished, completed_step, result }
-│       ✖ R2 error ──▶ A-E1.9 save failed, retryable:false (limit used) ──▶ 502/503/500
-│       ✖ lost fence ──▶ 409
+│   the claimed step row completes at its write point (A-E1.5 / A-E1.8, started → completed)
+│   or fails again (A-E1.9, started → failed)
+│   outcome ──▶ A-E1.8 finished, or A-E1.9 failed with retryable:false (limit used)
+│             lost fence ──▶ log only
+│   the page sees the outcome through E3
 │ ✅ R2-C2 resume rule; R2-C8 "discovery is called once in total"
 └──────────────────────────────────────────────────────────────────────────────────
 ```
@@ -351,22 +476,33 @@ offers Retry after a run stayed `running` past `stale_after` (⚠ A5).
 | Finished / not retryable / limit used | 409 | unchanged | SCREEN R2 or S |
 | Still running, not stale | 409 `status:running` | unchanged | keep polling E3 |
 | Lost the claim to another request | 409 | owned by the winner | call E3 |
-| Finished | 200 | `finished`, state + output | SCREEN R2 |
-| Fails again | 502/503/500 | `failed`, `retryable:false` | SCREEN S |
+| Run claimed but its failed step row moved | 409 | `failed`, `retryable:false` | SCREEN S |
+| Claimed, task started | 202 | `running`, `attempts=n+1` | SCREEN W, poll E3 |
+| Background: finished | — (via E3) | `finished`, state + output | SCREEN R2 |
+| Background: fails again | — (via E3) | `failed`, `retryable:false` | SCREEN S |
 
 ---
 
 ## A4 — E3 · Status (refresh recovery)
 
-**Purpose.** After a refresh, a lost reply, or a `409`, show the screen that matches the saved run
-without doing any work.
+**Purpose.** Poll a running run, and after a refresh or a `409`, show the screen that matches the
+saved run without doing any work.
 
 **Endpoint.** `GET /api/amenity-search/runs/{run_id}`
 
 ```
-┌─ [UA] A-E3.0 · Page load / resync ──────────────────────────────────────────────
-│ do:   read run_id from sessionStorage
+┌─ [UA] A-E3.0 · Poll / page load / resync ───────────────────────────────────────
+│ do:   every ~2 s while status is running; also on page load (sessionStorage)
 │ exit: ✔ found ──▶ GET ──▶ G1 ──▶ G2      ✖ not found ──▶ SCREEN R1
+└──────────────────────────────────────────────────────────────────────────────────
+        ▼
+┌─ [BIZ] A-E3.0a · In-memory check (no I/O) ───────────────── R2-C6 Iteration 2 ──
+│ do:   look up run_id in app.state.r2_tasks
+│ exit: ✔ found, same user_id    ──▶ 200 { run_id, status:"running" } (no DB read)
+│                                    ──▶ SCREEN W, poll again
+│       ✖ found, another user's   ──▶ 404 (same answer as the DB read would give) ⚠ A23
+│       ✔ not found               ──▶ A-E3.1 (finished, failed, crashed, or another process)
+│ ⚠ A22 per process: a run started by another worker is only found by A-E3.1
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [DATA] A-E3.1 · Load the run (read-only) ─────────────────────── R2-C4 + R2-C3 ──
@@ -380,8 +516,9 @@ without doing any work.
         ▼
 ┌─ [RESP] A-E3.2 · Reply by status ────────────────────────────────────── R2-C7 ──
 │ running  ──▶ 200 { run_id, status, completed_step }            ──▶ SCREEN W
-│ finished ──▶ 200 { run_id, status, completed_step, result }    ──▶ SCREEN R2
-│ failed   ──▶ 200 { run_id, status, completed_step, retryable } ──▶ SCREEN F or S
+│              RULE the page polls again in ~2 s
+│ finished ──▶ 200 { run_id, status, completed_step, result }    ──▶ SCREEN R2 (stop polling)
+│ failed   ──▶ 200 { run_id, status, completed_step, retryable } ──▶ SCREEN F or S (stop polling)
 │ ⚠ A5 a `running` row that is already stale (crashed) still reads as `running`
 └──────────────────────────────────────────────────────────────────────────────────
 ```
@@ -393,9 +530,10 @@ without doing any work.
 ### A5.1 Status lifecycle
 
 ```
-   (no row) ── 422 / 404 / 409 before the row ──▶ (still no row)
+   (no row) ── 422 / 404 / 503 before the row ──▶ (still no row)
       │
       │ A-E1.3 INSERT                    attempts = 0, completed_step = null
+      │ A-E1.3a task started, 202 sent   (everything below happens in the task)
       ▼
    running ──A-E1.5 SAVE──▶ running (completed_step = discovery) ──A-E1.8──▶ finished
       │                          │
@@ -413,31 +551,47 @@ without doing any work.
 
    finished is terminal. failed + retryable:false is terminal ("Start again" = new E1).
    R1 run deleted ──▶ cascade deletes the R2 row; a live execution's next write matches nothing.
+   Shutdown ──▶ lifespan cancels the task ──▶ failed (retryable = attempts < MAX).
+   While the task is live, E3 answers `running` from r2_tasks without reading the row.
+
+   Step rows (r2_run_steps, R2-C4 Iteration 1), one per (run_id, step_id), for discovery and
+   enrichment only:
+      (none) ──insert_step──▶ completed            (never changes again: trigger)
+      (none) ──save_step_failed──▶ failed ──claim_failed_step──▶ started
+                                                     ├─complete_claimed_step─▶ completed
+                                                     └─save_step_failed────▶ failed
+   They record each step; they never decide resume or status (the run row does).
 ```
 
 ### A5.2 Data actions per endpoint, in order
 
 | # | Endpoint | Store operation (R2-C4) | Columns written | Filter |
 |---|---|---|---|---|
-| 1 | E1 | (R1) Get the finished output | — (read `r1_runs.output`) | `r1_run_id`, `user_id`, `finished` |
+| 1 | E1 | (R1) Get the finished output (R2-P1) | — (read `r1_runs.output`, `workflow_version`) | `r1_run_id`, `user_id`, `finished` |
 | 2 | E1 | Create a run | all initial columns, `status=running` | — (insert) |
 | 3 | E1 | Save a checkpoint | `state`, `completed_step=discovery` | `running`, `attempts=n` |
+| 3s | E1 | Insert step (`discovery`), only if 3 matched | `r2_run_steps`: `completed`, `output` | — (insert; duplicate key = conflict) |
 | 4 | E1 | Save as finished | `status`, `state`, `output`, `retryable=false` | `attempts=n` |
+| 4s | E1 | Insert step (`enrichment`), only if 4 matched | `r2_run_steps`: `completed`, `output` | — (insert; duplicate key = conflict) |
 | 4' | E1 | Save as failed | `status`, `failure_*`, `retryable` | `attempts=n` |
-| 5 | E2 | Load a run | — (read) | `run_id`, `user_id` |
+| 4's | E1 | Save step failed (step that was running), only if 4' matched | `r2_run_steps`: `failed`, `error_*`, `retryable` | — (insert) |
+| 5 | E2 | Load a run, with its step rows | — (read) | `run_id`, `user_id` |
 | 6 | E2 | Claim for retry | `status=running`, `attempts=n+1`, `retryable=false` | `attempts=n` + (failed∧retryable ∨ running∧stale) |
-| 7 | E2 | Checkpoint / finished / failed | as 3 / 4 / 4' | `attempts=n+1` |
-| 8 | E3 | Load a run | — (read) | `run_id`, `user_id` |
+| 6s | E2 | Claim the failed step, if any | `r2_run_steps`: `failed → started`, error cleared | `run_id`, `step_id`, `status=failed` |
+| 7 | E2 | Checkpoint / finished / failed | as 3 / 4 / 4'; the claimed step row moves `started → completed` or `started → failed` | `attempts=n+1`; step row `status=started` |
+| 8 | E3 | Load a run (skipped while the task is in `r2_tasks` for this user) | — (read) | `run_id`, `user_id` |
 | 9 | R3 | Get the finished output | — (read `output`) | `finished` |
 
-Every read and write filters on `run_id` **and** `user_id`. Every write is one single-row
-statement. ✅ R2-C4
+Every read and write on `r2_runs` filters on `run_id` **and** `user_id`. `r2_run_steps` has no
+`user_id` (as `r1_run_steps`): its writes come only after a matched `r2_runs` write for this
+user, and its reads are embedded in that user's `r2_runs` read. Every write is one single-row
+statement. ✅ R2-C4, R2-C4 Iteration 1
 
 ### A5.3 Paid calls per path (cost and wait time on SCREEN W)
 
 With `C` categories and `P` distinct places (≤ 10 per category):
 
-| Path | Places / Routes calls inside the request |
+| Path | Places / Routes calls per run (in the background task) |
 |---|---|
 | E1, full run | discovery `C` · routing `3·C` · transit `⌈P/100⌉` |
 | E2 after a failure in discovery (`completed_step=null`) | same as the full run |
@@ -469,7 +623,7 @@ covers it.
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
 | A1 | A-E1.0 | The request needs `origin`, but nothing in R1 or this feature says where the page gets it (apartment address, map pin, …). | ⚠ open (outside this feature) |
-| A2 | A-E1.0 | The run ID reaches the page only with the reply. A refresh during the start request leaves the page with nothing to recover, as in R1's B2. Short for R2 (seconds). | ⚠ open, low impact |
+| A2 | A-E1.0 | The run ID reaches the page only with the reply. A refresh during the start request leaves the page with nothing to recover, as in R1's B2. | ✅ mostly resolved (R2-C6 Iteration 2): the `202` comes back in milliseconds, so the window is tiny (as R3's B9) |
 | A5 | A-E3.2 | After a hard crash, the row stays `running`. For up to `stale_after` (10 min) the page shows "waiting", and retry returns `409 running`. The page can't tell a live run from a dead one, because the status reply carries no "stale" signal. | ⚠ open: add `retryable:true` to a stale `running` reply, or let the page offer Retry after a timeout |
 | A8 | A-E1.10b | A non-retryable failure (bad plan) can only be fixed upstream in R1. The customer sees "Start again" for R2, but starting R2 again with the same R1 run fails the same way. | ⚠ open: the page should send the customer back to R1 |
 | A9 | A5.1 | Two R2 runs for the same R1 run are allowed. Each costs a full set of Places calls. | ✅ decided (R2-C6), cost note only |
@@ -479,27 +633,35 @@ covers it.
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
 | A3 | A-E1.6 / A-E2.4 | Enrichment re-searches Places per category and mode, and joins by `place_id`. On a resume, it runs long after the saved discovery, so the re-search can return different places. Places missing from it get all-null routing (an existing WARN). The logic is unchanged, but the gap widens. | ✅ accepted (logic unchanged); shows as `attachment.accessibility_degraded` |
-| A4 | A-E1.4–A-E1.7 | Whether a client disconnect cancels the handler (`log_requests` is an `http` middleware) isn't known. If it does, the run is saved as failed and retryable. If it doesn't, the run finishes and E3 shows it. | ⚠ confirm in R2-C8 |
+| A4 | A-E1.4–A-E1.7 | Whether a client disconnect cancels the handler (`log_requests` is an `http` middleware) wasn't known. If it did, the run would be saved as failed and retryable. | ✅ resolved: Starlette 1.6 doesn't cancel the handler on disconnect, and since R2-C6 Iteration 2 the run doesn't depend on the handler |
 | A6 | A-E2.3 | The claim needs `attempts = n AND ((failed ∧ retryable) ∨ (running ∧ updated_at < cutoff))` in one statement. supabase-py supports `.or_()` with nested `and(...)`, but the timestamp format and escaping need care. The fallback is two conditional updates tried in order, each still atomic. | ⚠ implementation detail; R2-C8 "concurrent retries" proves it |
 | A10 | A-E1.5 / A-E1.8 | The database is down after paid work succeeded. A checkpoint failure loses discovery. A finish failure loses enrichment, but discovery is saved. Either way the row stays `running`, becomes stale after 10 min and can be reclaimed. | ✅ covered by R2-C5 (cost of the lost step only) |
-| A11 | A-E1.9 | The cancellation row in the R2-C6 table says "Yes" (retryable) without repeating the retry limit. This traceflow applies `attempts < MAX`, so a cancelled retry becomes not retryable. | ⚠ drift: confirm in R2-C6 |
+| A11 | A-E1.9 | The cancellation row in the R2-C6 table says "Yes" (retryable) without repeating the retry limit. This traceflow applies `attempts < MAX`, so a cancelled retry becomes not retryable. | ✅ aligned: the R2-C6 cancellation row now reads "Yes, while `attempts < MAX_RETRY_ATTEMPTS`" |
+| A17 | A-E1.2 | R1 runs that finished before the `output` column existed have `output = null`, so R2 can't start from them. | ✅ decided (R2-P1): they read as `404`; the customer starts R1 again. No backfill |
+| A18 | A-E1.2 | If R1 set `finished` and wrote `output` in two writes, a crash between them would leave a finished run with no output. | ✅ decided (R2-P1): one UPDATE writes both, and the CHECK constraint rejects any other combination |
+| A20 | A-E1.4 / A-E1.6 | R2 wraps every Google error in its own type, so a bad key and a Google outage both arrive as `PlaceDiscoveryCallError` / `RoutingRetrievalError` / `TransitRetrievalError`. Both were marked retryable, so the customer got a Retry that couldn't work. | ✅ decided (R2-C6 Iteration 1): the coordinator follows `__cause__` to Google's error; `InvalidArgument`, `FailedPrecondition`, `PermissionDenied` → not retryable + `r2_run.config_error` |
+| A21 | A-E1.4–A-E1.9 | Shutdown during a run: `lifespan` cancels the task and waits a short time for its "save as failed". If the timeout is hit first, the row stays `running`. The tasks must also be cancelled before the shared Places/Routes clients close, or a task fails on a closed client instead. | ✅ decided (R2-C6 Iteration 2): cancel and await tasks first, then close clients; a missed save is covered by stale reclaim (as B14) |
+| A22 | A-E3.0a | The in-memory check only sees this process's tasks. A run in another worker, or one lost in a crash, is answered from the row. | ✅ accepted for MVP (one process); the fallback is the database read, so it is correct, only slower |
+| A23 | A-E3.0a | The memory check answers before the database, so it must check ownership itself, or another user's `run_id` would get `running`. | ✅ decided: the set keeps `user_id`; a mismatch gives `404`; tested in R2-C8 |
+| A24 | A-E1.5 / A-E1.8 / A-E1.9 | The run write and the step write are two statements. A crash or a store error between them leaves the run row right but the step row missing. | ✅ accepted (R2-C4 Iteration 1): the step table is a record only; resume and status read `r2_runs` |
 | A12 | A-E2.1 | The pre-check reads `updated_at` written by the database trigger (`clock_timestamp()`), and the cutoff is computed from the backend clock. Clock skew shifts staleness by the skew. | ✅ accepted (R2-C5: value ≫ skew) |
 
 ### A7.3 Architectural level (how the pieces fit)
 
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
-| A13 | A-E1.4–A-E1.8 | R2 runs inside the request. That is right for seconds, but more categories or slower Places responses lengthen it, and nothing alerts when it nears proxy timeouts. | ✅ chosen (R2-C6); revisit if run time grows |
+| A13 | A-E1.4–A-E1.8 | R2 ran inside the request. More categories or slower Places responses would lengthen it, and nothing alerted when it neared proxy timeouts. | ✅ resolved (R2-C6 Iteration 2): the run is a background task, so no request stays open and there is no proxy timeout risk |
+| A19 | A-E1.4 / A-E1.6 | The global cap of 15 is per process and covers Places calls only (discovery and the routing re-search, which share the Places semaphore). With several workers the real cap is 15 × workers, and the Routes transit matrix keeps only its per-run limit of 3. A 6th busy run waits for global slots, which lengthens the run. | ✅ accepted for MVP (one process, low traffic); revisit with more workers or Places `429`s |
 | A14 | R2-C4 | The service-role key bypasses RLS. Isolation depends on every query adding `user_id`. | ✅ accepted, as R1; tested in R2-C8 |
 | A15 | R2-C3 | The saved state is tied to `R2_STATE_SCHEMA_VERSION`. A deploy that changes `AmenitySearchState` fails in-flight runs as not retryable. | ✅ accepted, as R1 |
-| A16 | R2-C4 | Google Places content is kept in `state` / `output` with no expiry. | ✅ decided: kept for now; the policy comes in a later phase |
+| A16 | R2-C4 | Google Places content is kept in `state` / `output` with no expiry, and since R2-C4 Iteration 1 also in the `discovery` and `enrichment` step rows. | ✅ decided: kept for now in both tables; the policy comes in a later phase |
 
 ### A7.4 Where to look first
 
 1. **A5:** a crashed run looks alive for up to 10 minutes.
 2. **A6:** the claim statement has to be truly one atomic update.
 3. **A11:** the retry limit on cancellation.
-4. **A4:** disconnect behavior in the middleware.
+4. **A21:** the shutdown order (cancel tasks, then close the clients).
 
 ---
 ---
@@ -518,9 +680,9 @@ covers it.
                                            │  E1  POST /api/specific-metric-resolution/runs
                                            │      { r2_run_id }
                                            ▼
-                 404 / 409 R2 run ◀──┬─────┴───── 202 { run_id, status:"running" } (immediately)
-                 not found / not     │                     │
-                 finished            │                     ▼
+                 404 no finished ◀───┬─────┴───── 202 { run_id, status:"running" } (immediately)
+                 R2 output for user  │                     │
+                                     │                     ▼
                        ▼             │      ┌─ SCREEN P: progress (polls E3 every few s) ──────┐
                   SCREEN R2          │      │ completed_step: null → "discovery_batch"         │
                                      │      │ ("websites found, resolving metrics")            │
@@ -562,11 +724,14 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
         ▼
 ┌─ [DATA] B-E1.1 · Read R2's finished output ─────────────────────────── R2-C4 ──
 │ in:   r2_run_id, user_id
-│ do:   R2RunStore.get_finished_output(r2_run_id, user_id); None → load to tell apart
+│ do:   R2RunStore.get_finished_output(r2_run_id, user_id)   (one read, no second lookup)
 │ exit: ✔ { category_metric_plans, discovered_places, predefined_records } ──▶ B-E1.2
-│       ✖ no R2 row for this user ──▶ 404       ✖ R2 not finished ──▶ 409
-│       ✖ database error          ──▶ 503
+│       ✖ None (missing, another user's, or not finished) ──▶ 404
+│       ✖ database error ──▶ 503
 │ ✅ R3-C7 "checked before the row is created"
+│ ✅ decided: no 409 path. The page only offers R3 after R2 is finished, so an
+│    unfinished R2 reaching here is not designed for; the `finished` filter still
+│    stops it, as a 404.
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [DATA] B-E1.2 · Create the run ─────────────────────────────────── R3-C5 + R3-C4 ──
@@ -674,8 +839,7 @@ awaits it (short timeout). `CancelledError` lands at the current `await`. The me
 
 | Outcome | HTTP (E1) | Row after it | E3 shows | Screen |
 |---|---|---|---|---|
-| R2 run missing / another user's | 404 | none | — | SCREEN R2 |
-| R2 run not finished | 409 | none | — | SCREEN R2 |
+| R2 run missing, another user's, or not finished | 404 | none | — | SCREEN R2 |
 | Database down before the row | 503 | none | — | try later |
 | Accepted | 202 | `running` | `running`, `completed_step` | SCREEN P |
 | Finished | (202 earlier) | `finished`, state + output | `result` | SCREEN R3 |
@@ -761,7 +925,7 @@ one execution live at a time.
 ### B5.1 Status lifecycle
 
 ```
-   (no row) ── 404 / 409 / 503 before the row ──▶ (still no row)
+   (no row) ── 404 / 503 before the row ──▶ (still no row)
       │
       │ B-E1.2 INSERT                       attempts = 0, completed_step = null
       ▼

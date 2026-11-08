@@ -49,8 +49,10 @@ from src.services.deep_search.feature_schemas.schemas import (
 from src.services.deep_search.r1_run_coordinator import R1RunCoordinator
 from src.services.deep_search.r1_run_store import (
     R1_WORKFLOW_VERSION,
+    dump_r1_output,
     dump_state,
     dump_step_output,
+    load_r1_output,
     load_step_output,
 )
 from src.services.deep_search.requirement_interpretation import UserRequirementsInterpretation
@@ -212,6 +214,7 @@ class FakeRunStore:
         self.steps: dict[str, dict[str, dict]] = {}
         self.step_history: list[tuple[str, str, str]] = []  # (run_id, step_id, new status)
         self.completed_update_attempts = 0
+        self.finish_writes = 0
 
     @staticmethod
     def _now() -> str:
@@ -248,6 +251,28 @@ class FakeRunStore:
             return False
         row.update(status=to, updated_at=self._now())
         return True
+
+    async def mark_finished(self, run_id, user_id, *, plans) -> bool:
+        # One UPDATE sets status and output together (R2-P1), only while `running`.
+        row = self._run(run_id, user_id)
+        if row is None or row["status"] != "running":
+            return False
+        self.finish_writes += 1
+        row.update(
+            status="finished",
+            output=json.loads(json.dumps(dump_r1_output(plans))),
+            updated_at=self._now(),
+        )
+        return True
+
+    async def get_finished_output(self, run_id, user_id):
+        # SELECT output, workflow_version WHERE run_id AND user_id AND status = 'finished'.
+        row = self._run(run_id, user_id)
+        if row is None or row["status"] != "finished" or row.get("output") is None:
+            return None
+        if row["workflow_version"] != R1_WORKFLOW_VERSION:
+            raise StateVersionMismatchError(row["workflow_version"], R1_WORKFLOW_VERSION)
+        return load_r1_output(row["output"])
 
     async def claim_retry(self, run_id, user_id, *, expected_attempts) -> bool:
         row = self._run(run_id, user_id)
@@ -863,3 +888,66 @@ async def test_endpoints_answer_503_when_runs_are_not_configured() -> None:
         assert response.json() == {"error": "Requirement interpretation is not available"}
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------------------------
+# R2-P1: R1's finished output (one write with `finished`, one read for R2)
+# ---------------------------------------------------------------------------------------------
+
+
+async def test_finish_writes_status_and_output_together_and_r2_reads_it_back() -> None:
+    coordinator, _, store = _coordinator(pause=False)
+    view = await coordinator.start_run(USER_A, _REQUIREMENTS)
+    assert view.status == "finished"
+    assert store.finish_writes == 1  # status and output in the same update
+    row = store.runs[view.run_id]
+    assert row["status"] == "finished" and row["output"] is not None
+
+    plans = await store.get_finished_output(view.run_id, USER_A)
+    assert _plans_json(plans) == _plans_json(view.result)
+
+
+async def test_finished_output_is_none_unless_finished_for_this_user() -> None:
+    coordinator, _, store = _coordinator(pause=True)
+    paused = await coordinator.start_run(USER_A, _REQUIREMENTS)
+    assert paused.status == "needs_answers"
+    assert await store.get_finished_output(paused.run_id, USER_A) is None
+
+    finished_coordinator, _, finished_store = _coordinator(pause=False)
+    finished = await finished_coordinator.start_run(USER_A, _REQUIREMENTS)
+    assert await finished_store.get_finished_output(finished.run_id, USER_B) is None
+    for status in ("running", "failed"):
+        finished_store.runs[finished.run_id]["status"] = status
+        assert await finished_store.get_finished_output(finished.run_id, USER_A) is None
+
+    # A run finished before the output column existed reads as None (R2 answers 404).
+    finished_store.runs[finished.run_id].update(status="finished", output=None)
+    assert await finished_store.get_finished_output(finished.run_id, USER_A) is None
+
+
+async def test_finished_output_under_another_workflow_version_raises() -> None:
+    coordinator, _, store = _coordinator(pause=False)
+    view = await coordinator.start_run(USER_A, _REQUIREMENTS)
+    store.runs[view.run_id]["workflow_version"] = R1_WORKFLOW_VERSION + 1
+    with pytest.raises(StateVersionMismatchError):
+        await store.get_finished_output(view.run_id, USER_A)
+
+
+def test_r1_output_codec_round_trips_through_json() -> None:
+    plans = [
+        CategoryMetricPlan(**plan)
+        for plan in _PLANS.dump_python(
+            _PLANS.validate_python(
+                [
+                    {
+                        "category_id": 0,
+                        "taxonomy_node": "gym",
+                        "depth": "basic_profile",
+                        "predefined_metrics": [],
+                        "specific_metrics": [],
+                    }
+                ]
+            )
+        )
+    ]
+    assert load_r1_output(json.loads(json.dumps(dump_r1_output(plans)))) == plans

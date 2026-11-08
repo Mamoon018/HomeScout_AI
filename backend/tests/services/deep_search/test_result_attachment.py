@@ -227,8 +227,9 @@ def test_run_writes_predefined_records_and_retains_enrichment() -> None:
     assert returned is state
     assert isinstance(state.predefined_records, dict)
     assert set(state.predefined_records) == {0, 1}
-    # amenity_records (the combined, versioned set) stays None until C3.2.5 runs.
-    assert state.amenity_records is None
+    # R2's state holds only R2's fields; R3's outputs live in SpecificMetricResolutionState (R2-C1).
+    assert not hasattr(state, "amenity_records")
+    assert not hasattr(state, "resolution_results")
     assert state.enrichment == before  # retained, not cleared
 
 
