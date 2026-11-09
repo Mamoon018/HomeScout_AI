@@ -5,5 +5,9 @@ node_modules
 dist
 backend/certs/
 
+# Python bytecode (regenerated automatically on import)
+__pycache__/
+*.py[cod]
+
 # Sample-run outputs (local only, never committed)
 backend/src/services/deep_search/sample_output/
