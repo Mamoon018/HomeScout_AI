@@ -114,8 +114,16 @@ class AmenitySearch:
         routes_concurrency: int = DEFAULT_ROUTES_CONCURRENCY,
         global_places_semaphore: asyncio.Semaphore | None = None,
         owns_clients: bool = True,
+        max_places_per_category: int | None = None,
     ) -> None:
         self._places_client = places_client
+        # Test-cost cap (None = no limit): Google is asked for at most this many places per
+        # category. Discovery and the routing re-search use the same count, so they rank the same set.
+        self._max_result_count = (
+            DISCOVERY_MAX_RESULTS
+            if max_places_per_category is None
+            else min(DISCOVERY_MAX_RESULTS, max_places_per_category)
+        )
         self._routes_client = routes_client
         # R2-C2 Iteration 1: per-run instances share the app's Places/Routes clients
         # (`owns_clients` False, so closing a run never closes them) and one process-wide Places
@@ -238,7 +246,7 @@ class AmenitySearch:
             longitude=origin.longitude,
             radius_meters=radius_km * _METERS_PER_KM,
             field_mask=field_mask,
-            max_result_count=DISCOVERY_MAX_RESULTS,
+            max_result_count=self._max_result_count,
         )
         logger.info(
             json.dumps(
@@ -423,7 +431,7 @@ class AmenitySearch:
                     radius_meters=radius_km * _METERS_PER_KM,
                     primary_type=plan.taxonomy_node,
                     travel_mode=mode,
-                    max_result_count=DISCOVERY_MAX_RESULTS,
+                    max_result_count=self._max_result_count,
                 )
             except PlacesClientError as exc:
                 raise RoutingRetrievalError(
@@ -756,4 +764,5 @@ def create_amenity_search(
         create_routes_async_client(settings),
         llm_caller=caller,
         owns_caller=owns_caller,
+        max_places_per_category=settings.max_places_per_category,
     )

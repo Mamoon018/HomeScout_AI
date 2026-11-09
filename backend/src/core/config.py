@@ -48,6 +48,13 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="R2_STALE_AFTER_SECONDS",
     )
+    # An R3 run still `running` with no write for this long crashed and can be reclaimed by a retry
+    # (R3-C6). STEP 4 writes nothing for minutes, so this must stay above the longest STEP 4.
+    r3_stale_after_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        validation_alias="R3_STALE_AFTER_SECONDS",
+    )
     google_maps_api: str = Field(validation_alias="GOOGLE_MAPS_API")
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
@@ -103,6 +110,43 @@ class Settings(BaseSettings):
         default=3,
         ge=1,
         validation_alias="METRIC_RESOLUTION_BREAKER_THRESHOLD",
+    )
+
+    # Test-cost caps on how much work flows R1 → R2 → R3. None (unset) means no limit. R1 keeps the
+    # first N categories (those with specific metrics first) and the first N specific metrics per
+    # category; R2 asks Google for at most N places per category.
+    max_categories: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias="MAX_CATEGORIES",
+    )
+    max_places_per_category: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias="MAX_PLACES_PER_CATEGORY",
+    )
+    max_specific_metrics: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias="MAX_SPECIFIC_METRICS",
+    )
+
+    # R3-C2 Iteration 1: one app-wide limit per web provider, shared by every R3 run's gateway and
+    # taken after the run's own limit. Set each from that provider's plan (limits are per key).
+    r3_parallel_search_concurrency: int = Field(
+        default=10,
+        ge=1,
+        validation_alias="R3_PARALLEL_SEARCH_CONCURRENCY",
+    )
+    r3_firecrawl_concurrency: int = Field(
+        default=2,
+        ge=1,
+        validation_alias="R3_FIRECRAWL_CONCURRENCY",
+    )
+    r3_firecrawl_rate_per_minute: int = Field(
+        default=10,
+        ge=1,
+        validation_alias="R3_FIRECRAWL_RATE_PER_MINUTE",
     )
 
     @property

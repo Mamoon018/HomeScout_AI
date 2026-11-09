@@ -712,6 +712,7 @@ happens in a background task, and the page learns the outcome only by polling E3
 metrics in the background, saving STEP 3 as soon as it completes cleanly.
 
 **Endpoint.** `POST /api/specific-metric-resolution/runs` · body `{ "r2_run_id": "<uuid>" }`
+(not a UUID, or any other field in the body → `422` at G2; ✅ R3-C8 "Models")
 
 ### B2.1 The request part (returns in milliseconds)
 
@@ -727,8 +728,10 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
 │ do:   R2RunStore.get_finished_output(r2_run_id, user_id)   (one read, no second lookup)
 │ exit: ✔ { category_metric_plans, discovered_places, predefined_records } ──▶ B-E1.2
 │       ✖ None (missing, another user's, or not finished) ──▶ 404
+│       ✖ StateVersionMismatchError (R2 output saved under another version)
+│         ──▶ 404, log r3_run.rejected reason=r2_version_mismatch
 │       ✖ database error ──▶ 503
-│ ✅ R3-C7 "checked before the row is created"
+│ ✅ R3-C7 "checked before the row is created"; "the R2 input saved under another version"
 │ ✅ decided: no 409 path. The page only offers R3 after R2 is finished, so an
 │    unfinished R2 reaching here is not designed for; the `finished` filter still
 │    stops it, as a 404.
@@ -745,11 +748,14 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [BIZ] B-E1.3 · Schedule the background task ─────────────────────────── R3-C7 ──
-│ do:   task = asyncio.create_task(execute(run_id, user_id, state, attempts=0,
+│ do:   run_id_var = run_id            (BEFORE create_task: the task inherits it)
+│       task = asyncio.create_task(execute(run_id, user_id, state, attempts=0,
 │                                          resume_after=None))
-│       app.state.r3_tasks.add(task); task.add_done_callback(r3_tasks.discard)
+│       app.state.r3_tasks[run_id] = (task, user_id, completed_step=None)
+│       done callback: remove the entry only if it still holds THIS task
 │ exit: ✔ ──▶ B-E1.4
-│ ✅ R3-C7 "keeping tasks alive"
+│ ✅ R3-C7 "keeping tasks alive", R3-C7 Iteration 2 (dict keyed by run_id)
+│ ✅ R3-C3 run_id_var set before create_task
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [RESP] B-E1.4 ─────────────────────────────────────────────────────── R3-C8 ──
@@ -763,18 +769,33 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
 ```
 ┌─ [BG] B-BG.0 · Task start ──────────────────────────────────────── R3-C7 + R3-C2 ──
 │ in:   run_id, user_id, state, fence n (attempts), resume_after
-│ do:   run_id_var = run_id
-│       r3 = create_specific_metric_resolution(settings, llm_caller=shared)
+│       (run_id_var already set by B-E1.3 / B-E2.4)
+│ do:   r3 = create_specific_metric_resolution(settings, llm_caller=shared,
+│                                              app-wide provider limits)
 │            → NEW McpToolGateway for this run only; owns_caller = False
+│            → its own slots (Parallel 4, Firecrawl 2) + the APP-WIDE ones:
+│              Parallel search slots (10), Firecrawl slots (2),
+│              Firecrawl rate limiter (10/min, replaces the gateway's own bucket)
+│       step tracking: in_flight = discovery_batch until the STEP 3 callback
+│                      (resume after discovery_batch → in_flight = pipelines);
+│                      a gateway / capability / catalog error gets no step row
 │ exit: ✔ ──▶ B-BG.1
 │ ✅ R3-C2 one instance per run (a shared gateway would be closed by another run's finally)
+│ ✅ R3-C2 Iteration 1 one app-wide limit per provider, behind the run's own limit
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [BIZ] B-BG.1 · r3.run_specific_metric_resolution(state, resume_after, on_step_completed) ──
 │ ┌─ unchanged method body (inside view: R3_M1_Traceflow.md) ─────────────────────────────┐
 │ │ caller check · breaker = new _CircuitBreaker(threshold)        (fresh on every attempt)│
 │ │ gateway.open()   Parallel + Firecrawl sessions, capability check                       │
-│ │   ✖ McpConnectionError (retryable) · McpToolUnavailableError (not retryable)           │
+│ │   ✖ McpConnectionError: retryable, unless its __cause__ chain holds a 401 / 403        │
+│ │     (refused key) ──▶ not retryable, log r3_run.config_error   (R3-C7 Iteration 1)     │
+│ │   ✖ McpToolUnavailableError (not retryable)                                            │
+│ │ every web call in STEP 3 / STEP 4, per provider:                                       │
+│ │   Parallel search:  run slot → app-wide search slot → timeout → call                   │
+│ │   Firecrawl call:   app-wide rate token → run slot → app-wide Firecrawl slot           │
+│ │                     → timeout → call                                                   │
+│ │   (a Parallel call never waits on a Firecrawl slot; waits stay outside the timeout)    │
 │ │ STEP 1 plan_index · STEP 2 work items       (always recomputed from saved inputs)      │
 │ │ phase-1 catalog (if work items) ✖ MetricResolutionValidationError (not retryable)      │
 │ │                                                                                        │
@@ -793,19 +814,37 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
 │ exit: ✔ final state ──▶ B-BG.3
 │       ✖ any error above, or one raised by the callback ──▶ B-BG.4
 │ ✅ R3-C3 Approach 2 (two optional params + one awaited call at the existing barrier)
+│ ⚠ B27 waiting for an app-wide slot makes STEP 3 / STEP 4 longer (counts toward stale_after)
 └──────────────────────────────────────────────────────────────────────────────────
         │ (called from inside STEP 3's barrier)
         ▼
 ┌─ [DATA] B-BG.2 · Checkpoint after STEP 3 (the callback) ──────────── SAVE · FENCE ──
 │ in:   step = "discovery_batch", state, breaker_open
-│ do:   breaker_open = true  ──▶ DO NOT SAVE (verdicts are outage-made `none`)     ✅ R3-C3
-│       breaker_open = false ──▶ UPDATE r3_runs SET state = R3-C4 JSON,
-│                                   completed_step = "discovery_batch"
-│                                WHERE run_id AND user_id AND status = running AND attempts = n
+│ do:   breaker_open = true  ──▶ NO checkpoint (verdicts are outage-made `none`)  ✅ R3-C3
+│                               completed_step stays null
+│                               save_step_degraded right away: `discovery_batch`
+│                               degraded with STEP 3's data (insert, or started →
+│                               degraded for a claimed step)
+│       breaker_open = false ──▶ 1. UPDATE r3_runs SET state = R3-C4 JSON,
+│                                      completed_step = "discovery_batch"
+│                                   WHERE run_id AND user_id AND status = running
+│                                     AND attempts = n
+│                                2. only if 1 matched, the step row (R3-C5 Iteration 1):
+│                                   first run / reclaimed crash → insert_step:
+│                                     { run_id, "discovery_batch", completed, output }
+│                                   claimed retry step → complete_claimed_step:
+│                                     started → completed
+│                                   output = {schema_version, data: STEP 3's three
+│                                             result dicts, tuple keys encoded}
+│                                3. r3_tasks[run_id].completed_step = "discovery_batch"
+│       in_flight = pipelines (from here on, an error is recorded on `pipelines`)
 │ exit: ✔ saved / skipped ──▶ back into B-BG.1 (STEP 4 starts)
-│       ✖ 0 rows    ──▶ raise RunSupersededError  (leaves the method through its finally)
-│       ✖ db error  ──▶ raise RunStoreError       (same path)
+│       ✖ 0 rows on 1 ──▶ raise RunSupersededError (leaves the method through its finally)
+│       ✖ db error on 1 ──▶ raise RunStoreError    (same path; saved as stage run_store)
+│       ✖ step row duplicate / claimed row moved ──▶ log r3_run.step_conflict, stop
+│       ✖ db error on 2 ──▶ log r3_run.step_record_failed, carry on (run row is right)
 │ ✅ R3-C3 table: STEP 3 is costly + non-reproducible + STEP 4 follows
+│ ✅ R3-C5 Iteration 1: run row first, step row second; the run row decides resume
 └──────────────────────────────────────────────────────────────────────────────────
         │
         ├─────────────────────────────────────────────┐
@@ -816,40 +855,58 @@ metrics in the background, saving STEP 3 as soon as it completes cleanly.
 │ output = resolution_results as a list of   │  │   status = failed, failure_stage, message      │
 │   {category_id, place_id, value}           │  │   retryable = rule (R3-C7 table) AND           │
 │ retryable = false                          │  │               attempts < MAX (1)               │
-│ ✖ 0 rows ──▶ superseded (log)              │  │   state, completed_step UNTOUCHED              │
-│ ✖ db error ──▶ log; row stays running      │  │   store down → logged; row stays running       │
-│   ──▶ reclaimable after stale_after        │  │   ──▶ reclaimable after stale_after            │
+│ failure_stage, failure_message = null      │  │   state, completed_step UNTOUCHED              │
+│ then, only if it matched, step rows:       │  │ then, only if it matched, step rows:           │
+│   "pipelines" completed, output =          │  │   in_flight step → save_step_failed            │
+│   {schema_version, data:                   │  │     { error_type, error_message, retryable =   │
+│    resolution_results}  (insert_step, or   │  │       the run's }  (insert, or started→failed  │
+│    complete_claimed_step if claimed)       │  │       for a claimed step)                      │
+│ ✖ 0 rows ──▶ superseded (log), no row      │  │   setup error / nothing in flight → no row     │
+│ ✖ db error ──▶ B-BG.4, stage run_store     │  │ store down → log r3_run.failed_not_saved;      │
+│   (retryable while attempts < MAX)         │  │   row stays running                            │
+│ ✖ step row error ──▶ log only              │  │   ──▶ reclaimable after stale_after            │
+│ ✅ R3-C5 "finish clears failure fields"    │  │ step row error ──▶ log only                    │
 └────────────────────────────────────────────┘  └────────────────────────────────────────────────┘
         │                                             │
         └───────────────────────┬─────────────────────┘
                                 ▼
 ┌─ [BG] B-BG.5 · Task end ─────────────────────────────────────────────── R3-C7 ──
-│ finally: await r3.aclose()   (this run's gateway; shared caller NOT closed)
-│          task removed from app.state.r3_tasks (done callback)
+│ finally: await r3.aclose()   (this run's gateway; shared caller NOT closed;
+│                               app-wide provider limits NOT closed)
+│          done callback: remove app.state.r3_tasks[run_id] only if it still holds
+│          THIS task (a reclaimed run may have a newer entry); always AFTER the save
+│          a non-cancel exception left the task ──▶ log r3_run.task_crashed (ERROR)
 │ The page sees the outcome only through E3.
+│ ✅ R3-C7 Iteration 2 "removal", "order"
 └──────────────────────────────────────────────────────────────────────────────────
 ```
 
-**Shutdown during B-BG.1** (deploy, restart): `lifespan` cancels each task in `r3_tasks` and
-awaits it (short timeout). `CancelledError` lands at the current `await`. The method's
-`finally` closes the gateway, and the task saves the run as failed with
-`retryable = attempts < MAX`, best effort. ✅ R3-C7 "shutdown"
+**Shutdown during B-BG.1** (deploy, restart): `lifespan` first calls the R3 coordinator's
+`shutdown()`. It cancels each task in `r3_tasks` and awaits them, with R3's own timeout
+(`R3_SHUTDOWN_TIMEOUT_SECONDS = 10`). `CancelledError` lands at the current `await`. The method's
+`finally` closes the run's gateway, then the task saves the run as failed with stage `cancelled`
+and `retryable = attempts < MAX`, best effort, and re-raises. Only after that does `lifespan` close the
+shared LLM caller and the database client. A timeout logs `r3_run.shutdown_timeout` with the
+pending run IDs; those rows stay `running` and are reclaimable. ✅ R3-C7 "shutdown"
 
 **B-E1 / background outcomes at a glance**
 
-| Outcome | HTTP (E1) | Row after it | E3 shows | Screen |
-|---|---|---|---|---|
-| R2 run missing, another user's, or not finished | 404 | none | — | SCREEN R2 |
-| Database down before the row | 503 | none | — | try later |
-| Accepted | 202 | `running` | `running`, `completed_step` | SCREEN P |
-| Finished | (202 earlier) | `finished`, state + output | `result` | SCREEN R3 |
-| Gateway can't connect | (202) | `failed`, `retryable:true`, `completed_step=null` | `retryable:true` | SCREEN F |
-| Breaker open / provider down in STEP 4 | (202) | `failed`, `retryable:true`, `completed_step=discovery_batch` *if STEP 3 was clean* | `retryable:true` | SCREEN F |
-| Breaker opened during STEP 3 | (202) | `failed`, `retryable:true`, `completed_step=null` (STEP 3 not saved) | `retryable:true` | SCREEN F |
-| Catalog / tool missing | (202) | `failed`, `retryable:false` | `retryable:false` | SCREEN S |
-| Unexpected error | (202) | `failed`, `retryable:false`, stage `unexpected` | `retryable:false` | SCREEN S |
-| Shutdown mid-run | (202) | `failed`, `retryable:true` (best effort) | `retryable:true` | SCREEN F |
-| Hard crash | (202) | stays `running` | `running` until stale | SCREEN P (⚠ B5) |
+| Outcome | HTTP (E1) | Row after it | Step rows (R3-C5 Iteration 1) | E3 shows | Screen |
+|---|---|---|---|---|---|
+| Body not a UUID / extra field | 422 | none | none | — | fix input |
+| R2 run missing, another user's, not finished, or another output version | 404 | none | none | — | SCREEN R2 |
+| Database down before the row | 503 | none | none | — | try later |
+| Accepted | 202 | `running` | none yet | `running`, `completed_step` (from memory) | SCREEN P |
+| Finished | (202 earlier) | `finished`, state + output | `discovery_batch` + `pipelines` completed | `result` | SCREEN R3 |
+| Gateway can't connect | (202) | `failed`, `retryable:true`, `completed_step=null` | none | `retryable:true` | SCREEN F |
+| Gateway key refused (401 / 403 on the cause chain) | (202) | `failed`, `retryable:false`, logs `r3_run.config_error` | none | `retryable:false` | SCREEN S |
+| Breaker open / provider down in STEP 4 | (202) | `failed`, `retryable:true`, `completed_step=discovery_batch` *if STEP 3 was clean* | `discovery_batch` completed, `pipelines` failed | `retryable:true` | SCREEN F |
+| Breaker opened during STEP 3 | (202) | `failed`, `retryable:true`, `completed_step=null` (no checkpoint) | `discovery_batch` degraded (with data), `pipelines` failed | `retryable:true` | SCREEN F |
+| Database error on the checkpoint or finish write | (202) | `failed`, stage `run_store`, `retryable:true` | the running step failed | `retryable:true` | SCREEN F |
+| Catalog / tool missing | (202) | `failed`, `retryable:false` | none | `retryable:false` | SCREEN S |
+| Unexpected error | (202) | `failed`, `retryable:false`, stage `unexpected` | the running step failed | `retryable:false` | SCREEN S |
+| Shutdown mid-run | (202) | `failed`, stage `cancelled`, `retryable = attempts < MAX` (best effort) | the running step failed | `retryable` | SCREEN F (or S if the retry was used) |
+| Hard crash | (202) | stays `running` | none for the running step | `running` until stale | SCREEN P (⚠ B5) |
 
 ---
 
@@ -864,8 +921,10 @@ one execution live at a time.
 ┌─ [UA] B-E2.0 · Click Retry ── POST, no body ──▶ G1 ──▶ G2 ─────────────────────────────
         ▼
 ┌─ [DATA] B-E2.1 · Load the run ────────────────────────────────── R3-C5 + R3-C4 ──
-│ do:   SELECT r3_runs by run_id + user_id; decode state (tuple keys rebuilt) + version
+│ do:   SELECT r3_runs by run_id + user_id, with its r3_run_steps rows embedded
+│       (as R2's load_run); decode state (tuple keys rebuilt) + version
 │ exit: ✔ ──▶ B-E2.2    ✖ 404    ✖ version mismatch ──▶ save failed, not retryable ──▶ 409
+│       ✖ step rows missing from the reply ──▶ 503 (fail loudly, as R2)
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [BIZ] B-E2.2 · Retry pre-check ───────────────────────────────────────── R3-C6 ──
@@ -875,20 +934,48 @@ one execution live at a time.
         ▼
 ┌─ [DATA] B-E2.3 · Claim the run (THE guard) ───────────────────────────── R3-C6 ──
 │ same single conditional UPDATE as A-E2.3, on r3_runs
-│ exit: ✔ 1 row ──▶ B-E2.4 (fence n + 1)   ✖ 0 rows ──▶ 409 "Another retry … already started"
+│ then claim_step on every step row at or after the resume step that is
+│ `failed` or `degraded` (resume step = discovery_batch when completed_step = null,
+│ else pipelines):
+│   UPDATE r3_run_steps SET status = "started", error and output cleared
+│   WHERE run_id AND step_id AND status IN ("failed", "degraded")
+│   (a stale-reclaimed crash has no such row: nothing to claim; the step is
+│    inserted as new at its write point)
+│ exit: ✔ 1 row (+ rows claimed, or nothing to claim) ──▶ B-E2.4 (fence n + 1)
+│       ✖ 0 rows ──▶ 409 "Another retry … already started"
+│       ✖ a step row moved ──▶ set run failed, not retryable ──▶ 409 "start again"
+│ ✅ R3-C6; R3-C5 Iteration 1 `claim_step` (degraded is claimed like failed)
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [BIZ] B-E2.4 · Schedule the resumed task ─────────────────────────────── R3-C7 ──
-│ do:   create_task(execute(run_id, user_id, state, attempts = n + 1,
+│ do:   run_id_var = run_id   (before create_task)
+│       create_task(execute(run_id, user_id, state, attempts = n + 1,
 │                           resume_after = completed_step))
+│       app.state.r3_tasks[run_id] = (task, user_id, completed_step from the row)
 │ exit: ✔ ──▶ 202 { run_id, status:"running", completed_step } ──▶ SCREEN P (polls E3)
 │ background: B-BG.0 → B-BG.1 with resume_after:
-│     null              → STEP 3 runs (and is saved if clean) → STEP 4
+│     null              → STEP 3 runs (checkpointed if clean, degraded row if not) → STEP 4
 │     "discovery_batch" → STEP 3 SKIPPED → STEP 4        (STEP 3 calls made once in total)
+│   claimed rows complete at their write point (B-BG.2 / B-BG.3, started → completed),
+│   or go started → failed / degraded at B-BG.4
 │   outcome ──▶ B-BG.3 / B-BG.4 with FENCE n + 1; a failure now is retryable:false
 │ ✅ R3-C3 resume rule; R3-C9 "resume parity"
 └──────────────────────────────────────────────────────────────────────────────────
 ```
+
+**B-E2 exits at a glance**
+
+| Exit | HTTP | Row after it | Screen next |
+|---|---|---|---|
+| Run missing or another user's | 404 | unchanged | SCREEN S |
+| Version mismatch | 409 | `failed`, `retryable:false` | SCREEN S |
+| Finished / not retryable / limit used | 409 | unchanged | SCREEN R3 or S |
+| Still running, not stale | 409 `status:running` | unchanged | keep polling E3 |
+| Lost the claim to another request | 409 | owned by the winner | call E3 |
+| Run claimed but a step row moved | 409 | `failed`, `retryable:false` | SCREEN S |
+| Claimed, task started | 202 | `running`, `attempts=n+1` | SCREEN P, poll E3 |
+| Background: finished | — (via E3) | `finished`, state + output | SCREEN R3 |
+| Background: fails again | — (via E3) | `failed`, `retryable:false` | SCREEN S |
 
 ---
 
@@ -900,6 +987,16 @@ one execution live at a time.
 ┌─ [UA] B-E3.0 · Poll / page load ────────────────────────────────────────────────
 │ do:   every few seconds while status is running; also on page load (sessionStorage)
 │ exit: ✔ ──▶ G1 ──▶ G2
+└──────────────────────────────────────────────────────────────────────────────────
+        ▼
+┌─ [BIZ] B-E3.0a · In-memory check (no I/O) ───────────────── R3-C7 Iteration 2 ──
+│ do:   look up run_id in app.state.r3_tasks
+│ exit: ✔ found, same user_id ──▶ 200 { run_id, status:"running", completed_step }
+│                                 (completed_step from the entry: set only after the
+│                                  STEP 3 checkpoint write matched) ──▶ SCREEN P
+│       ✖ found, another user's ──▶ 404 (same answer as the DB read would give)
+│       ✔ not found ──▶ B-E3.1 (finished, failed, crashed, or another process)
+│ ⚠ B28 per process: a run started by another worker is only found by B-E3.1
 └──────────────────────────────────────────────────────────────────────────────────
         ▼
 ┌─ [DATA] B-E3.1 · Load the run (read-only) ─────────────────────────────── R3-C5 ──
@@ -930,7 +1027,7 @@ one execution live at a time.
       │ B-E1.2 INSERT                       attempts = 0, completed_step = null
       ▼
    running ──B-BG.2 SAVE (breaker closed)──▶ running (completed_step = discovery_batch) ──B-BG.3──▶ finished
-      │      B-BG.2 SKIP (breaker open)  ──▶ running (completed_step = null)            ──B-BG.4──▶ failed
+      │      B-BG.2 NO CHECKPOINT (breaker open) ──▶ running (completed_step = null)    ──B-BG.4──▶ failed
       │                                                                                    │
       └──B-BG.4──▶ failed (completed_step = null)                                          │
                       │                                                                    │
@@ -947,6 +1044,27 @@ one execution live at a time.
    R2 run deleted ──▶ cascade deletes the R3 row; a live task's next write matches nothing.
 ```
 
+**Step-row lifecycle** (`r3_run_steps`, a record only; the run row above decides resume and
+status). ✅ R3-C5 Iteration 1
+
+```
+   discovery_batch:
+     (no row) ──B-BG.2 checkpoint matched──────────────────▶ completed   (never changes again)
+     (no row) ──breaker open at B-BG.2, written at once──▶ degraded    (holds STEP 3's data)
+     (no row) ──error in STEP 3, B-BG.4 matched────────────▶ failed
+     degraded / failed ──B-E2.3 claim──▶ started (error + output cleared)
+     started ──B-BG.2 checkpoint──▶ completed     started ──breaker open again──▶ degraded
+     started ──error, B-BG.4──▶ failed
+
+   pipelines:
+     (no row) ──B-BG.3 finish matched───▶ completed      (never written before the finish write)
+     (no row) ──error after the STEP 3 callback, B-BG.4──▶ failed
+     failed ──B-E2.3 claim──▶ started ──B-BG.3──▶ completed   /  ──B-BG.4──▶ failed
+
+   no row ever for: a gateway / capability / catalog error, a lost fence, a hard crash
+   a claimed row the retry never reaches stays started (record only, accepted)
+```
+
 ### B5.2 Data actions per endpoint, in order
 
 | # | Where | Store operation (R3-C5) | Columns written | Filter |
@@ -954,12 +1072,17 @@ one execution live at a time.
 | 1 | E1 | (R2) Get the finished output | — (read `r2_runs.output`) | `r2_run_id`, `user_id`, `finished` |
 | 2 | E1 | Create a run | initial columns, `status=running` | — (insert) |
 | 3 | BG | Save a checkpoint (only if breaker closed) | `state`, `completed_step=discovery_batch` | `running`, `attempts=n` |
-| 4 | BG | Save as finished | `status`, `state`, `output`, `retryable=false` | `attempts=n` |
+| 3a | BG | Step row, only if 3 matched | `discovery_batch` completed (insert, or claimed → completed) | PK / `status=started` |
+| 3b | BG | Step row when the breaker is open (no run write) | `discovery_batch` degraded with STEP 3's data (insert, or claimed → degraded) | PK / `status=started` |
+| 4 | BG | Save as finished | `status`, `state`, `output`, `retryable=false`, `failure_*=null` | `attempts=n` |
+| 4a | BG | Step rows, only if 4 matched | `pipelines` completed | PK / `status=started` |
 | 4' | BG | Save as failed (not on lost fence) | `status`, `failure_*`, `retryable` | `attempts=n` |
-| 5 | E2 | Load a run | — (read) | `run_id`, `user_id` |
+| 4'a | BG | Step rows, only if 4' matched | the running step failed | PK / `status=started` |
+| 5 | E2 | Load a run | — (read, step rows embedded) | `run_id`, `user_id` |
 | 6 | E2 | Claim for retry | `status=running`, `attempts=n+1`, `retryable=false` | as A-E2.3 |
-| 7 | BG | Checkpoint / finished / failed | as 3 / 4 / 4' | `attempts=n+1` |
-| 8 | E3 | Load a run | — (read, polled) | `run_id`, `user_id` |
+| 6a | E2 | Claim step rows | `failed` / `degraded` → `started`, error and output cleared | `status in (failed, degraded)` |
+| 7 | BG | Checkpoint / finished / failed (+ step rows) | as 3 / 4 / 4' | `attempts=n+1` |
+| 8 | E3 | Load a run (only when not live in memory) | — (read, polled) | `run_id`, `user_id` |
 
 ### B5.3 Paid work per path (cost and wait time on SCREEN P)
 
@@ -988,6 +1111,17 @@ run_specific_metric_resolution(state,                         ◀── annotati
 │ STEP 4 · STEP 5 · finally aclose                            ── unchanged
 ```
 
+The gateway changes in one place, outside the method (R3-C2 Iteration 1):
+
+```
+McpToolGateway(parallel, firecrawl, *, ...,
+               global_search_semaphore=None,     ◀── NEW, default = today's behavior
+               global_firecrawl_semaphore=None,  ◀── NEW
+               firecrawl_rate_limiter=None)      ◀── NEW, replaces its own bucket when given
+_single_call: rate token → run slot → app-wide slot (if given) → timeout → call_tool
+              retries, timeouts, parsing, failure kinds ── unchanged
+```
+
 Everything else in R3, including every STEP 3/4 decision, degradation and log line, is untouched.
 ✅ Scope Boundary
 
@@ -999,7 +1133,7 @@ Everything else in R3, including every STEP 3/4 decision, degradation and log li
 
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
-| B5 | B-E3.2 | After a hard crash, the row reads `running` for up to 30 min, and retry returns `409 running`. The customer watches a progress screen that will never move. | ⚠ open: report stale `running` as retryable in E3, or let the page offer Retry after a timeout |
+| B5 | B-E3.2 | After a hard crash, the row reads `running` for up to 30 min, and retry returns `409 running`. The customer watches a progress screen that will never move. | ⚠ open: report stale `running` as retryable in E3, or let the page offer Retry after a timeout. At one process, "`running` in the row but not in `r3_tasks`" means a crash (R3-C7 Iteration 2), but that breaks with several workers |
 | B8 | B5.1 | A run that finishes with some amenities as `pipeline_error` or `resolution_call_failed` is `finished` and can't be retried. Those metrics stay unresolved unless a new R3 run is started (which redoes everything). | ✅ by design (the whole step is the unit; finished is terminal); note for product |
 | B9 | B-E1.4 | A start request whose `202` is lost (refresh at that moment) leaves the run going on the server with no `run_id` on the page. | ⚠ open, low impact (the window is milliseconds) |
 | B10 | B-E3.0 | Progress is coarse: only `null` → `discovery_batch` → finished. STEP 4 (the longest part) shows no movement. | ✅ accepted (progress isn't in the problem statement) |
@@ -1008,21 +1142,25 @@ Everything else in R3, including every STEP 3/4 decision, degradation and log li
 
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
-| B11 | R3-C6 | `stale_after = 30 min` must be longer than the longest STEP 4. Nothing measures STEP 4 yet. If STEP 4 runs longer, a live run can be reclaimed and both executions spend money. Fencing keeps the data correct, not the cost. | ⚠ open until R3-C9 records live STEP 4 durations |
-| B12 | B-BG.2 | The degraded-STEP-3 rule uses `breaker.open` only. STEP 3 items can also end as `none` from per-item provider failures *below* the breaker threshold, and those are saved. A retry then won't rediscover them. | ⚠ open: accepted as "real result" by today's logic, or extend the rule (for example, don't save when any item degraded on `availability`) |
-| B13 | B-BG.0 | One gateway per run (R3-C2) means the Firecrawl token bucket and search semaphores are per run. Two parallel runs can exceed the account's real rate limit and get `429`s (retried by the gateway, then `failed` results). | ✅ accepted for now (R3-C2); cap on active runs is a follow-up |
-| B14 | Shutdown | A cancelled task's "save as failed" is itself an `await` on the database during shutdown. If the lifespan timeout is hit first, the row stays `running` (→ B5). | ✅ covered by stale reclaim; ⚠ choose the lifespan timeout |
+| B11 | R3-C6 | `stale_after = 30 min` must be longer than the longest STEP 4, including waits for the app-wide provider limits (B27). Nothing measures STEP 4 yet. If STEP 4 runs longer, a live run can be reclaimed and both executions spend money. Fencing keeps the data correct, not the cost. | ⚠ open until R3-C9 records live STEP 4 durations, alone and with two runs in parallel |
+| B12 | B-BG.2 | The degraded-STEP-3 rule uses `breaker.open` only. STEP 3 items can also end as `none` from per-item provider failures *below* the breaker threshold, and those are saved. A retry then won't rediscover them. | ⚠ open: accepted as "real result" by today's logic, or extend the rule (for example, don't save when any item degraded on `availability`). If extended, the `degraded` step status (R3-C5 Iteration 1) can record it |
+| B13 | B-BG.0 | One gateway per run (R3-C2) meant the Firecrawl token bucket and the search and Firecrawl semaphores were per run, so two parallel runs could exceed the account's real limit and get `429`s. | ✅ resolved (R3-C2 Iteration 1): one app-wide limit per provider (Parallel 10 slots; Firecrawl 2 slots + 10/min), behind each run's own limit |
+| B14 | Shutdown | A cancelled task's "save as failed" is itself an `await` on the database during shutdown, and the gateway close in the method's `finally` runs before it. If the timeout is hit first, the row stays `running` (→ B5). | ✅ R3-C7 "shutdown": R3's own timeout of 10 s, R3 tasks before the LLM caller and the database close, `r3_run.shutdown_timeout` logs what is left; stale reclaim covers the rest |
 | B15 | B-BG.1 | A fresh breaker on resume means an outage that lasts across the retry trips the breaker again, and the one retry is used up. | ✅ accepted (retry is manual; the customer retries when ready) |
 | B16 | B-BG.1 | STEP 4's internal `run_id = uuid4().hex` differs from the HTTP `run_id`. Logs carry both (the HTTP one via `run_id_var`). | ✅ decided (R3-C3), note for log readers |
-| B17 | B-BG.4 | The cancellation row in the R3-C7 table says "Yes" (retryable) without repeating the limit. This traceflow applies `attempts < MAX`. | ⚠ drift: confirm in R3-C7 |
-| B18 | B-E2.3 | The same OR-claim statement as A6, on `r3_runs`. | ⚠ as A6 |
-| B19 | B-BG.2 | The callback is awaited inside the method's `try` with the gateway open, so a slow database write holds the MCP sessions open a little longer. | ✅ negligible (one row update) |
+| B17 | B-BG.4 | The cancellation row in the R3-C7 table said "Yes" (retryable) without the limit. | ✅ resolved: R3-C7 states that every "Yes" means `attempts < MAX`, cancellation included |
+| B18 | B-E2.3 | The same OR-claim statement as A6, on `r3_runs`. | ⚠ as A6 (manual check on the dev database, R3-C9) |
+| B19 | B-BG.2 | The callback is awaited inside the method's `try` with the gateway open, so a slow database write holds the MCP sessions open a little longer. | ✅ negligible (one row update, plus one step row) |
+| B25 | B-BG.4 | A refused LLM key is classified `availability` by the provider adapters, and the cause is gone by STEP 5's run-level raise. So the run is saved retryable, and the one retry fails the same way. Only happens when every provider in the chain refuses its key. | ⚠ open, risk accepted (R3-C7 Iteration 1): fixing it changes the shared LLM client's failure classes, which R1 and the breaker read |
+| B26 | B-BG.1 | The config-error check expects a `401` / `403` on `McpConnectionError`'s cause chain. The hosted Firecrawl endpoint's real error shape is not confirmed live. If the status isn't there, the run falls back to "retryable". | ⚠ open until the R3-C9 live check with a wrong key |
+| B27 | B-BG.1 | When an app-wide pool is full, a run waits for a slot, so STEP 3 / STEP 4 take longer. | ✅ accepted (R3-C2 Iteration 1); feeds B11 |
 
 ### B7.3 Architectural level (how the pieces fit)
 
 | ID | Box | What can go wrong | Coverage |
 |---|---|---|---|
-| B20 | B-E1.3 | Background tasks live in one worker process. With several workers, each worker cancels only its own tasks on shutdown, and a run is owned by whichever worker started it. All state is in `r3_runs`, so this is correct. | ✅ no shared in-memory state needed |
+| B20 | B-E1.3 | Background tasks live in one worker process. With several workers, each worker cancels only its own tasks on shutdown, and a run is owned by whichever worker started it. All state is in `r3_runs`, so this is correct. The app-wide provider limits are per process too, so with several workers each has its own pool. | ✅ no shared in-memory state needed for correctness; ⚠ the provider limits hold only at one process (MVP) |
+| B28 | B-E3.0a | The status memory check is per process: a run started by another worker isn't in this process's `r3_tasks`, so status falls back to the row. Correct, only slower. | ✅ accepted (one process at MVP), as R2's A22 |
 | B21 | B-E1.4 | Start and retry return `202` with no result. R3 is the only service whose action endpoints don't return the outcome, so the page needs one more pattern (polling). | ✅ chosen (R3-C7); consequence noted |
 | B22 | R3-C5 | `output` holds `resolution_results` (marked TEMPORARY). When STEP 6 lands, the output becomes `amenity_records` with a version bump, and in-flight runs then fail as not retryable. | ✅ decided (R3-C5) |
 | B23 | R3-C4 | The tuple-key encoding exists only in the R3 store. Any other reader of `r3_runs.state` (debug scripts, a future service) must use the store's loader, not plain JSON. | ✅ by design (one place knows the format) |
@@ -1030,10 +1168,9 @@ Everything else in R3, including every STEP 3/4 decision, degradation and log li
 
 ### B7.4 Where to look first
 
-1. **B11:** `stale_after` vs real STEP 4 time (double spend if wrong).
+1. **B11:** `stale_after` vs real STEP 4 time, now including waits for the app-wide limits (double spend if wrong).
 2. **B12:** which degraded STEP 3 results get saved.
 3. **B5:** a crashed run looks alive for up to 30 minutes.
-4. **B17 / A11:** the retry limit on cancellation.
-5. **B13:** rate limits with parallel runs.
+4. **B25 / B26:** refused keys that still read as retryable.
 
 The rest are product choices, or accepted trade-offs already written into the process flow.

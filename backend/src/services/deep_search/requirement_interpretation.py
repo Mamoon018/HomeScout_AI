@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import re
@@ -166,7 +167,18 @@ class UserRequirementsInterpretation:
     the same provider chain.
     """
 
-    def __init__(self, caller: StructuredLLMCaller, *, owns_caller: bool = True) -> None:
+    def __init__(
+        self,
+        caller: StructuredLLMCaller,
+        *,
+        owns_caller: bool = True,
+        max_categories: int | None = None,
+        max_specific_metrics: int | None = None,
+    ) -> None:
+        # Test-cost caps applied when the plans are compiled (None = no limit). See
+        # `compile_category_metric_plans`.
+        self._max_categories = max_categories
+        self._max_specific_metrics = max_specific_metrics
         # The shared caller holds the OpenAI-then-Groq chain and the fallback funnel (C3.1.2).
         # `self._providers` is kept so the Mechanism 1 inline loop and `aclose` read the same
         # bound chain. `owns_caller` is False when a composition root (the DeepSearch feature)
@@ -1842,7 +1854,8 @@ class UserRequirementsInterpretation:
                     specific_metrics=list(specific_metrics),
                 )
             )
-        state.category_metric_plans = plans
+        state.category_metric_plans = self._apply_plan_caps(plans)
+        plans = state.category_metric_plans
 
         logger.info(
             json.dumps(
@@ -1862,6 +1875,51 @@ class UserRequirementsInterpretation:
             )
         )
         return state
+
+    def _apply_plan_caps(self, plans: list[CategoryMetricPlan]) -> list[CategoryMetricPlan]:
+        """Apply the test-cost caps to the compiled plans; with no caps, return them unchanged.
+
+        Categories: keep the first `max_categories`, choosing categories with specific metrics
+        first (only those create R3 work), then filling with the rest; kept plans stay in compile
+        order. Metrics: keep the first `max_specific_metrics` specific metrics of each kept plan.
+        Pre-defined metrics are never capped. One log line per cap that removed something.
+        """
+        kept = plans
+        if self._max_categories is not None and len(plans) > self._max_categories:
+            ranked = [p for p in plans if p.specific_metrics] + [
+                p for p in plans if not p.specific_metrics
+            ]
+            kept_ids = {p.category_id for p in ranked[: self._max_categories]}
+            kept = [p for p in plans if p.category_id in kept_ids]
+            self._log_cap_applied("categories", len(plans), len(kept))
+
+        if self._max_specific_metrics is not None:
+            limit = self._max_specific_metrics
+            before = sum(len(p.specific_metrics) for p in kept)
+            kept = [
+                dataclasses.replace(p, specific_metrics=p.specific_metrics[:limit])
+                if len(p.specific_metrics) > limit
+                else p
+                for p in kept
+            ]
+            after = sum(len(p.specific_metrics) for p in kept)
+            if after < before:
+                self._log_cap_applied("specific_metrics", before, after)
+        return kept
+
+    def _log_cap_applied(self, dimension: str, before: int, after: int) -> None:
+        """One WARNING per cap that removed items, so a smaller plan is never read as a bug."""
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "metric_compilation.cap_applied",
+                    "timestamp": _timestamp(),
+                    "dimension": dimension,
+                    "before": before,
+                    "after": after,
+                }
+            )
+        )
 
     async def aclose(self) -> None:
         """Close the shared caller after a run, unless a composition root owns it."""
@@ -2001,9 +2059,13 @@ def create_requirement_interpretation(
     sample runners keep closing it. When the DeepSearch feature injects a shared caller, R1
     does not own it and the feature closes it once.
     """
+    caps = {
+        "max_categories": settings.max_categories,
+        "max_specific_metrics": settings.max_specific_metrics,
+    }
     if llm_caller is None:
-        return UserRequirementsInterpretation(create_structured_llm_caller(settings))
-    return UserRequirementsInterpretation(llm_caller, owns_caller=False)
+        return UserRequirementsInterpretation(create_structured_llm_caller(settings), **caps)
+    return UserRequirementsInterpretation(llm_caller, owns_caller=False, **caps)
 
 
 def _stamp_category_identities(extracted: ExtractedRequirements) -> ExtractedRequirements:

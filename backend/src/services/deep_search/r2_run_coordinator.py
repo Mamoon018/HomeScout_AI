@@ -143,8 +143,11 @@ class R2RunCoordinator:
         global_places_semaphore: asyncio.Semaphore | None,
         llm_caller: StructuredLLMCaller | None = None,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        max_places_per_category: int | None = None,
     ) -> None:
         self._store = store
+        # Test-cost cap passed to every per-run AmenitySearch (None = no limit).
+        self._max_places_per_category = max_places_per_category
         self._r1_store = r1_store
         self._places_client = places_client
         self._routes_client = routes_client
@@ -369,6 +372,7 @@ class R2RunCoordinator:
             owns_caller=False,
             global_places_semaphore=self._global_places_semaphore,
             owns_clients=False,
+            max_places_per_category=self._max_places_per_category,
         )
 
     async def _save_checkpoint(

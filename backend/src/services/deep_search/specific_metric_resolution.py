@@ -47,7 +47,7 @@ import logging
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TypeVar
+from typing import Literal, TypeVar
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -58,6 +58,7 @@ from src.clients.llm_provider import (
 )
 from src.clients.mcp_tools import (
     SEARCH_CONCURRENCY,
+    McpProviderLimits,
     RawToolDefinitions,
     ToolFailure,
     ToolGateway,
@@ -104,6 +105,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     OfficialGateRecord,
     Phase1Result,
     PredefinedMetricsRecord,
+    StepCompletedCallback,
     UnresolvedReason,
     WebsiteSearchResult,
     WebsiteSelectionResult,
@@ -153,6 +155,8 @@ PHASE1_RETRY_STAGE = "r3_m1_4_phase1_retry"
 _PHASE1_CONTEXT = "metric_web_search"
 # R3.M1.5 run-level circuit breaker default (Settings `METRIC_RESOLUTION_BREAKER_THRESHOLD`).
 BREAKER_THRESHOLD_DEFAULT = 3
+# R3-C3: the one resumable position. A run whose STEP 3 was saved cleanly resumes after it.
+DISCOVERY_BATCH_STEP = "discovery_batch"
 
 # R3.M1.4 / R3.M1.5 log events (threaded by run_id + the (category_id, place_id) key).
 BREAKER_OPENED_EVENT = "r3m1_5.breaker_opened"
@@ -341,7 +345,11 @@ class SpecificMetricResolution:
         self._resolution_instruction = build_resolution_instruction(self._resolution_schema)
 
     async def run_specific_metric_resolution(
-        self, state: SpecificMetricResolutionState
+        self,
+        state: SpecificMetricResolutionState,
+        *,
+        resume_after: Literal["discovery_batch"] | None = None,
+        on_step_completed: StepCompletedCallback | None = None,
     ) -> SpecificMetricResolutionState:
         """R3 entry point — built through STEP 5; each pipeline runs phase 1 then R3.M2.2.
 
@@ -350,6 +358,13 @@ class SpecificMetricResolution:
         runs the discovery batch (STEP 3), runs one pipeline per work item (STEP 4), sweeps the
         results into `state.resolution_results` (STEP 5) and applies the run-level raise, then
         closes the gateway. STEP 6 (combine) is not built, so `state.amenity_records` stays `None`.
+
+        R3-C3 (run over HTTP): `resume_after="discovery_batch"` skips STEP 3, because its results
+        were saved and are already in `state`; STEP 1/2 and the catalog are always recomputed.
+        `on_step_completed` is awaited at STEP 3's barrier with `("discovery_batch", state,
+        breaker_open)` so the caller can save it (or not, when the breaker made it degraded). An
+        error it raises leaves through the `finally`, so the gateway still closes. With neither
+        argument the method behaves exactly as before.
         """
         if self._llm_caller is None:
             # Discovery Stage 1 needs the shared caller; a None caller is a composition-root bug.
@@ -370,9 +385,13 @@ class SpecificMetricResolution:
                 # Raw definitions are fixed after open(); a schema the catalog cannot be built from
                 # is a gateway mismatch, so it raises here, before any LLM spend (R3.M1.1).
                 phase1_catalog = build_tool_catalog(raw_tool_definitions, _PHASE1_CONTEXT)
-            await self._run_discovery_batch(  # STEP 3
-                state, work_items, raw_tool_definitions, breaker=breaker
-            )
+            if resume_after != DISCOVERY_BATCH_STEP:
+                await self._run_discovery_batch(  # STEP 3
+                    state, work_items, raw_tool_definitions, breaker=breaker
+                )
+                if on_step_completed is not None:
+                    # R3-C3 save point: STEP 3 is costly, non-reproducible and STEP 4 follows.
+                    await on_step_completed(DISCOVERY_BATCH_STEP, state, breaker.open)
             if phase1_catalog is not None:
                 run_id = uuid4().hex
                 results = await self._run_amenity_pipelines(  # STEP 4
@@ -2006,12 +2025,15 @@ def create_specific_metric_resolution(
     settings: Settings,
     *,
     llm_caller: StructuredLLMCaller | None = None,
+    provider_limits: McpProviderLimits | None = None,
 ) -> SpecificMetricResolution:
     """Composition root for R3: build the MCP gateway and resolve caller ownership.
 
     The gateway opens no session here (no I/O at construction); `run_specific_metric_resolution`
     opens and closes it. Standalone (no `llm_caller`) builds its own caller and owns it; the
-    DeepSearch feature injects a shared caller it closes itself.
+    DeepSearch feature injects a shared caller it closes itself. Over HTTP every run calls this
+    once (R3-C2: one gateway per run), and `provider_limits` are the app-wide Parallel / Firecrawl
+    limits all those gateways share (R3-C2 Iteration 1).
     """
     if llm_caller is None:
         caller = create_structured_llm_caller(settings)
@@ -2020,7 +2042,7 @@ def create_specific_metric_resolution(
         caller = llm_caller
         owns_caller = False
     return SpecificMetricResolution(
-        tool_gateway=create_mcp_tool_gateway(settings),
+        tool_gateway=create_mcp_tool_gateway(settings, limits=provider_limits),
         llm_caller=caller,
         owns_caller=owns_caller,
         breaker_threshold=settings.metric_resolution_breaker_threshold,

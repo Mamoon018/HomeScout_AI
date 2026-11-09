@@ -104,7 +104,7 @@ A step's output is saved, at the moment the **whole step** completes, only when 
 Two more rules sit on top of these:
 
 - **Recompute, don't save:** cheap steps that are fully determined by saved data are always recomputed on resume.
-- **Never save a degraded step:** a step whose output was degraded by an outage, rather than by real data, is not saved. Saving it would make the outage permanent on retry (see R3-C3).
+- **Never save a degraded step:** a step whose output was degraded by an outage, rather than by real data, is not saved as a checkpoint, so a retry never resumes after it. Saving it would make the outage permanent on retry (see R3-C3). R3 may still keep it as a `degraded` record row in its step table, which no resume or status decision reads (R3-C5 Iteration 1).
 
 ## Two Facts the Code Showed (corrections to the Problem Context)
 
@@ -736,20 +736,23 @@ R3 takes a finished R2 run. For each discovered place whose category has `specif
 
 ## R3 Runtime Flow
 
-1. The page sends `POST /api/specific-metric-resolution/runs` with `r2_run_id`.
-2. The login check verifies the user. The coordinator reads R2's **finished** output through `R2RunStore.get_finished_output(r2_run_id, user_id)`. A run that is missing, another user's or not finished gives `404`.
+1. The page sends `POST /api/specific-metric-resolution/runs` with `r2_run_id`. Any other field in the body gives `422`.
+2. The login check verifies the user. The coordinator reads R2's **finished** output through `R2RunStore.get_finished_output(r2_run_id, user_id)`. A run that is missing, another user's, not finished, or saved under another R2 output version gives `404`.
 3. The coordinator builds `SpecificMetricResolutionState(category_metric_plans, discovered_places, predefined_records)` from that output and creates the `r3_runs` row with `running`, `attempts = 0`, `completed_step = null` and this initial state saved.
-4. The response is **`202 Accepted`** with `run_id` and `status: running`. The run continues in a background task (R3-C7).
-5. The background task builds a **fresh R3 instance with its own tool gateway** (R3-C2) and calls `run_specific_metric_resolution(state, resume_after=None, on_step_completed=…)`.
+4. The coordinator sets `run_id_var`, starts the background task and adds it to `app.state.r3_tasks` (keyed by `run_id`). The response is **`202 Accepted`** with `run_id` and `status: running` (R3-C7).
+5. The background task builds a **fresh R3 instance with its own tool gateway** (R3-C2). The gateway takes its calls' slots from the **app-wide provider limits** built once at startup (R3-C2 Iteration 1). The task then calls `run_specific_metric_resolution(state, resume_after=None, on_step_completed=…)`.
 6. Inside the method, unchanged: open the gateway, then **STEP 1** (plan index) and **STEP 2** (work items), which are cheap and always recomputed, then build the phase-1 catalog.
-7. **STEP 3** (discovery batch: official-URL gate + website discovery). At its barrier the method awaits `on_step_completed("discovery_batch", state, breaker_open)`. The coordinator saves a checkpoint (`completed_step = "discovery_batch"`) **only if the breaker is closed** (R3-C3).
+7. **STEP 3** (discovery batch: official-URL gate + website discovery). At its barrier the method awaits `on_step_completed("discovery_batch", state, breaker_open)`.
+   - **Breaker closed:** the coordinator saves a checkpoint (`completed_step = "discovery_batch"`), then a `completed` `discovery_batch` row in `r3_run_steps` (R3-C5 Iteration 1).
+   - **Breaker open:** no checkpoint (R3-C3). The coordinator writes a `degraded` `discovery_batch` row right away, with what STEP 3 found (R3-C5 Iteration 1).
 8. **STEP 4** (one pipeline per amenity: phase-1 search loop + resolution turn) and **STEP 5** (sweep into `resolution_results` + the run-level raise) run unchanged.
-9. The gateway closes (unchanged `finally`). The **finish write** saves the final state and output (`resolution_results`) and sets `finished`.
-10. **On any failure,** the run is saved as `failed` with its stage, message and `retryable` flag. `state` and `completed_step` are left untouched.
+9. The gateway closes (unchanged `finally`). The **finish write** saves the final state and output (`resolution_results`), sets `finished` and clears the failure fields. Then the `pipelines` step row is written as `completed`.
+10. **On any failure,** the run is saved as `failed` with its stage, message and `retryable` flag. `state` and `completed_step` are left untouched. Then the step that was running gets a `failed` step row.
 11. **Retry:** `POST /api/specific-metric-resolution/runs/{run_id}/retry` (no body).
     - The store claims the run in **one conditional update**: it must be `failed` and retryable, or `running` and stale. A losing request gets `409`.
+    - The step rows from the resume step on that are `failed` or `degraded` are claimed (`→ started`).
     - On success the response is `202`. The background task resumes with `resume_after = completed_step`: STEP 1/2 are recomputed, STEP 3 is **skipped** if it was saved, and STEP 4 runs.
-12. **Status:** `GET /api/specific-metric-resolution/runs/{run_id}` returns `status`, `completed_step`, and `result` or `retryable`. The page polls it while the run is `running`.
+12. **Status:** `GET /api/specific-metric-resolution/runs/{run_id}` first checks `r3_tasks`. The user's own live run answers `running` with its `completed_step`, without reading the database. Otherwise it reads the row and returns `status`, `completed_step`, and `result` or `retryable`. The page polls it while the run is `running`.
 
 ## What Already Exists and Is Reused As-Is
 
@@ -759,7 +762,8 @@ R3 takes a finished R2 run. For each discovered place whose category has `specif
 | R3's typed errors | `MetricResolutionProviderError` (with `cause`), `MetricResolutionValidationError`, `McpConnectionError`, `McpToolUnavailableError` | Failure stage and the retryable split |
 | `create_specific_metric_resolution` factory | `specific_metric_resolution.py` | Building one R3 instance per run (R3-C2) |
 | R2 finished-output read | `R2RunStore.get_finished_output` (R2-C4) | R3's input |
-| The guard, store layout and HTTP pattern | R2-C4, R2-C5, R2-C7 (and R1) | Copied with R3's own table and settings |
+| The guard, store layout, step table, status memory check and HTTP pattern | R2-C4 (and its Iteration 1), R2-C5, R2-C6 Iteration 2, R2-C7 (and R1) | Copied with R3's own tables, settings and step names |
+| Per-gateway provider limits | `McpToolGateway._search_sem`, `_firecrawl_sem`, `_firecrawl_rate` ([mcp_tools.py:504](../../../clients/mcp_tools.py)) | Kept per run; the app-wide limits sit behind them (R3-C2 Iteration 1) |
 
 ## Component Order
 
@@ -837,8 +841,46 @@ Two R3 runs at the same time never share a tool gateway, so one run closing its 
 - **Approach 1** leaves both the gateway and R3 untouched, and costs the same session opening R3 already does on every call.
 
 ### Critical Decision Choices
-- **Context-specific — rate limits are per gateway:** the Firecrawl token bucket and the search semaphores are per instance. With one instance per run, two parallel runs can make twice the calls on the same provider account. **Accepted for now** (few customers). A process-wide cap on active R3 runs is noted as a follow-up, not built.
-- **General — where the factory lives:** in `app.state`, built at startup from settings.
+- **Context-specific — rate limits are per gateway:** the Firecrawl token bucket and the search and Firecrawl semaphores are per instance. With one instance per run, two parallel runs could make twice the calls on the same provider account. Iteration 1 below adds one app-wide limit per provider behind them.
+- **General — where the factory lives:** in `app.state`, built at startup from settings. The factory receives the app-wide provider limits and passes them into every gateway it builds.
+
+### Iteration 1 — One App-Wide Limit per Provider, Behind the Per-Run Limits
+
+**The problem.** Each run's gateway has its own limits: a Parallel search semaphore (`SEARCH_CONCURRENCY = 4`), a Firecrawl semaphore (`FIRECRAWL_CONCURRENCY = 2`) and a Firecrawl per-minute bucket (`FIRECRAWL_RATE_PER_MINUTE = 10`). The provider's limit is per account key, not per run. The code sizes Firecrawl's slots to the Free plan's 2 concurrent browsers. So two R3 runs at once can already have 4 Firecrawl calls in flight. Firecrawl answers `429`. The gateway backs off and retries. If it still fails, the amenity counts an `availability` failure. Enough of those open the circuit breaker, and the run fails.
+
+**The fix.** One app-wide limit per provider, each set from that provider's plan as its own setting:
+
+| Provider | App-wide limit | Setting (default) | Per-run limit (unchanged) |
+|---|---|---|---|
+| Parallel (`web_search`) | search slots | `R3_PARALLEL_SEARCH_CONCURRENCY` (10) | `SEARCH_CONCURRENCY` (4) |
+| Firecrawl (map, scrape, `scrape_pages` fan-out, crawl) | Firecrawl slots | `R3_FIRECRAWL_CONCURRENCY` (2) | `FIRECRAWL_CONCURRENCY` (2) |
+| Firecrawl | per-minute rate limiter | `R3_FIRECRAWL_RATE_PER_MINUTE` (10) | none: the app-wide limiter replaces the gateway's own |
+
+- **Each call takes only its own provider's limits:** its run's slot first, then the app-wide slot. A Parallel search never touches a Firecrawl slot, so a full Firecrawl pool never slows Parallel. The gateway already keeps the two apart per run; this only makes each one shared app-wide.
+- **The rate limiter is one per key:** a per-minute budget belongs to the account key, so a gateway given the app-wide limiter uses it in place of its own bucket. Keeping both would pace each call twice.
+- **Order inside one call:** rate token (Firecrawl only), then run slot, then app-wide slot, then the per-call timeout and the call. Waiting for a token or a slot stays outside the call's timeout, as the token wait already does today. A run waiting on its own limit never holds an app-wide slot.
+
+**Example.** With Parallel at 10 and Firecrawl at 2, Anna's and Ben's runs can have up to 10 searches in flight together (each run at most 4), while only 2 scrapes run at once across both runs.
+
+**Mandatory sub-tasks**
+
+- `McpToolGateway` takes three optional constructor arguments: the app-wide search semaphore, the app-wide Firecrawl semaphore and the app-wide Firecrawl rate limiter. Each one left out keeps today's behavior, so the C3.1.1 gateway tests pass unchanged.
+- `_single_call` takes the app-wide slot inside the run slot. No retry, timeout, parsing or failure-kind logic changes.
+- `lifespan` builds the three objects once from the three settings, and passes them to the R3 factory. Nothing closes them (they hold no connection).
+- The three settings go in `src/core/config.py` and `.env.example`.
+
+**Why this way**
+
+- **The limit sits where the provider's limit is:** per provider, per key. That is what stops the self-made `429`s.
+- **Runs stay independent:** each run keeps its own gateway, sessions and breaker (R3-C2 Approach 1). Only the slot counts are shared.
+- **One process-wide cap on active runs is no longer needed:** it would make Ben wait for Anna's whole run, even while Anna is only waiting on the LLM.
+
+**Critical Decision Choices**
+
+- **Context-specific — scope exception:** the gateway's constructor and the slot order in `_single_call` change. Its sessions, retries, timeouts and failure kinds don't. This is the same kind of change R2-C2 Iteration 1 made to `AmenitySearch`.
+- **Context-specific — LLM calls are not capped here:** they go through the shared LLM caller, not the gateway. This iteration covers the two web providers only.
+- **Risk accepted:** when an app-wide pool is full, the wait makes STEP 3 and STEP 4 longer. That counts toward the stale cutoff (R3-C6), so R3-C9 records STEP 4 durations with two runs in parallel.
+- **Risk accepted — one process:** the limits are per process. With several workers, each one has its own pool. That is fine at MVP (one process).
 
 ---
 
@@ -864,7 +906,7 @@ STEP 3 (LLM website selection + web searches for every declined amenity) is cost
   | **STEP 4** pipelines + **STEP 5** sweep / run-level raise | Yes: the most expensive part | Yes | Covered by the **finish write**: after STEP 5 only the gateway close is left |
   | STEP 6 combine | Not built | — | — |
 
-- **The degraded-step rule:** when the breaker is open at the end of STEP 3, every remaining amenity got `WebsiteSearchResult(None, "none")` because of the outage, not because no website exists. Saving that would make every retry run STEP 4 without websites. So STEP 3 is **not** saved when `breaker_open` is true, and a retry reruns it.
+- **The degraded-step rule:** when the breaker is open at the end of STEP 3, every remaining amenity got `WebsiteSearchResult(None, "none")` because of the outage, not because no website exists. Saving that would make every retry run STEP 4 without websites. So STEP 3 is **not** saved as a checkpoint when `breaker_open` is true: `completed_step` stays null, and a retry reruns it. What it found is kept only as a `degraded` record row (R3-C5 Iteration 1).
 - Defaults (`resume_after=None`, no callback) must give exactly today's behavior, so the existing R3 tests and sample runs pass without changes.
 - On resume, STEP 1/2 and the catalog are recomputed from the saved inputs, which gives the same work items in the same order.
 
@@ -886,7 +928,7 @@ STEP 3 (LLM website selection + web searches for every declined amenity) is cost
 ### Critical Decision Choices
 - **General — callback errors:** if the checkpoint save raises (store down, or a lost fence → `RunSupersededError`), the error leaves the method through its existing `finally`, so the gateway still closes. The coordinator then handles it like any failure.
 - **Context-specific — the breaker on resume:** a resumed run starts with a **fresh breaker** (same threshold). The previous attempt's failure count doesn't carry over. This matches today's "one breaker per run" rule, with a retry treated as a new execution.
-- **Context-specific — the internal `run_id = uuid4().hex` in STEP 4:** kept as it is. Log lines are tied to the HTTP run through `run_id_var`, set by the coordinator as in R1.
+- **Context-specific — the internal `run_id = uuid4().hex` in STEP 4:** kept as it is. Log lines are tied to the HTTP run through `run_id_var`. The coordinator sets it **before** `create_task`, so the task's context carries it into every log line (as R2).
 - **Context-specific — no work items:** STEP 3 runs on an empty list and is saved, STEP 4 is skipped (the catalog is `None`), and the run finishes with empty results. This is unchanged behavior.
 
 ---
@@ -902,8 +944,9 @@ A saved R3 state turns into JSON and back with nothing lost, including the four 
 **Traces to:** "the saved results it builds on must load back unchanged."
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
-- Round-trip tests for the initial, after-STEP-3 and finished states, including keys whose `place_id` contains `,`.
+- Round-trip tests for the initial, after-STEP-3 and finished states, including keys whose `place_id` contains `,`. The initial state is built from a **real R2 output** loaded through R2's output codec, not a hand-made one. A real capture is what caught R2's `price_level` annotation mismatch (`int` from Places, annotated `str`); R3 carries the same `predefined_records`.
 - A version envelope with `R3_STATE_SCHEMA_VERSION`. A mismatch means failed, not retryable.
+- The step-row outputs (R3-C5 Iteration 1) use the same tuple-key encoding inside R1's step envelope `{"schema_version", "data"}`.
 
 ### Three Common Approaches
 1. **`TypeAdapter` for values, with key encoding at the store boundary. (Finalized)** Each tuple-keyed dict is written as a list of `{"category_id": int, "place_id": str, "value": {…}}` entries and rebuilt into the dict on load. The state class is untouched.
@@ -938,11 +981,13 @@ R3 has no table and no write path.
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
 - A migration `<ts>_create_r3_runs.sql` with R2-C4's columns, with `r2_run_id` referencing `r2_runs` (`on delete cascade`) in place of `r1_run_id`. It is safe to re-run, has RLS on with no policies, and has the `updated_at` trigger.
+- `completed_step` is checked `in ('discovery_batch')` or null.
 - `R3RunStore` in `r3_run_store.py` with R2-C4's seven operations, the `user_id` filter on every query, and the fencing filter on every write after the claim.
 - "Save as failed" never touches `state` or `completed_step`.
+- "Save as finished" sets `failure_stage` and `failure_message` back to null, so a run that finishes on its retry doesn't still show the first attempt's failure (found in R2's build).
 
 ### Three Common Approaches
-Same three as R2-C4: **(1) one row with the versioned state blob + `completed_step` (Finalized)**, (2) a run row + a step-output table, (3) a column per step output.
+Same three as R2-C4: **(1) one row with the versioned state blob + `completed_step` (Finalized)**, (2) a run row + a step-output table, (3) a column per step output. Iteration 1 below adds a step table next to approach 1 as a record only, as R2-C4 Iteration 1 does; the run row still decides everything.
 
 ### Critical Factors (from our context)
 - **One mid-run checkpoint** (STEP 3) plus the finish write.
@@ -955,6 +1000,67 @@ State size is the only factor that could favor Approach 2 (write only the step's
 ### Critical Decision Choices
 - **Context-specific — what `output` holds:** `resolution_results` (encoded as in R3-C4) while STEP 6 is unbuilt. When STEP 6 lands, the output switches to `amenity_records`, with a version bump.
 - **Context-specific — Places content:** R3's state carries `predefined_records` (Places content), so the retention decision in R2-C4 applies here too: kept for now, with the policy decided in a later phase.
+
+### Iteration 1 — A Step Table `r3_run_steps`, with a `degraded` Status
+
+**What changed.** R3 gets a second table, `r3_run_steps`, with one record row for each of its two expensive steps, filled the way `r2_run_steps` is. `r3_runs` keeps `state`, `completed_step`, `output`, the failure columns, `retryable`, `attempts` and fencing, and **`r3_runs` alone decides where a retry resumes**. The step table is a record next to it, not a second source of truth.
+
+**The table** (migration `<ts>_create_r3_run_steps.sql`, safe to re-run, copied from `create_r2_run_steps.sql`):
+
+- `run_id` (references `r3_runs`, `on delete cascade`), `step_id`, `status`, `output`, `error_type`, `error_message`, `retryable`, `created_at`;
+- primary key `(run_id, step_id)`;
+- `step_id` in (`discovery_batch`, `pipelines`): STEP 3 (finding websites) and STEP 4 (resolving metrics). STEP 1/2, the catalog and STEP 5 are recomputed or covered by the finish write, so they have no row;
+- `status` in (`started`, `completed`, `degraded`, `failed`). `degraded` is R3's addition;
+- the checks `(status in ('completed', 'degraded')) = (output is not null)` and `(status = 'failed') = (error_type is not null and retryable is not null)`. A `degraded` row may hold data; in R2 only `completed` rows can;
+- `output` in the step envelope `{"schema_version", "data"}`, tuple keys encoded as in R3-C4: STEP 3's three result dicts (`official_gate_results`, `discovery_search_results`, `website_search_results`) for `discovery_batch`, and `resolution_results` for `pipelines`;
+- RLS on with no policies, and a trigger that rejects any change to a `completed` row.
+
+**How it is filled**
+
+| Operation | R3 use |
+|---|---|
+| `insert_step` (new `completed` row; a duplicate key means another execution) | `discovery_batch` right after the checkpoint write succeeds (breaker closed). `pipelines` right after the finish write succeeds. |
+| `save_step_degraded` (new `degraded` row with output, or `started → degraded` on a claimed step) | `discovery_batch` when STEP 3 ended with the breaker open. Written right away at the STEP 3 barrier. |
+| `save_step_failed` (new `failed` row, or `started → failed` on a claimed step) | The step that was running when the run failed gets a `failed` row with `error_type`, `error_message` and the same `retryable` as the run. |
+| `claim_step` (`failed` or `degraded` → `started`, error and output cleared, as the check requires) | After the run claim (R3-C6) wins: every `failed` or `degraded` row at or after the resume step. |
+| `complete_claimed_step` (`started → completed` with the new output) | At the step's write point: the checkpoint for `discovery_batch`, the finish write for `pipelines`. |
+
+**The `discovery_batch` row's life when searches fail:**
+
+1. **First run, breaker open at STEP 3:** no checkpoint, so `completed_step` stays null. The row is saved as `degraded`, with what STEP 3 found.
+2. **Retry claims it:** `degraded` becomes `started`, the same way a `failed` row is claimed.
+3. **STEP 3 succeeds on the retry:** the checkpoint is saved, and `started` becomes `completed` with the new results. (If the breaker opens again, the row goes `started → degraded` with the new results.)
+
+**Write order.** The `r3_runs` write goes first, fenced. The step row follows only when that write matched. So:
+
+- a lost fence writes no step row;
+- a duplicate step row or a claimed row that moved is logged (`r3_run.step_conflict`) and stops the execution, as R2 does;
+- a store failure on the step row is logged only. The run row is already right, so the run carries on.
+
+**Which step was running.** The method has one entry, so the coordinator tracks the step from the callback:
+
+- **Before the STEP 3 callback:** a gateway, capability or catalog error (`McpConnectionError`, `McpToolUnavailableError`, `MetricResolutionValidationError`) happens before STEP 3 and writes no step row. Any other error is recorded on `discovery_batch`.
+- **After the callback, or on a resume that skipped STEP 3:** an error is recorded on `pipelines`.
+
+**Why the `degraded` row is written right away.** A breaker-open STEP 3 writes nothing to `r3_runs`, so this one step row is not preceded by a fenced run write. It could only clash with a newer execution's row if a live STEP 3 ran past `stale_after` (30 min) and the user retried in that window. That isn't realistic at MVP (one process, STEP 3 takes minutes), so the row is written at once, like a completed STEP 3 row.
+
+**Why `pipelines`' row waits for the finish write.** A completed row can never change. STEP 5's run-level raise comes after STEP 4. If `pipelines` were recorded as soon as STEP 4 returned and STEP 5 then raised, a retry would rerun STEP 4 (the resume point is still `discovery_batch`) and collide with its own completed row.
+
+**Mandatory sub-tasks**
+
+- `R3RunStore` adds `insert_step`, `save_step_degraded`, `save_step_failed`, `claim_step` and `complete_claimed_step`.
+- `load_run` reads the run with its step rows embedded, as R2's does, and fails loudly if the embed is missing.
+- The coordinator calls them at the points in the table above. The step plan, the resume rule and the retryable split don't change.
+- R3-C9 adds the step-table tests.
+
+**Critical Decision Choices**
+
+- **Context-specific — the run row stays the truth:** resume uses `completed_step`, and status uses `r3_runs.status`. A `degraded` row never moves the resume point. If a crash lands between the run write and the step write, the step row is missing. That gap is in the record only.
+- **Context-specific — a `completed` row still never changes:** only `started`, `failed` and `degraded` rows move.
+- **Context-specific — the same data is stored twice:** STEP 3's results are in `state` and in the `discovery_batch` row, and `resolution_results` is in the final `state`, in `output` and in the `pipelines` row. R3's state is the largest, so this costs more than in R2. Accepted for consistency with R1 and R2. The Places content rule above covers this table too.
+- **Context-specific — a crashed run has no `failed` row:** a stale `running` run that is reclaimed has nothing to claim, so the resumed step is inserted as a new row.
+- **Context-specific — a claimed row the retry never reaches stays `started`:** for example, the retry fails at gateway open before STEP 3. The table is a record only, and the run is not retryable after its one retry. Accepted, as R2 accepts it for a claimed `enrichment` row.
+- **Context-specific — atomicity:** the run write and the step write are separate statements (PostgREST has no transaction across them). The write order above keeps the run row correct whichever one fails.
 
 ---
 
@@ -989,7 +1095,7 @@ The heartbeat lease (Approach 3) is the strongest fit for long steps, and R3 is 
 **Revisit trigger:** if live runs show STEP 4 regularly approaching `stale_after`, switch to Approach 3.
 
 ### Critical Decision Choices
-- **Context-specific — `stale_after` for R3:** **30 minutes**, as a setting. It must be longer than the longest STEP 4 seen in live runs; the verification records STEP 4 durations to check this.
+- **Context-specific — `stale_after` for R3:** **30 minutes**, as the setting `r3_stale_after_seconds` (`R3_STALE_AFTER_SECONDS`, default 1800, `gt=0`) in `src/core/config.py`, with a commented entry in `.env.example`. It must be longer than the longest STEP 4 seen in live runs, including time spent waiting for the app-wide provider limits (R3-C2 Iteration 1); the verification records STEP 4 durations to check this.
 
 ---
 
@@ -1010,19 +1116,24 @@ R3 takes minutes, which is longer than typical proxy and browser request timeout
 ### Mandatory Sub-Tasks Independent of Approaches Taken
 - **Retryable split:**
 
-  | Error | Retryable | Why |
-  |---|---|---|
-  | `MetricResolutionProviderError` at run level (`cause`: `availability`, `circuit_open`, `content`) | Yes, while `attempts < MAX_RETRY_ATTEMPTS` | Provider failure; later calls may succeed |
-  | `McpConnectionError` (gateway can't connect) | Yes | Transient |
-  | `MetricResolutionValidationError` (catalog can't be built) | No | The gateway schema doesn't match; it fails again |
-  | `McpToolUnavailableError` (a required tool is missing) | No | Configuration; it fails again |
-  | `StateVersionMismatchError` | No | Start again |
-  | `RunSupersededError` (lost fence) | Not saved | A newer execution owns the row |
-  | Any other exception | No, stage `unexpected` | A bug |
-  | Cancellation (shutdown) | Yes | Best-effort save as failed, then re-raise |
+  Every "Yes" below means `retryable = attempts < MAX_RETRY_ATTEMPTS` (1), so a failure on the retry itself is never retryable.
 
-- `R3_STAGE_ERRORS` / `R3_PROVIDER_ERRORS` tuples and an `R3RunFailedError` mirroring R1's, so the status endpoint can say `503`- vs `502`-style causes in the log.
-- `run_id_var` is set inside the background task, so every R3 log line carries the HTTP run ID.
+  | Error | Stage | Retryable | Why |
+  |---|---|---|---|
+  | `MetricResolutionProviderError` at run level (`cause`: `availability`, `circuit_open`, `content`) | `exc.stage` | Yes | Provider failure; later calls may succeed |
+  | `McpConnectionError` (gateway can't connect), no config cause | `exc.stage` | Yes | Transient |
+  | `McpConnectionError` whose cause is a refused key (Iteration 1) | `exc.stage` | No, log `r3_run.config_error` | The key is wrong; it fails again |
+  | `MetricResolutionValidationError` (catalog can't be built) | `exc.stage` | No | The gateway schema doesn't match; it fails again |
+  | `McpToolUnavailableError` (a required tool is missing) | `exc.stage` | No | Configuration; it fails again |
+  | `RunStoreError` on the STEP 3 checkpoint or the finish write | `run_store` | Yes | A database blip: the work since the last save is lost, the run is not (as R2's D-R2-3). If the failed write fails too, it is logged (`r3_run.failed_not_saved`) and the row stays `running`, reclaimable after `stale_after` |
+  | `StateVersionMismatchError` | `load_state` | No | Start again |
+  | `RunSupersededError` (lost fence) | — | Not saved | A newer execution owns the row |
+  | Any other exception | `unexpected` | No, `logger.exception` | A bug |
+  | Cancellation (shutdown) | `cancelled` | Yes | Best-effort save as failed, then re-raise |
+
+- `R3_STAGE_ERRORS` / `R3_PROVIDER_ERRORS` tuples in `src/exceptions/deep_search.py`, and `RunStoreError`'s docstring widened to cover `r3_runs`. No `R3RunFailedError`: since the run is a background task, a failure never reaches a controller. It is saved on the row and read through status, so nothing would catch such an error (as R2's decision D-R2-5).
+- **The R2 input saved under another version:** `R2RunStore.get_finished_output` raises `StateVersionMismatchError`. Start answers `404` and logs `reason=r2_version_mismatch`, before any row exists (as R2 does for R1's output).
+- `run_id_var` is set **before** `create_task`, so the task's context carries the HTTP run ID into every R3 log line.
 - The per-run R3 instance (R3-C2) is closed in the task's `finally`.
 
 ### Three Common Approaches
@@ -1042,10 +1153,68 @@ R3 takes minutes, which is longer than typical proxy and browser request timeout
 - **Approach 2** needs only the status endpoint R1 already has, and fits the existing single FastAPI process.
 
 ### Critical Decision Choices
-- **General — keeping tasks alive:** tasks are held in a set on `app.state`, so they aren't garbage-collected, and removed when done.
-- **General — shutdown:** `lifespan` cancels the running tasks and awaits them (with a short timeout). Each task saves its run as failed and retryable on `CancelledError`.
-- **Context-specific — the input must be the same user's finished R2 run:** checked before the row is created, so a bad `r2_run_id` gets `404` (missing, another user's or not finished; no `409` path, as in R2-C6) and no run is created.
+- **General — keeping tasks alive:** tasks are held in `app.state.r3_tasks`, so they aren't garbage-collected, and removed when done. Iteration 2 makes it a dict keyed by `run_id`, for the status check.
+- **General — shutdown:** `lifespan` cancels the running R3 tasks and awaits them, with R3's own timeout `R3_SHUTDOWN_TIMEOUT_SECONDS = 10`. Each task saves its run as failed with `retryable = attempts < MAX` on `CancelledError`, then re-raises.
+  - **Order:** the R3 tasks are cancelled and awaited **before** the shared LLM caller and the database client close. A cancelled task still needs the database for its failed write, and may still be inside an LLM call. The app-wide provider limits (R3-C2 Iteration 1) need no closing.
+  - **Why R3's timeout is longer than R2's 5 s:** on cancel, the method's unchanged `finally` closes the run's MCP gateway (two sessions) **before** the coordinator's failed write. The gateway close spends part of the timeout.
+  - **Timeout hit:** log `r3_run.shutdown_timeout` (WARN) with the pending run IDs. Those rows stay `running` and are reclaimable after `stale_after` (R3-C6).
+- **Context-specific — the input must be the same user's finished R2 run:** checked before the row is created, so a bad `r2_run_id` gets `404` (missing, another user's, not finished, or another R2 output version; no `409` path, as in R2-C6) and no run is created.
 - **Context-specific — this departs from R1:** the start and retry responses are `202` with `status: running`, not a result. The page polls `GET` (or uses refresh recovery) to see the result.
+
+### Iteration 1 — Config Errors Are Not Retryable (gateway open)
+
+**The problem.** A refused Firecrawl or Parallel key fails the gateway open as `McpConnectionError`, which the split above marks retryable. The customer gets a Retry button that can't work, uses up the one retry, and then hits "Start again", which fails the same way.
+
+**What the code keeps.** The gateway raises `McpConnectionError(...) from self._start_error` when a session can't open, and `_start_sessions` raises it `from` the first failure. So the original error stays on `__cause__`:
+
+```
+McpConnectionError (stage "open")     ← what the coordinator sees
+  └─ __cause__: the session's start error
+       └─ (possibly inside an exception group) HTTP status error 401 / 403   ← the real reason
+```
+
+**The fix.** One helper in the coordinator, `is_config_error(exc)`, follows `__cause__` (and the members of an exception group) with a depth limit of 8 links, and looks for an HTTP status of `401` or `403` on the error or its `response`.
+
+- **Found:** save the run with `retryable = false` and log `r3_run.config_error` (ERROR, with the server name and status).
+- **Not found:** keep the table's rule (retryable while `attempts < MAX`).
+
+**Mandatory sub-tasks**
+
+- The coordinator calls the helper only for `McpConnectionError`, before applying the table.
+- R3-C9 adds two tests: a `401` under `McpConnectionError` gives `retryable: false` and one `r3_run.config_error` log; a connection timeout still gives `retryable: true`.
+
+**Why this way**
+
+- **R3's code and the gateway stay unchanged:** only the coordinator's decision changes, as in R2-C6 Iteration 1.
+- **It covers the case where R3 can tell:** the cause chain is intact only at gateway open.
+
+**Critical Decision Choices**
+
+- **Context-specific — a refused LLM key is not covered (open):** the LLM provider adapters map `AuthenticationError` / `PermissionDeniedError` to `failure_class = "availability"` (`llm_provider.py`). By the time a run fails, STEP 5's run-level raise is a new error built from the per-item records, so the original cause is gone. A fix would change the shared LLM client's failure classes, which R1 uses and R3's breaker reads, and that is out of scope here. **Risk accepted for now:** this only happens when every provider in the chain refuses its key, and it costs one useless retry. Tracked as traceflow B25.
+- **Context-specific — `429` stays retryable:** a rate limit recovers by the time the customer clicks Retry.
+- **Risk accepted:** the `401` shape from the hosted Firecrawl endpoint is not confirmed live (the `mcp.py` docstring says so). If the status isn't on the chain, the run falls back to "retryable". The live check is in R3-C9.
+
+### Iteration 2 — Status Answers Live Runs from Memory
+
+**The problem.** The page polls status every few seconds for a run that takes minutes, so one run is polled tens of times. Each poll reads `r3_runs`, even though this process already knows the run is alive.
+
+**The fix.** `app.state.r3_tasks` becomes a dict keyed by `run_id`. Each entry holds `(task, user_id, completed_step)`. Status checks it before the database:
+
+- **Found, same `user_id`:** `200 {run_id, status: "running", completed_step}` with no database read.
+- **Found, another user's:** `404`, the same answer the database read would give.
+- **Not found:** the database read as before (finished, failed, crashed, or a run owned by another process).
+
+**Mandatory sub-tasks**
+
+- **The entry's `completed_step`:** set at scheduling from the row (null on start, the row's value on retry). It is updated to `discovery_batch` only after the STEP 3 checkpoint write matched. So the memory reply never shows a step the row doesn't have. R3's progress screen needs it ("finding websites" vs "resolving metrics").
+- **Removal:** the done callback removes the entry only if it still holds this task (a reclaimed run may have a newer entry). It also logs `r3_run.task_crashed` (ERROR) if the task ended with an exception other than a cancel.
+- **Order:** the task saves its final status before the done callback removes it, so a poll never sees "not in memory" while the row still says `running` for a live run.
+- R3-C9 adds a memory-check test.
+
+**Critical Decision Choices**
+
+- **Context-specific — the memory check is per process:** a run started by another worker isn't in this process's dict, so status falls back to the database. That is correct, only slower. At MVP there is one process.
+- **Still open — B5:** a crashed run is gone from memory and reads as `running` from the row until it is stale (30 min). At one process, "`running` in the row but not in memory" means the run crashed. Status could report it as retryable, but that breaks with several workers, so it is not decided here.
 
 ---
 
@@ -1060,9 +1229,10 @@ No R3 routes exist, and app startup doesn't build R3's factory, store, coordinat
 **Traces to:** "started, tracked and retried for a specific user", "behave like R1 in how they … report status … and handle retries".
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
-- **Startup:** at app startup (`lifespan`), build the R3 factory (with the shared caller), `R3RunStore`, the coordinator and the task set. Cancel and await the tasks on shutdown. With no service-role key, give `503`, as R1 does.
+- **Startup:** at app startup (`lifespan`), build the three app-wide provider limits (R3-C2 Iteration 1), the R3 factory (with the shared caller and those limits), `R3RunStore` (on the existing database client), the coordinator and the task dict (`app.state.r3_tasks`). With no service-role key, give `503`, as R1 does.
+- **Shutdown:** `coordinator.shutdown()` first, then the shared LLM caller, then the database client (R3-C7 "shutdown"). R3's shutdown is independent of R2's: each coordinator is shut down before any resource they share closes.
 - **Layers:** a dependency, routes and controllers split, as in R1.
-- **Models:** `StartSpecificMetricResolutionRequest { r2_run_id: UUID }`, and a response with `run_id`, `status`, `completed_step`, `result` and `retryable`.
+- **Models:** `StartSpecificMetricResolutionRequest { r2_run_id: UUID }` with extra fields forbidden (any other field gives `422`), and a response with `run_id`, `status`, `completed_step`, `result` and `retryable`. The app-wide `422` handler (built with R2) already turns a non-finite number in a body into a `422`, not a `500`.
 - **Wiring:** register the router and add a Swagger tag.
 
 ### Three Common Approaches
@@ -1095,7 +1265,7 @@ No R3 routes exist, and app startup doesn't build R3's factory, store, coordinat
 ## R3-C9. Verification of R3-C1–C8
 
 ### Goal of Component
-Evidence that R3's output is unchanged, that the resume skips a saved STEP 3, that a degraded STEP 3 is not saved, and that the guard holds under background execution.
+Evidence that R3's output is unchanged, that the resume skips a saved STEP 3, that a degraded STEP 3 is never a checkpoint, that parallel runs stay within each provider's limit, and that the guard holds under background execution.
 
 ### Problem It Aims to Solve
 R3 is the costliest and least reproducible service, so a wrong resume point or a lost fence costs money and silently changes results.
@@ -1103,35 +1273,54 @@ R3 is the costliest and least reproducible service, so a wrong resume point or a
 **Traces to:** "without changing what either service computes", "must not repeat finished steps", "only one request at a time", "load back unchanged".
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
+
+**With fakes** (`backend/tests/`: a fake gateway with call counts and app-wide-limit tracking, a fake `R3RunStore` that applies the SQL rules, a fake `R2RunStore.get_finished_output`, a test clock):
+
 | Test | Passes when |
 |---|---|
 | Default parity | Calling `run_specific_metric_resolution(state)` with no new arguments gives the same result as before the change. The existing R3 suites pass unchanged, apart from the state class. |
-| Resume parity | A failure injected in STEP 4, then a retry, gives the same final state as a run that never failed, with the same replayed provider responses. **STEP 3 provider calls are made once in total.** |
-| Degraded STEP 3 not saved | With the breaker forced open during STEP 3, no checkpoint is written, and a retry reruns STEP 3. |
+| Resume parity | A failure injected in STEP 4, then a retry, gives the same final state as a run that never failed, with the same fixed provider responses. **STEP 3 provider calls are made once in total.** |
+| Degraded STEP 3 not checkpointed | With the breaker forced open during STEP 3, no checkpoint is written (`completed_step` null), and a retry reruns STEP 3. |
 | Breaker on resume | A resumed run starts with a closed breaker. |
-| Tuple-key round trip | The four keyed dicts come back equal, including a `place_id` containing `,`, in the same order. |
+| Tuple-key round trip | The four keyed dicts come back equal, including a `place_id` containing `,`, in the same order. The initial state is built from a real R2 output capture. |
 | Per-run instance | Two R3 runs at the same time: one finishing doesn't close the other's gateway. |
-| Background lifecycle | Start returns `202` before STEP 1. A shutdown mid-run saves `failed` + `retryable`. The task set is empty after completion. |
-| Concurrent retries / stale reclaim / fencing / retry limit | The same checks as R2-C8, but live against `r3_runs` on the dev Supabase (R3 keeps approach 1). |
-| Retryable split | Each error in the R3-C7 table gives the listed `retryable`. |
-| Ownership, RLS, migration, HTTP codes | Live on the dev Supabase: another user's run finds nothing, RLS blocks the publishable key, re-running the migration changes nothing, and each status code in R3-C8 holds. |
-| STEP 4 duration | Recorded on live runs, to confirm `stale_after` (R3-C6). |
+| App-wide provider limits | With two or more runs at once: Parallel calls in flight never exceed 10 (and 4 per run), Firecrawl calls never exceed 2, Firecrawl call starts stay within the per-minute limit, and a full Firecrawl pool doesn't delay a Parallel call. With no limits passed, the gateway behaves as today. |
+| Step rows | Clean run: `completed` `discovery_batch` + `pipelines`. Breaker open in STEP 3: a `degraded` `discovery_batch` row with data and a `failed` `pipelines` row. A retry moves both to `started`, then `completed` on success. A STEP 5 raise leaves no `completed` `pipelines` row. A lost fence adds no row. A gateway-open failure adds no row. |
+| Background lifecycle | Start returns `202` before STEP 1. A shutdown mid-run saves `failed` + `retryable` before the shared LLM caller and the fake database close. The task dict is empty after completion. |
+| Status memory check | While a task is live, status answers `running` with its `completed_step` and no store read; `completed_step` changes only after the checkpoint write. Another user's ID gets `404`. After the task ends, status reads the row. |
+| Concurrent retries / stale reclaim / fencing / retry limit | The same checks as R2-C8, against the fake store's rules. |
+| Retryable split | Each error in the R3-C7 table gives the listed stage and `retryable`. A `401` under `McpConnectionError` gives `retryable: false` and one `r3_run.config_error`; a connection timeout gives `retryable: true`. A `RunStoreError` on the checkpoint saves stage `run_store`, retryable. |
+| Ownership and HTTP codes | Through the real routes with the fakes injected: another user's run is `404` on all three endpoints; `401`, `422` (bad `r2_run_id`, extra field), `404` (incl. an R2 version mismatch), `202`, `409`, `503` all hold. |
+
+**By hand on the dev Supabase** (when the store and migrations are first written): re-running both migrations changes nothing; RLS blocks the publishable key; the `updated_at` trigger moves on update; the completed-immutable trigger rejects a change; `degraded` rows accept output and `started` rows don't; one `claim_retry` on a stale and a fresh row proves the OR filter and timestamp format (as A6).
+
+**Live, kept small:**
+
+| Test | Passes when |
+|---|---|
+| Recorded parity | A recorded live run, replayed, gives the same final state with and without a STEP 4 failure plus retry. |
+| STEP 4 duration | Recorded on live runs, alone and with two runs in parallel (app-wide limits in play), to confirm `stale_after` (R3-C6). |
+| Firecrawl `401` shape | A run with a wrong Firecrawl key ends `failed`, `retryable: false` (R3-C7 Iteration 1). |
 
 ### Three Common Approaches
-The three listed in R2-C8: **(1) real providers + dev Supabase with record/replay (Finalized for R3)**, (2) fakes only, (3) HTTP contract tests only. R2-C8 Iteration 1 moved R2 to approach 2; R3 keeps approach 1.
+The three listed in R2-C8: (1) real providers + dev Supabase with record/replay, (2) fakes only, (3) HTTP contract tests only. **R3 uses approach 2 for all logic, plus small live runs for what only live runs show (Finalized, following R2-C8 Iteration 1).**
 
 ### Critical Factors (from our context)
-- **LLM and web output vary per call,** so parity needs replay.
+- **LLM and web output vary per call,** so parity needs fixed or replayed responses.
 - **A live STEP 4 is expensive,** so the tests must keep live runs to a few amenities.
+- **Real STEP 4 durations** set `stale_after`, and only live runs show them.
 
 ### Reasoning
-- **Approach 2** can't prove the conditional update, the trigger, RLS or the migration.
+- **Approach 1 for everything** would run the guard, lifecycle and HTTP tests against the dev database and live providers: slow, costly, and dependent on network and keys. R2 found that its fakes prove the same logic.
+- **Approach 2 alone** can't prove the conditional update, the triggers, RLS or the migration, and can't show real STEP 4 durations.
 - **Approach 3** can't show *which* step reran.
-- **Approach 1** proves both the database rules and parity, and the replay keeps parity exact. R3 adds one more reason: only live runs show real STEP 4 durations, and those set `stale_after`.
+- **Approach 2 + small live runs + a manual database check** proves the logic on every run of the test suite, and checks the SQL and the durations where they actually live.
 
 ### Critical Decision Choices
+- **Context-specific — the fake store must mirror the SQL rules exactly:** if they drift, the tests pass while the real store doesn't. The fake keeps its filters next to a comment naming the SQL condition it copies (as R2).
 - **Context-specific — keep live runs small:** use one or two categories with specific metrics and three places each, so a live run stays within a few minutes and a small token budget.
-- **General — fakes stay for logic:** the existing fake-gateway suites (`test_r3_m1_3_*`, `test_r3_m1_4_*`, `test_r3_m2_2_*`) keep covering the decision logic. The live tests only cover what fakes can't (the database, the guard, real durations).
+- **General — existing fakes stay for decision logic:** the fake-gateway suites (`test_r3_m1_3_*`, `test_r3_m1_4_*`, `test_r3_m2_2_*`) keep covering it.
+- **Risk accepted:** the SQL rules (conditional update, triggers, RLS, migrations) have no automated test, as in R2.
 
 ---
 
@@ -1147,14 +1336,21 @@ The three listed in R2-C8: **(1) real providers + dev Supabase with record/repla
   - **Execution:** R2 and R3 both run in the background (R2-C6 Iteration 2, R3-C7). R2 takes seconds and R3 minutes, so R2's stale cutoff is shorter (10 vs 30 min).
   - **Serialization:** R3 needs tuple-key encoding.
   - **Instances:** R3 needs one instance per run.
+  - **Provider limits:** R2 shares one Places cap; R3 shares one limit per web provider (Parallel search slots, Firecrawl slots + rate limiter), each behind the run's own limit.
+  - **Step table:** R3's has a `degraded` status for a breaker-open STEP 3; R2 has no degraded step.
+  - **Status from memory:** R3's memory reply carries `completed_step` (its progress screen needs it); R2's doesn't.
+  - **Config errors:** R2 checks Google's cause chain in discovery and enrichment; R3 can only check at gateway open (the LLM case stays open).
 - **Unchanged:** every step method body, every state object's fields and types, every degradation and edge-case rule, and `DeepSearch` (it calls R1 only).
 - **Prerequisites found in the code,** not in the problem statement:
   - the gateway shared across runs (R3-C2);
   - the tuple keys that can't round-trip (R3-C4);
   - the breaker-degraded STEP 3 (R3-C3);
+  - the per-gateway provider limits that multiply with parallel runs (R3-C2 Iteration 1);
+  - a refused key that looks like a transient failure (R3-C7 Iteration 1);
   - origin and radius missing from R1's output (R2 flow, step 1).
 - **Left out on purpose:**
-  - a cap on concurrent R3 runs (R3-C2);
+  - a cap on concurrent R3 runs (R3-C2 Iteration 1 limits each provider instead);
+  - an app-wide cap on LLM calls (R3-C2 Iteration 1);
   - a Places retention policy (R2-C4: data is kept for now; the policy comes in a later phase);
   - deduplicating repeated starts;
   - per-item checkpoints inside a step (the whole step is the unit);

@@ -1699,3 +1699,68 @@ class R2RunView:
     completed_step: Literal["discovery"] | None = None
     result: dict[int, dict[str, PredefinedMetricsRecord]] | None = None
     retryable: bool | None = None
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 3 over HTTP — run and step-record contracts (R3-C3, R3-C5, R3-C7).
+# ---------------------------------------------------------------------------------
+
+# The run status the page reads. `running` covers a live task and a crashed, not-yet-stale run.
+R3RunStatus = Literal["running", "finished", "failed"]
+
+# The one checkpoint on `r3_runs` (R3-C3): STEP 3 saved cleanly, so a retry starts at STEP 4.
+R3CompletedStep = Literal["discovery_batch"]
+
+# R3's two expensive steps, each with an `r3_run_steps` record row (R3-C5 Iteration 1).
+R3StepId = Literal["discovery_batch", "pipelines"]
+
+# A step row's status. `degraded` = STEP 3 ended with the breaker open (kept as a record only);
+# `started` only exists while a retry works on a claimed row.
+R3StepStatus = Literal["started", "completed", "degraded", "failed"]
+
+# The R3-C3 hook awaited at STEP 3's barrier: (step, state, breaker_open). It may raise to stop
+# the run (a lost fence or a store error); the method's `finally` still closes the gateway.
+StepCompletedCallback = Callable[[str, "SpecificMetricResolutionState", bool], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class R3StepRecord:
+    """One `r3_run_steps` row, as the coordinator reads it (outputs are not loaded)."""
+
+    step_id: R3StepId
+    status: R3StepStatus
+    error_type: str | None = None
+    retryable: bool | None = None
+
+
+@dataclass(frozen=True)
+class R3RunRecord:
+    """One `r3_runs` row with its step rows, decoded. `output` is set only when finished."""
+
+    run_id: str
+    user_id: str
+    r2_run_id: str
+    status: R3RunStatus
+    state: SpecificMetricResolutionState
+    completed_step: R3CompletedStep | None
+    attempts: int
+    retryable: bool
+    updated_at: str
+    output: dict[tuple[int, str], AmenityResolutionRecord] | None = None
+    failure_stage: str | None = None
+    steps: dict[R3StepId, R3StepRecord] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class R3RunView:
+    """What the page needs for one R3 run: progress, the result once finished, or retryable.
+
+    `result` is already JSON-ready: one `{category_id, place_id, value}` row per amenity, built
+    by the R3 store codec (the records hold tuple-keyed data FastAPI's encoder cannot write).
+    """
+
+    run_id: str
+    status: R3RunStatus
+    completed_step: R3CompletedStep | None = None
+    result: list[dict] | None = None
+    retryable: bool | None = None
