@@ -4,3 +4,6 @@
 node_modules
 dist
 backend/certs/
+
+# Sample-run outputs (local only, never committed)
+backend/src/services/deep_search/sample_output/

@@ -1781,7 +1781,7 @@ Contract rules (per metric, in order):
 | K1 Text completeness | `label`, `question`, `verification`, `resolution_source.web_target`, `resolution_source.scrape_target` are non-empty after trimming. | Drop |
 | K2 Value-type parameters | `number_with_unit` → `unit` set and `enum_values` empty. `enum` → ≥2 distinct non-empty `enum_values` and `unit` unset. `boolean` / `date_time` → `unit` unset and `enum_values` empty. | Drop |
 | K3 Band within depth | `band = specific_attributes` only when the category's `depth = specific_attributes`. | Drop |
-| K4 (retired) | Formerly "`firecrawl` only with `band = specific_attributes`". Removed: per RC10 every LLM-defined metric carries both a `web_target` and a `scrape_target` in either band, so there is no per-metric tool to gate, and `google_maps` cannot occur because the LLM-defined metric names no tool. The K-numbers of the other rules are kept so existing references stay valid. | — |
+| K4 (retired) | Formerly "`firecrawl` only with `band = specific_attributes`". Removed: per RC10 (revised) every LLM-defined metric carries a `web_target` plus a class-conditional `scrape_target` or `review_target` (by `evidence_class`) in either band, so there is no per-metric tool to gate, and `google_maps` cannot occur because the LLM-defined metric names no tool. The K-numbers of the other rules are kept so existing references stay valid. | — |
 | K5 No duplicate | Same `label` (case-insensitive, trimmed) already kept for this category. | Drop the later one |
 | K6 Cap | More than 4 survivors in one band for one category. | Drop the extras after the 4th, in model order |
 
@@ -2820,7 +2820,7 @@ A category with no `specific_metrics` (for example a `basic_profile` category) h
 - RC7: All M1 records. C3.1 goal.
 - RC8: URL first, then the loop and concurrent calls. C3.1 operation 2.
 - RC9 (revised): Two record types, `PredefinedMetricsRecord` and `SpecificMetricsRecord`, combined once by C3.2.5 into one versioned `AmenityMetricsSet`. `AmenityRecordSet` is removed. C3.2 goal, operations 5–6 and output decisions.
-- RC10: Both sources specified for every LLM-defined metric. Prerequisites.
+- RC10 (revised): `resolution_source` is class-conditional — `web_target` always, plus `scrape_target` (factual) or `review_target` (experiential), selected by the metric's `evidence_class`. Prerequisites.
 
 **Cross-mechanism changes from the output-object split**
 
@@ -2854,10 +2854,10 @@ Locked decisions carried in and not reopened:
 - RC7: M3 runs on all M1 records.
 - RC8: URL first, then the loop.
 - RC9 (revised): output is a separate `SpecificMetricsRecord` per amenity. C3.2.5 combines these with the `PredefinedMetricsRecord`s into one versioned `AmenityMetricsSet` (1.0). `AmenityRecord` is renamed `PredefinedMetricsRecord` and `AmenityRecordSet` is removed.
-- RC10: both tools are the specified sources of every LLM-defined metric.
+- RC10 (revised): `web_target` always, plus a class-conditional second key (`scrape_target` factual / `review_target` experiential) selected by `evidence_class`.
 - Firecrawl tool is `firecrawl_crawl`.
 
-Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema change that gives every LLM-defined metric both sources (RC10).
+Upstream dependency (not a sub-component of this plan): the Mechanism 6 schema change that adds `evidence_class` and makes `resolution_source` class-conditional (RC10 revised).
 
 ### Open decisions carried forward (R3 promotion)
 

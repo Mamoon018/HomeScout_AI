@@ -59,20 +59,23 @@ never fetched.
 - unit: required when value_type is number_with_unit. null otherwise.
 - enum_values: at least two distinct members when value_type is enum. An empty list
   otherwise.
-- resolution_source: {web_target, scrape_target}. Every metric carries BOTH. web_target names
-  the attribute or question to resolve, in the entity's domain terms, phrased as a direction
-  (for example "availability of a dedicated powerlifting platform at the gym") — never a
-  verdict to confirm, a source type (no "reviews", "listings", "official site"), or bare
-  keywords; specific enough that the search keywords follow directly from it. scrape_target is
-  the concrete page type firecrawl fetches (for example the official site section or listing).
-  Each names something specific. There is no tool field and never google_maps: the tool is
-  implied by the field.
-- verification: the evidence that confirms the value. State the concrete evidence first,
-  then MUST end with exactly one source-acceptability clause: "first-party/authoritative
-  source only" when a customer review cannot confirm it (factual, for example a price, a
-  policy, a listed facility), or "customer-review evidence acceptable" when a review quote
-  can (experiential, for example sentiment, perceived speed, atmosphere). Exactly one
-  clause, never both, never neither.
+- evidence_class: factual | experiential. factual = an official/authoritative source can
+  confirm the value (a price, a policy, a listed facility); experiential = only lived customer
+  experience can (sentiment, perceived speed, atmosphere). A metric that merely looks
+  experiential but is officially confirmable is factual. This single signal fixes the second
+  resolution_source key and whether a customer review may resolve the value.
+- resolution_source: exactly two keys. web_target (always) names the attribute or question to
+  resolve, in the entity's domain terms, phrased as a direction (for example "availability of a
+  dedicated powerlifting platform at the gym") — never a verdict to confirm, a source type (no
+  "reviews", "listings", "official site"), or bare keywords; specific enough that the search
+  keywords follow directly from it. The second key is set by evidence_class: factual →
+  scrape_target, the concrete official first-party page firecrawl fetches (for example the
+  facilities/equipment section on the official site); experiential → review_target, what to
+  look for in the customer-reviews block (reviews are read, never fetched). Each names something
+  specific. There is no tool field and never google_maps: the tool is implied by the field.
+- verification: the bar only — the concrete evidentiary standard the evidence must meet to
+  commit the value (what must be shown, how much, how strong). No source-acceptability clause:
+  source trust is derived from evidence_class, not restated here.
 - null_policy: null or unknown. What to emit when the value cannot be resolved. Never a guess.
 - band: operating_details or specific_attributes.
 
@@ -80,10 +83,10 @@ Rejection example: "is it cozy?" fails because value_type has no enumerable rang
 resolution_source names nothing concrete, and verification cannot be specified.
 Reformulated to pass: label ambiance; question "the customer wants a quiet place to work
 (persona: remote worker), is it quiet or lively?"; value_type enum; enum_values quiet, mixed,
-lively; resolution_source web_target "noise level and atmosphere at the venue" and
-scrape_target "about or atmosphere section on the official site"; verification "dominant
-sentiment across at least 5 reviews mentioning noise or atmosphere; customer-review evidence
-acceptable"; null_policy unknown."""
+lively; evidence_class experiential; resolution_source web_target "noise level and atmosphere
+at the venue" and review_target "mentions of noise or atmosphere in customer reviews";
+verification "dominant sentiment across at least 5 reviews mentioning noise or atmosphere";
+null_policy unknown."""
 
 TIE_RULES = """\
 WHICH METRICS TO DEFINE
@@ -156,8 +159,9 @@ def _metric(
     label: str,
     question: str,
     value_type: str,
+    evidence_class: str,
     web_target: str,
-    scrape_target: str,
+    secondary_target: str,
     verification: str,
     band: str,
     *,
@@ -165,13 +169,24 @@ def _metric(
     enum_values: list[str] | None = None,
     null_policy: str = "unknown",
 ) -> dict:
+    # Both secondary keys are present (nullable); evidence_class picks which one carries the
+    # target — scrape_target for factual, review_target for experiential.
+    resolution_source: dict[str, str | None] = {
+        "web_target": web_target,
+        "scrape_target": None,
+        "review_target": None,
+    }
+    resolution_source["scrape_target" if evidence_class == "factual" else "review_target"] = (
+        secondary_target
+    )
     return {
         "label": label,
         "question": question,
         "value_type": value_type,
         "unit": unit,
         "enum_values": enum_values or [],
-        "resolution_source": {"web_target": web_target, "scrape_target": scrape_target},
+        "evidence_class": evidence_class,
+        "resolution_source": resolution_source,
         "verification": verification,
         "null_policy": null_policy,
         "band": band,
@@ -215,10 +230,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer explicitly asked for a restaurant for weeknight "
                             "dinners: what does a typical dinner cost per person?",
                             "number_with_unit",
+                            "factual",
                             "typical dinner cost per person at the restaurant",
                             "menu or prices page on the official site",
-                            "menu prices on the official site or at least 3 listings agree; "
-                            "first-party/authoritative source only",
+                            "menu prices on the official site or at least 3 listings agree",
                             "operating_details",
                             unit="USD per person",
                         ),
@@ -227,10 +242,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer explicitly asked for a restaurant for weeknight "
                             "dinners: can they walk in without a booking?",
                             "boolean",
+                            "factual",
                             "weeknight reservation requirement at the restaurant",
                             "reservations or booking page on the official site",
-                            "stated on the official site or booking page; "
-                            "first-party/authoritative source only",
+                            "stated on the official site or booking page",
                             "operating_details",
                         ),
                         _metric(
@@ -238,10 +253,11 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer explicitly asked for a restaurant for weeknight "
                             "dinners: is service usually slow or fast?",
                             "enum",
+                            "experiential",
                             "typical service speed and wait time at the restaurant",
-                            "about or service information section on the official site",
+                            "mentions of service speed or wait time in customer reviews",
                             "dominant sentiment across at least 5 reviews mentioning wait "
-                            "time; customer-review evidence acceptable",
+                            "time",
                             "operating_details",
                             enum_values=["slow", "mixed", "fast"],
                         ),
@@ -280,10 +296,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer explicitly asked for a gym to train at before "
                             "work: what does membership cost per month?",
                             "number_with_unit",
+                            "factual",
                             "monthly membership cost at the gym",
                             "membership or pricing page on the official site",
-                            "price stated on the official site or at least 3 listings agree; "
-                            "first-party/authoritative source only",
+                            "price stated on the official site or at least 3 listings agree",
                             "operating_details",
                             unit="USD per month",
                         ),
@@ -292,10 +308,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer named a powerlifting platform as a requirement: "
                             "does the gym have a dedicated one?",
                             "boolean",
+                            "factual",
                             "availability of a dedicated powerlifting platform at the gym",
                             "facilities or equipment page on the official site",
-                            "listed on the official facilities page; "
-                            "first-party/authoritative source only",
+                            "listed on the official facilities page",
                             "specific_attributes",
                         ),
                         _metric(
@@ -303,10 +319,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer named a powerlifting platform as a requirement: "
                             "how many platforms are there to share?",
                             "number_with_unit",
+                            "factual",
                             "number of powerlifting platforms at the gym",
                             "equipment list page on the official site",
-                            "count stated on the official equipment list; "
-                            "first-party/authoritative source only",
+                            "count stated on the official equipment list",
                             "specific_attributes",
                             unit="platforms",
                         ),
@@ -348,10 +364,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The inferred reasoning shows a son who needs a routine "
                             "check-up soon: how many days until a new patient is seen?",
                             "number_with_unit",
+                            "factual",
                             "how long a new patient waits for an appointment at the practice",
                             "new patient or appointments page on the official site",
-                            "wait stated on the booking page; "
-                            "first-party/authoritative source only",
+                            "wait stated on the booking page",
                             "operating_details",
                             unit="days",
                         ),
@@ -360,10 +376,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The inferred reasoning shows a young son: does the practice "
                             "see young children?",
                             "boolean",
+                            "factual",
                             "young-children dental care at the practice",
                             "services or patients page on the official site",
-                            "stated on the practice's own listing or services text; "
-                            "first-party/authoritative source only",
+                            "stated on the practice's own listing or services text",
                             "operating_details",
                         ),
                     ],
@@ -408,10 +424,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer explicitly asked for a hair salon: how soon can "
                             "a new client get an appointment?",
                             "number_with_unit",
+                            "factual",
                             "how soon a new client can get an appointment at the salon",
                             "booking or appointments page on the official site",
-                            "stated on the booking page; "
-                            "first-party/authoritative source only",
+                            "stated on the booking page",
                             "operating_details",
                             unit="days",
                         ),
@@ -420,10 +436,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The customer named a stylist who does curly cuts and has "
                             "curly hair: does the salon list one?",
                             "boolean",
+                            "factual",
                             "availability of a curly-cut specialist at the salon",
                             "team or services page on the official site",
-                            "a stylist or a curly-cut service listed on the official site; "
-                            "first-party/authoritative source only",
+                            "a stylist or a curly-cut service listed on the official site",
                             "specific_attributes",
                         ),
                         _metric(
@@ -431,10 +447,10 @@ _METRIC_FEW_SHOT_PAIRS: tuple[tuple[dict, dict], ...] = (
                             "The phrase 'reasonable prices' is read as the price of a "
                             "standard haircut: what does one cost?",
                             "number_with_unit",
+                            "factual",
                             "price of a standard haircut at the salon",
                             "price list page on the official site",
-                            "price listed on the official price list; "
-                            "first-party/authoritative source only",
+                            "price listed on the official price list",
                             "specific_attributes",
                             unit="USD",
                         ),

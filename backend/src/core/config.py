@@ -22,6 +22,18 @@ class Settings(BaseSettings):
         default="authenticated",
         validation_alias="SUPABASE_JWT_AUDIENCE",
     )
+    # Server-only key for the r1_runs table (RLS blocks every other key). Optional so auth-only
+    # setups and the existing tests start without it; the R1 run endpoints answer 503 when unset.
+    supabase_service_role_key: str | None = Field(
+        default=None,
+        validation_alias="SUPABASE_SERVICE_ROLE_KEY",
+    )
+    # Upper bound on one r1_runs database call, so a slow database cannot hold a request open.
+    supabase_db_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        validation_alias="SUPABASE_DB_TIMEOUT_SECONDS",
+    )
     google_maps_api: str = Field(validation_alias="GOOGLE_MAPS_API")
     captcha_enabled: bool = Field(default=True, validation_alias="CAPTCHA_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
@@ -70,6 +82,13 @@ class Settings(BaseSettings):
     firecrawl_probe_url: str = Field(
         default="https://example.com",
         validation_alias="FIRECRAWL_PROBE_URL",
+    )
+    # R3.M1.5 run-level circuit breaker: consecutive `availability` LLM failures (no success in
+    # between) that open the breaker for the rest of the run.
+    metric_resolution_breaker_threshold: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="METRIC_RESOLUTION_BREAKER_THRESHOLD",
     )
 
     @property

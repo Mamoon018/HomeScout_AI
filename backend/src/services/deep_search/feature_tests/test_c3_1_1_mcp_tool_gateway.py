@@ -635,7 +635,7 @@ async def test_t21_rate_limit_retries_twice_with_backoffs_then_fails(op, no_wait
     assert isinstance(result, ToolFailure)
     assert result.kind == "rate_limited"
     assert calls["n"] == 3  # one attempt plus two retries
-    assert no_wait == [30.0, 60.0]
+    assert no_wait == [30.0, 30.0]
 
 
 async def test_t22_a_transient_failure_that_clears_returns_the_typed_result(no_wait) -> None:
@@ -661,13 +661,13 @@ async def test_t23_transport_errors_are_retried_and_recover(no_wait) -> None:
     gateway = _gateway(
         _parallel_server(),
         _firecrawl_server(),
-        flaky={"parallel": [ConnectionError("reset"), httpx2.ConnectError("refused")]},
+        flaky={"parallel": [ConnectionError("reset")]},  # one blip; timeout/transport retry once
     )
     await gateway.open()
     result = await gateway.search_web("o", ["q"])
     await gateway.aclose()
     assert isinstance(result, WebSearchResult)
-    assert no_wait == [2.0, 3.0]
+    assert no_wait == [2.0]
 
 
 async def test_t24_persistent_transport_error_returns_a_transport_failure(no_wait) -> None:
@@ -681,7 +681,7 @@ async def test_t24_persistent_transport_error_returns_a_transport_failure(no_wai
     await gateway.aclose()
     assert isinstance(result, ToolFailure)
     assert (result.tool, result.kind) == ("web_search", "transport")
-    assert no_wait == [2.0, 3.0]
+    assert no_wait == [2.0]  # one attempt plus one retry, then the budget layer takes over
 
 
 @pytest.mark.parametrize("op", ["search", "map", "scrape"])
@@ -731,8 +731,8 @@ async def test_t25_timeout_is_retried_then_reported_and_the_session_is_reused(
     await gateway.aclose()
     assert isinstance(timed_out, ToolFailure)
     assert timed_out.kind == "timeout"
-    assert calls["n"] == 3
-    assert no_wait == [2.0, 3.0]
+    assert calls["n"] == 2  # one attempt plus one timeout retry
+    assert no_wait == [2.0]
     assert not isinstance(follow_up, ToolFailure)
     # A timeout is our side giving up on one wait: no client was rebuilt for either server.
     assert events.count(("open", "parallel")) == 1
@@ -1331,13 +1331,13 @@ async def test_t50_mcp_error_sse_disconnect_is_transport_and_retried(no_wait) ->
     gateway = _gateway(
         _parallel_server(),
         _firecrawl_server(),
-        flaky={"parallel": [disconnect, disconnect]},  # two disconnects, then the real body
+        flaky={"parallel": [disconnect]},  # one disconnect, then the real body
     )
     await gateway.open()
     result = await gateway.search_web("o", ["q"])
     await gateway.aclose()
     assert isinstance(result, WebSearchResult)  # retried on the same session and recovered
-    assert no_wait == [2.0, 3.0]  # transport backoff, not the rate-limit one
+    assert no_wait == [2.0]  # transport backoff, not the rate-limit one
 
 
 async def test_t51_persistent_sse_disconnect_returns_transport_failure(no_wait) -> None:
@@ -1350,7 +1350,7 @@ async def test_t51_persistent_sse_disconnect_returns_transport_failure(no_wait) 
     await gateway.aclose()
     assert isinstance(result, ToolFailure)
     assert (result.tool, result.kind) == ("web_search", "transport")
-    assert no_wait == [2.0, 3.0]
+    assert no_wait == [2.0]
 
 
 async def test_t52_a_429_wrapped_in_mcperror_is_rate_limited(no_wait) -> None:
@@ -1363,7 +1363,23 @@ async def test_t52_a_429_wrapped_in_mcperror_is_rate_limited(no_wait) -> None:
     await gateway.aclose()
     assert isinstance(result, ToolFailure)
     assert result.kind == "rate_limited"  # 429 wins over the generic MCPError->transport branch
-    assert no_wait == [30.0, 60.0]  # window-clearing backoff
+    assert no_wait == [30.0, 30.0]  # window-clearing backoff
+
+
+async def test_t52b_mixed_failure_kinds_keep_their_own_retry_limits(no_wait) -> None:
+    """R3.M1.4 prerequisite: retry limits are per kind, so a transport blip followed by two 429s
+    still gets its one transport retry AND both rate-limit retries (no shared counter)."""
+    throttled = MCPError(-32000, "upstream returned 429 Too Many Requests")
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(),
+        flaky={"parallel": [ConnectionError("reset"), throttled, throttled]},
+    )
+    await gateway.open()
+    result = await gateway.search_web("o", ["q"])
+    await gateway.aclose()
+    assert isinstance(result, WebSearchResult)
+    assert no_wait == [2.0, 30.0, 30.0]
 
 
 def test_t53_classifier_maps_mcp_error_and_wrapped_429() -> None:

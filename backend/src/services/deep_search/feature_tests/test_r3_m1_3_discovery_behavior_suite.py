@@ -33,11 +33,15 @@ from src.services.deep_search.feature_schemas.schemas import (
     CanonicalPlace,
     CategoryMetricPlan,
     GeoPoint,
+    MetricResolutionSource,
+    MetricSpec,
     PredefinedMetricsRecord,
 )
 from src.services.deep_search.official_url_gate import compact, official_url_gate
 from src.services.deep_search.specific_metric_resolution import (
+    _CircuitBreaker,
     SpecificMetricResolution,
+    _failed_record,
     _DiscoveryWorkItem,
     _index_candidates,
     _resolve_verdict,
@@ -145,7 +149,28 @@ def _caller(*, turns=None, bodies=None) -> StructuredLLMCaller:
 
 
 def _service(gateway, caller) -> SpecificMetricResolution:
-    return SpecificMetricResolution(tool_gateway=gateway, llm_caller=caller, owns_caller=False)
+    return _Step3OnlyService(tool_gateway=gateway, llm_caller=caller, owns_caller=False)
+
+
+# STEP 3 suites: STEP 4 (phase 1 + R3.M2.2 resolution) is out of scope here, so each pipeline ends
+# as `pipeline_error` with no LLM call (a `pipeline_error` never triggers the run-level raise).
+class _Step3OnlyService(SpecificMetricResolution):
+    async def _run_amenity_pipeline(self, work_item, *args, **kwargs):
+        return _failed_record(work_item, "pipeline_error")
+
+
+_METRIC = MetricSpec(
+    label="accepts_new_patients",
+    question="Does the practice accept new patients?",
+    value_type="boolean",
+    unit=None,
+    enum_values=[],
+    evidence_class="factual",
+    resolution_source=MetricResolutionSource(web_target="new patients", scrape_target="intake"),
+    verification="Stated by the practice or a listing.",
+    null_policy="unknown",
+    band="specific_attributes",
+)
 
 
 def _discovery_turn() -> AssistantTurn:
@@ -201,7 +226,9 @@ async def _discover(service, rec):
     wi = _DiscoveryWorkItem(
         rec.category_id, rec.place_id, "dentist", "specific_attributes", [object()]
     )
-    return await service._discover_website_url(wi, rec, RAW_DEFS, "batch")
+    return await service._discover_website_url(
+        wi, rec, RAW_DEFS, "batch", breaker=_CircuitBreaker(threshold=3)
+    )
 
 
 # ==================================================================================================
@@ -478,7 +505,7 @@ async def test_discovery_with_no_selectable_candidates_yields_none_with_telemetr
 def _state_for_batch() -> AmenitySearchState:
     """Handoff state as after M1: one eligible category (pA google-pass, pB declined, pD missing
     record) and one ineligible basic_profile category (pC)."""
-    eligible = CategoryMetricPlan(1, "dentist", "specific_attributes", [], [object()])
+    eligible = CategoryMetricPlan(1, "dentist", "specific_attributes", [], [_METRIC])
     basic = CategoryMetricPlan(2, "park", "basic_profile", [], [])  # RC7: no work item
     cp = CanonicalPlace("x", {})
     return AmenitySearchState(

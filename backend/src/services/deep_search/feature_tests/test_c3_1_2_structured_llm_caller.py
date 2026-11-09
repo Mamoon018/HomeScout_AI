@@ -421,6 +421,79 @@ async def test_call_structured_all_refuse_raises_typed():
     assert exc.value.stage == STAGE
 
 
+# --- R3.M1.4 prerequisite: failure_class → cause ----------------------------
+
+
+def _avail(msg="timed out"):
+    return LLMProviderError(msg, failure_class="availability")
+
+
+async def test_call_turn_all_availability_failures_raise_availability_cause(collector):
+    caller = StructuredLLMCaller([
+        FakeProvider("openai", turns=[_avail()]),
+        FakeProvider("groq", turns=[_avail("503")]),
+    ])
+    with pytest.raises(MetricResolutionProviderError) as exc:
+        await caller.call_turn(
+            messages=[], tools=[], tool_choice="required",
+            stage=STAGE, provider_error_cls=MetricResolutionProviderError,
+        )
+    assert exc.value.cause == "availability"
+    failed = collector.events(LLM_PROVIDER_ATTEMPT_EVENT)
+    assert [a["failure_class"] for a in failed] == ["availability", "availability"]
+    assert collector.events("llm_provider.rejected")[0]["cause"] == "availability"
+
+
+async def test_call_turn_mixed_chain_is_content_cause():
+    caller = StructuredLLMCaller([
+        FakeProvider("openai", turns=[LLMProviderError("refused", failure_class="content")]),
+        FakeProvider("groq", turns=[_avail()]),
+    ])
+    with pytest.raises(MetricResolutionProviderError) as exc:
+        await caller.call_turn(
+            messages=[], tools=[], tool_choice="required",
+            stage=STAGE, provider_error_cls=MetricResolutionProviderError,
+        )
+    assert exc.value.cause == "content"
+
+
+async def test_call_structured_all_refusals_are_content_cause():
+    p0 = _DecodingProvider("openai", responses=[
+        _sdk_response(content='{"ok": 0}', finish_reason="stop", refusal="declined"),
+    ])
+    caller = StructuredLLMCaller([p0])
+    with pytest.raises(MetricResolutionProviderError) as exc:
+        await caller.call_structured(
+            instruction="i", user_content="u", json_schema={}, schema_name="s",
+            stage=STAGE, provider_error_cls=MetricResolutionProviderError,
+        )
+    assert exc.value.cause == "content"
+
+
+async def test_call_structured_availability_chain_and_r1_class_is_unchanged():
+    """An R1 error class does not declare `carries_cause`, so it is raised exactly as before."""
+    caller = StructuredLLMCaller([FakeProvider("openai", bodies=[_avail()])])
+    with pytest.raises(CategoryMappingProviderError) as exc:
+        await caller.call_structured(
+            instruction="i", user_content="u", json_schema={}, schema_name="s",
+            stage="execute_taxonomy_mapping", provider_error_cls=CategoryMappingProviderError,
+        )
+    assert exc.value.stage == "execute_taxonomy_mapping"
+    assert not hasattr(exc.value, "cause")
+
+
+def test_untagged_provider_error_defaults_to_content():
+    # De-mask: a raise site that forgets to tag itself can never move the breaker.
+    assert LLMProviderError("x").failure_class == "content"
+    assert LLMResponseTruncatedError("cut").failure_class == "content"
+
+
+def test_decode_body_content_failures_are_tagged_content():
+    with pytest.raises(LLMProviderError) as exc:
+        _decode_body(provider="openai", model="m", content=None, finish_reason="stop")
+    assert exc.value.failure_class == "content"
+
+
 # --- lifecycle --------------------------------------------------------------
 
 
