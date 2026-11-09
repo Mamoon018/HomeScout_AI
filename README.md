@@ -89,7 +89,7 @@ Monorepo layout:
 | --- | --- |
 | [`backend/`](backend/) | FastAPI service — the Deep Search engine plus supporting APIs. See [`backend/README.md`](backend/README.md). |
 | [`frontend/`](frontend/) | React 19 + Vite single-page app. |
-| [`supabase/`](supabase/) | Database migrations / Authentication |
+| [`backend/supabase/`](backend/supabase/) | Database migrations (Supabase CLI project folder) |
 |
 
 ## Getting started

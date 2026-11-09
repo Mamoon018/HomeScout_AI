@@ -24,10 +24,9 @@ from src.services.deep_search.feature_prompts.phase1_web_search_instruction impo
     build_phase1_search_instruction,
 )
 from src.services.deep_search.feature_schemas.schemas import (
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricsSourceContent,
     MetricSpec,
@@ -486,11 +485,9 @@ async def test_open_breaker_makes_discovery_return_none_without_searching():
 # --------------------------------------------------------------------------------------------------
 # STEP 4 / STEP 5 through the real entry point.
 # --------------------------------------------------------------------------------------------------
-def _state(place_ids) -> AmenitySearchState:
+def _state(place_ids) -> SpecificMetricResolutionState:
     plan = CategoryMetricPlan(1, "climbing_gym", "specific_attributes", [], METRICS)
-    return AmenitySearchState(
-        origin=GeoPoint(0.0, 0.0),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[plan],
         discovered_places={1: {pid: CanonicalPlace(pid, {}) for pid in place_ids}},
         # Each record's own Google website passes the official-URL gate, so no discovery search.

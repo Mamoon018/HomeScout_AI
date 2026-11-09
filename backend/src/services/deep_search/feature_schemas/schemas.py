@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -877,11 +878,36 @@ class RequirementInterpretationState:
 
 
 # ---------------------------------------------------------------------------------
-# Responsibility 1 over HTTP — pause/resume contracts (C1, C3, C4).
+# Responsibility 1 over HTTP — run and step-checkpoint contracts (R1 Step Persistence).
 # ---------------------------------------------------------------------------------
 
-# The one status a run reports.
-R1RunStatus = Literal["needs_answers", "finished", "failed"]
+# The one status a run reports. `running` is set while a request works on the run.
+R1RunStatus = Literal["running", "needs_answers", "finished", "failed"]
+
+# The 8 non-reproducible steps of R1, in run order. Each one is one `r1_run_steps` row.
+R1StepId = Literal[
+    "extraction",
+    "taxonomy_mapping",
+    "clarification_questions",
+    "clarification_answers",
+    "flag_resolution",
+    "category_inference",
+    "depth_assignment",
+    "metric_definition",
+]
+R1_STEP_ORDER: tuple[R1StepId, ...] = (
+    "extraction",
+    "taxonomy_mapping",
+    "clarification_questions",
+    "clarification_answers",
+    "flag_resolution",
+    "category_inference",
+    "depth_assignment",
+    "metric_definition",
+)
+
+# A step row's status. `started` only exists while a retry works on its claimed step.
+R1StepStatus = Literal["started", "completed", "failed"]
 
 
 class ClarificationAnswer(BaseModel):
@@ -909,20 +935,74 @@ class R1StartOutcome:
     state: RequirementInterpretationState
 
 
+# The validated result one step saves: an `execute_*` result, or the customer's raw answers.
+StepResult = (
+    ExtractedRequirements
+    | TaxonomyMappingResult
+    | ClarificationResult
+    | list[ClarificationAnswer]
+    | FlagResolutionResult
+    | InferredCategoriesResult
+    | DepthAssignmentResult
+    | MetricDefinitionResult
+)
+
+
+@dataclass(frozen=True)
+class R1StepRecord:
+    """One `r1_run_steps` row, decoded. `output` is set only when the step is completed."""
+
+    step_id: R1StepId
+    status: R1StepStatus
+    output: Any = None
+    error_type: str | None = None
+    error_message: str | None = None
+    retryable: bool | None = None
+
+
 @dataclass(frozen=True)
 class R1RunRecord:
-    """One `r1_runs` row as the coordinator reads it."""
+    """One `r1_runs` row and all its step rows, as the coordinator reads them."""
 
     run_id: str
     user_id: str
     status: R1RunStatus
-    state: RequirementInterpretationState | None
-    output: list[CategoryMetricPlan] | None
-    failure_stage: str | None
-    failure_message: str | None
-    retryable: bool
+    raw_input: str
     attempts: int
     updated_at: str
+    steps: dict[R1StepId, R1StepRecord] = field(default_factory=dict)
+
+    @property
+    def completed(self) -> dict[R1StepId, Any]:
+        """The saved result of every completed step, keyed by step."""
+        return {
+            step_id: step.output
+            for step_id, step in self.steps.items()
+            if step.status == "completed"
+        }
+
+    @property
+    def failed_step(self) -> R1StepRecord | None:
+        """The step that failed, when one did."""
+        return next((step for step in self.steps.values() if step.status == "failed"), None)
+
+
+@dataclass
+class R1StepCheckpoints:
+    """What R1 sees of one run's saved steps during one request.
+
+    `completed` holds the saved result of each completed step; a step found here is returned
+    without an LLM call. With `allow_calls` False, reaching an unsaved step raises instead of
+    calling (used to rebuild a paused or finished run). `claimed_step` is the failed step a retry
+    claimed, so its save updates the existing row. `in_flight` names the step being called, so a
+    failure can be recorded against it. `on_completed` saves a new result; None saves nothing.
+    """
+
+    completed: dict[R1StepId, Any] = field(default_factory=dict)
+    allow_calls: bool = True
+    claimed_step: R1StepId | None = None
+    in_flight: R1StepId | None = None
+    on_completed: Callable[[R1StepId, Any], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -1075,7 +1155,9 @@ class PredefinedMetricsRecord:
     contact_phone: str | None
     rating: float | None
     review_volume: int | None
-    price_level: str | None
+    # The Places `PriceLevel` enum value as `Place.to_dict` returns it (an int). The annotation
+    # was `str | None`; the value never changed, and the R2 state codec needs the true type.
+    price_level: int | None
     reviews: list | None
     routing: dict[str, RouteView | None]
     transit: TransitView | None
@@ -1493,17 +1575,17 @@ class AmenityResolutionRecord:
 
 @dataclass
 class AmenitySearchState:
-    """Responsibility 2 mutable handoff; M1.1 writes `discovered_places`, M1.2 writes `enrichment`.
+    """Responsibility 2 (R2) state: its inputs and its own outputs only (R2-C1).
 
+    M1.1 writes `discovered_places`, M1.2 writes `enrichment`, M1.3 writes `predefined_records`.
     `discovered_places` is keyed category_id then place_id, so dedup is within a category
     only (a place matching two categories is one record per category). `enrichment` is keyed by
     the deduplicated union of place_ids across categories (routing/transit from a fixed origin do
     not vary by category). `radius_km` defaults to DEFAULT_RADIUS_KM.
 
     `predefined_records` is the M1.3 output: a plain nested dict (no envelope, no version) keyed
-    category_id then place_id, None-free (an empty dict until M1.3 runs). `specific_records` is
-    the Mechanism 3 output, same keying, populated by C3.2.5. `amenity_records` holds the
-    combined, versioned `AmenityMetricsSet`, None until C3.2.5 runs.
+    category_id then place_id, None-free (an empty dict until M1.3 runs). R3's fields live in
+    `SpecificMetricResolutionState`; R3 receives `AmenitySearchOutput`.
     """
 
     origin: GeoPoint
@@ -1511,6 +1593,33 @@ class AmenitySearchState:
     category_metric_plans: list[CategoryMetricPlan]
     discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     enrichment: dict[str, EnrichmentBundle] = field(default_factory=dict)
+    predefined_records: dict[int, dict[str, PredefinedMetricsRecord]] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True)
+class AmenitySearchOutput:
+    """The R2 → R3 handoff (R2-C1): exactly what R3 reads. `enrichment` is not handed over."""
+
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]]
+    predefined_records: dict[int, dict[str, PredefinedMetricsRecord]]
+
+
+@dataclass
+class SpecificMetricResolutionState:
+    """Responsibility 3 (R3) state: R2's handoff fields plus R3's own outputs (R3-C1).
+
+    The inputs are copied from `AmenitySearchOutput` at R3 start. The output fields moved here
+    unchanged from the old shared state, with the same names, types and defaults.
+    `specific_records` is the Mechanism 3 output, same keying as `predefined_records`, populated
+    by C3.2.5. `amenity_records` holds the combined, versioned `AmenityMetricsSet`, None until
+    C3.2.5 runs.
+    """
+
+    category_metric_plans: list[CategoryMetricPlan]
+    discovered_places: dict[int, dict[str, CanonicalPlace]] = field(default_factory=dict)
     predefined_records: dict[int, dict[str, PredefinedMetricsRecord]] = field(
         default_factory=dict
     )
@@ -1534,3 +1643,124 @@ class AmenitySearchState:
     resolution_results: dict[tuple[int, str], AmenityResolutionRecord] = field(
         default_factory=dict
     )
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 over HTTP — run and step-record contracts (R2-C2, R2-C4, R2-C6).
+# ---------------------------------------------------------------------------------
+
+# The run status the page reads. `running` covers a live task and a crashed, not-yet-stale run.
+R2RunStatus = Literal["running", "finished", "failed"]
+
+# R2's step plan, in run order (R2-C2). Only `discovery` is checkpointed on `r2_runs`.
+R2StepName = Literal["discovery", "enrichment", "attachment"]
+
+# The two non-reproducible steps that get an `r2_run_steps` row (attachment is pure).
+R2StepId = Literal["discovery", "enrichment"]
+
+# A step row's status. `started` only exists while a retry works on its claimed step.
+R2StepStatus = Literal["started", "completed", "failed"]
+
+
+@dataclass(frozen=True)
+class R2StepRecord:
+    """One `r2_run_steps` row, as the coordinator reads it (outputs are not loaded)."""
+
+    step_id: R2StepId
+    status: R2StepStatus
+    error_type: str | None = None
+    retryable: bool | None = None
+
+
+@dataclass(frozen=True)
+class R2RunRecord:
+    """One `r2_runs` row with its step rows, decoded. `output` is set only when finished."""
+
+    run_id: str
+    user_id: str
+    r1_run_id: str
+    status: R2RunStatus
+    state: AmenitySearchState
+    completed_step: Literal["discovery"] | None
+    attempts: int
+    retryable: bool
+    updated_at: str
+    output: AmenitySearchOutput | None = None
+    failure_stage: str | None = None
+    steps: dict[R2StepId, R2StepRecord] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class R2RunView:
+    """What the page needs for one R2 run: progress, the records once finished, or retryable."""
+
+    run_id: str
+    status: R2RunStatus
+    completed_step: Literal["discovery"] | None = None
+    result: dict[int, dict[str, PredefinedMetricsRecord]] | None = None
+    retryable: bool | None = None
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 3 over HTTP — run and step-record contracts (R3-C3, R3-C5, R3-C7).
+# ---------------------------------------------------------------------------------
+
+# The run status the page reads. `running` covers a live task and a crashed, not-yet-stale run.
+R3RunStatus = Literal["running", "finished", "failed"]
+
+# The one checkpoint on `r3_runs` (R3-C3): STEP 3 saved cleanly, so a retry starts at STEP 4.
+R3CompletedStep = Literal["discovery_batch"]
+
+# R3's two expensive steps, each with an `r3_run_steps` record row (R3-C5 Iteration 1).
+R3StepId = Literal["discovery_batch", "pipelines"]
+
+# A step row's status. `degraded` = STEP 3 ended with the breaker open (kept as a record only);
+# `started` only exists while a retry works on a claimed row.
+R3StepStatus = Literal["started", "completed", "degraded", "failed"]
+
+# The R3-C3 hook awaited at STEP 3's barrier: (step, state, breaker_open). It may raise to stop
+# the run (a lost fence or a store error); the method's `finally` still closes the gateway.
+StepCompletedCallback = Callable[[str, "SpecificMetricResolutionState", bool], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class R3StepRecord:
+    """One `r3_run_steps` row, as the coordinator reads it (outputs are not loaded)."""
+
+    step_id: R3StepId
+    status: R3StepStatus
+    error_type: str | None = None
+    retryable: bool | None = None
+
+
+@dataclass(frozen=True)
+class R3RunRecord:
+    """One `r3_runs` row with its step rows, decoded. `output` is set only when finished."""
+
+    run_id: str
+    user_id: str
+    r2_run_id: str
+    status: R3RunStatus
+    state: SpecificMetricResolutionState
+    completed_step: R3CompletedStep | None
+    attempts: int
+    retryable: bool
+    updated_at: str
+    output: dict[tuple[int, str], AmenityResolutionRecord] | None = None
+    failure_stage: str | None = None
+    steps: dict[R3StepId, R3StepRecord] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class R3RunView:
+    """What the page needs for one R3 run: progress, the result once finished, or retryable.
+
+    `result` is already JSON-ready: one `{category_id, place_id, value}` row per amenity, built
+    by the R3 store codec (the records hold tuple-keyed data FastAPI's encoder cannot write).
+    """
+
+    run_id: str
+    status: R3RunStatus
+    completed_step: R3CompletedStep | None = None
+    result: list[dict] | None = None
+    retryable: bool | None = None

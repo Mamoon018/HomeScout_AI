@@ -58,10 +58,9 @@ from src.services.deep_search.feature_prompts.phase1_web_search_instruction impo
 )
 from src.services.deep_search.feature_schemas.schemas import (
     AmenityResolutionRecord,
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricSpec,
     PredefinedMetricsRecord,
@@ -151,7 +150,7 @@ _WATCHED_MODULE_FUNCTIONS: tuple[tuple[str, dict, tuple[str, ...]], ...] = (
 )
 # Service methods (patched on the instance; the service calls them through `self.`).
 _WATCHED_SERVICE_METHODS: tuple[tuple[str, dict, tuple[str, ...]], ...] = (
-    ("_discovery_pre_pass", {"state": "<AmenitySearchState: see inputs / final_state>"}, ()),
+    ("_discovery_pre_pass", {"state": "<SpecificMetricResolutionState: see inputs / final_state>"}, ()),
     ("_discover_website_url", {}, ()),
     ("_run_amenity_pipeline", {"catalog": _OMIT_CATALOG}, ()),
     ("_phase1_loop", {"catalog": _OMIT_CATALOG}, ()),
@@ -186,7 +185,7 @@ class _ObjectWatcher:
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.notes: dict[str, object] = {}
-        self.state: AmenitySearchState | None = None
+        self.state: SpecificMetricResolutionState | None = None
         self.seed: dict | None = None
         self._restore: list[tuple[object, str, object, bool]] = []
 
@@ -463,7 +462,7 @@ def _metrics() -> list[MetricSpec]:
     ]
 
 
-def _seed_state() -> AmenitySearchState:
+def _seed_state() -> SpecificMetricResolutionState:
     """Dummy handoff state as after M1.3: one gate-official museum + one declined (empty website)."""
     plan = CategoryMetricPlan(1, "museum", "specific_attributes", [], _metrics())
     place = CanonicalPlace("x", {})
@@ -481,9 +480,7 @@ def _seed_state() -> AmenitySearchState:
         "",  # empty Google website → gate declines → live discovery
         "Keizersgracht 672, 1017 ET Amsterdam, Netherlands",
     )
-    return AmenitySearchState(
-        origin=GeoPoint(52.36, 4.885),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[plan],
         discovered_places={1: {"rijks": place, "vanloon": place}},
         predefined_records={1: {"rijks": official, "vanloon": declined}},
@@ -564,10 +561,8 @@ def _print_records_summary(records: dict) -> bool:
     return passed
 
 
-def _seed_inputs(state: AmenitySearchState) -> dict:
+def _seed_inputs(state: SpecificMetricResolutionState) -> dict:
     return {
-        "origin": _to_jsonable(state.origin),
-        "radius_km": state.radius_km,
         "category_metric_plans": _to_jsonable(state.category_metric_plans),
         "predefined_records": _to_jsonable(state.predefined_records),
     }

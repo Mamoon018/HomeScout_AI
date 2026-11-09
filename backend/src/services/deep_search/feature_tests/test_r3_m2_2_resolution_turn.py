@@ -23,10 +23,9 @@ from src.exceptions.deep_search import MetricResolutionProviderError
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search import specific_metric_resolution as smr
 from src.services.deep_search.feature_schemas.schemas import (
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricsSourceContent,
     MetricSpec,
@@ -571,11 +570,9 @@ def one_pipeline_at_a_time(monkeypatch):
     monkeypatch.setattr(smr, "AMENITY_PIPELINE_CONCURRENCY", 1)
 
 
-def _state(place_ids) -> AmenitySearchState:
+def _state(place_ids) -> SpecificMetricResolutionState:
     plan = CategoryMetricPlan(1, "bakery", "specific_attributes", [], METRICS)
-    return AmenitySearchState(
-        origin=GeoPoint(0.0, 0.0),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[plan],
         discovered_places={1: {pid: CanonicalPlace(pid, {}) for pid in place_ids}},
         predefined_records={1: {pid: _rec(pid) for pid in place_ids}},

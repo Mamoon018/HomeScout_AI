@@ -8,6 +8,8 @@ export type FeatureType = {
   description: string
   iconClassName?: string
   borderClassName?: string
+  /** Border color for the "see results" button; should match the icon color. */
+  buttonBorderClassName?: string
   neonBorderClassName?: string
   secondaryContent?: React.ReactNode
 }
@@ -101,7 +103,10 @@ export function FeatureCard({
                     type="button"
                     variant="outline"
                     size="xs"
-                    className="text-xs font-medium text-foreground"
+                    className={cn(
+                      'text-xs font-medium text-foreground',
+                      feature.buttonBorderClassName,
+                    )}
                     aria-expanded={isSecondaryOpen}
                     aria-controls={secondaryPanelId}
                     onClick={toggleSecondaryCard}

@@ -29,10 +29,9 @@ from src.clients.mcp_tools import (
 )
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.feature_schemas.schemas import (
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricSpec,
     PredefinedMetricsRecord,
@@ -502,15 +501,13 @@ async def test_discovery_with_no_selectable_candidates_yields_none_with_telemetr
 # STEP 3 orchestration — run_specific_metric_resolution end-to-end (real service). RC7 / RC8 / D5.
 # ==================================================================================================
 
-def _state_for_batch() -> AmenitySearchState:
+def _state_for_batch() -> SpecificMetricResolutionState:
     """Handoff state as after M1: one eligible category (pA google-pass, pB declined, pD missing
     record) and one ineligible basic_profile category (pC)."""
     eligible = CategoryMetricPlan(1, "dentist", "specific_attributes", [], [_METRIC])
     basic = CategoryMetricPlan(2, "park", "basic_profile", [], [])  # RC7: no work item
     cp = CanonicalPlace("x", {})
-    return AmenitySearchState(
-        origin=GeoPoint(0.0, 0.0),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[eligible, basic],
         discovered_places={1: {"pA": cp, "pB": cp, "pD": cp}, 2: {"pC": cp}},
         predefined_records={

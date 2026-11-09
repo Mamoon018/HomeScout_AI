@@ -1,4 +1,5 @@
-"""C6 live checks for C1-C5: real LLM responses (recorded once, replayed), the real `r1_runs` table.
+"""Live checks for R1 Step Persistence: real LLM responses (recorded once, replayed) and the real
+`r1_runs` / `r1_run_steps` tables of the dev project.
 
 Run from backend/:  pytest tests_live
 Each full R1 run makes about 5-7 real LLM calls; replayed paths make none.
@@ -10,6 +11,7 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import TypeAdapter
 from supabase import acreate_client
 
 from src.app.api.dependencies.deep_search import get_r1_run_coordinator
@@ -21,10 +23,11 @@ from src.services.deep_search.feature_schemas.schemas import (
     CLARIFICATION_QUESTIONS_SCHEMA_NAME,
     INFERRED_CATEGORIES_SCHEMA_NAME,
     TAXONOMY_MAPPING_SCHEMA_NAME,
+    CategoryMetricPlan,
     ClarificationAnswer,
 )
 from src.services.deep_search.r1_run_coordinator import R1RunCoordinator
-from src.services.deep_search.r1_run_store import R1RunStore, dump_state, load_state
+from src.services.deep_search.r1_run_store import R1RunStore, dump_state
 from tests_live.conftest import (
     NO_PAUSE_REQUIREMENTS,
     PAUSE_REQUIREMENTS,
@@ -34,6 +37,7 @@ from tests_live.conftest import (
 )
 
 _BASE = "/api/requirement-interpretation/runs"
+_PLANS = TypeAdapter(list[CategoryMetricPlan])
 
 
 def _first_option_answers(questions) -> list[ClarificationAnswer]:
@@ -47,22 +51,32 @@ def _first_option_answers(questions) -> list[ClarificationAnswer]:
     return answers
 
 
-def _same(a: dict, b: dict) -> bool:
+def _same(a, b) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
-async def _row(db_client, run_id: str) -> dict:
+def _plans(plans) -> list:
+    return _PLANS.dump_python(list(plans), mode="json")
+
+
+async def _run_row(db_client, run_id: str) -> dict:
     response = await db_client.table("r1_runs").select("*").eq("run_id", run_id).execute()
     return response.data[0]
 
 
-# ------------------------------------------------------------------------------------------- C1
+async def _step_rows(db_client, run_id: str) -> dict[str, dict]:
+    response = await db_client.table("r1_run_steps").select("*").eq("run_id", run_id).execute()
+    return {row["step_id"]: row for row in response.data}
 
 
-async def test_pause_parity_through_the_real_table(pause_tape, db_client, users) -> None:
+# ------------------------------------------------------------------------------- parity + replay
+
+
+async def test_pause_parity_through_the_real_tables(pause_tape, db_client, users) -> None:
     tape, one_call_state = pause_tape
     r1, provider = replay_interpretation(tape)
-    coordinator = R1RunCoordinator(r1, R1RunStore(db_client))
+    store = R1RunStore(db_client)
+    coordinator = R1RunCoordinator(r1, store)
 
     view = await coordinator.start_run(users[0], PAUSE_REQUIREMENTS)
     assert view.status == "needs_answers"
@@ -71,9 +85,20 @@ async def test_pause_parity_through_the_real_table(pause_tape, db_client, users)
     )
 
     assert finished.status == "finished"
-    assert _same((await _row(db_client, view.run_id))["state"], one_call_state)
+    assert _same(_plans(finished.result), one_call_state["category_metric_plans"])
     assert provider.calls.count(CLARIFICATION_QUESTIONS_SCHEMA_NAME) == 1
-    assert load_state(one_call_state).category_resolution_passes == 2
+
+    # V3: one embedded read returns the run and all its step rows.
+    record = await store.load_run(view.run_id, users[0])
+    assert record is not None and record.status == "finished"
+    assert set(record.completed) == set(await _step_rows(db_client, view.run_id))
+    assert "clarification_answers" in record.completed
+
+    # V2: the status read rebuilds the finished run from its rows alone, with no LLM call.
+    calls = len(provider.calls)
+    status_view = await coordinator.get_run(users[0], view.run_id)
+    assert len(provider.calls) == calls
+    assert _same(_plans(status_view.result), one_call_state["category_metric_plans"])
 
 
 async def test_no_pause_parity(no_pause_tape) -> None:
@@ -84,40 +109,42 @@ async def test_no_pause_parity(no_pause_tape) -> None:
     assert _same(dump_state(outcome.state), one_call_state)
 
 
-# ------------------------------------------------------------------------------------------- C3
+# ------------------------------------------------------------------------------- store rows
 
 
-async def test_store_transitions_failed_keeps_state_and_finished_output(
-    pause_tape, db_client, users
-) -> None:
+async def test_step_rows_failure_and_retry_on_the_real_tables(pause_tape, db_client, users) -> None:
     tape, _ = pause_tape
     r1, provider = replay_interpretation(tape)
-    store = R1RunStore(db_client)
-    coordinator = R1RunCoordinator(r1, store)
+    coordinator = R1RunCoordinator(r1, R1RunStore(db_client))
 
     view = await coordinator.start_run(users[0], PAUSE_REQUIREMENTS)
-    paused = await _row(db_client, view.run_id)
-    assert paused["status"] == "needs_answers" and paused["output"] is None
-    assert await store.get_finished_output(view.run_id, users[0]) is None
+    run = await _run_row(db_client, view.run_id)
+    assert run["status"] == "needs_answers" and run["raw_input"] == PAUSE_REQUIREMENTS
+    steps = await _step_rows(db_client, view.run_id)
+    assert set(steps) == {"extraction", "taxonomy_mapping", "clarification_questions"}
+    assert all(row["status"] == "completed" and row["output"]["schema_version"] == 1
+               for row in steps.values())
 
     provider.fail_once.add(INFERRED_CATEGORIES_SCHEMA_NAME)
-    with pytest.raises(R1RunFailedError):
+    with pytest.raises(R1RunFailedError) as caught:
         await coordinator.submit_answers(users[0], view.run_id, _first_option_answers(view.questions))
-    failed = await _row(db_client, view.run_id)
+    assert caught.value.retryable is True
+    steps = await _step_rows(db_client, view.run_id)
+    assert steps["clarification_answers"]["status"] == "completed"
+    failed = steps["category_inference"]
     assert failed["status"] == "failed" and failed["retryable"] is True
-    saved = load_state(failed["state"])
-    assert saved.user_responses and saved.category_resolution_passes == 1
+    assert failed["output"] is None and failed["error_type"]
+    assert (await _run_row(db_client, view.run_id))["status"] == "failed"
 
-    provider.rewind()
     finished = await coordinator.retry_run(users[0], view.run_id)
     assert finished.status == "finished"
-    row = await _row(db_client, view.run_id)
-    assert row["attempts"] == 1
-    output = await store.get_finished_output(view.run_id, users[0])
-    assert output is not None and output == finished.result
+    assert (await _run_row(db_client, view.run_id))["attempts"] == 1
+    steps = await _step_rows(db_client, view.run_id)
+    assert steps["category_inference"]["status"] == "completed"
+    assert steps["category_inference"]["error_type"] is None
 
 
-async def test_user_id_filter_on_every_operation(pause_tape, db_client, users) -> None:
+async def test_user_id_filter_on_every_run_operation(pause_tape, db_client, users) -> None:
     tape, _ = pause_tape
     r1, _ = replay_interpretation(tape)
     store = R1RunStore(db_client)
@@ -125,11 +152,26 @@ async def test_user_id_filter_on_every_operation(pause_tape, db_client, users) -
     view = await coordinator.start_run(users[0], PAUSE_REQUIREMENTS)
 
     assert await store.load_run(view.run_id, users[1]) is None
-    assert await store.get_finished_output(view.run_id, users[1]) is None
-    await store.save_as_failed(view.run_id, users[1], stage="x", message="x", retryable=True)
-    assert (await _row(db_client, view.run_id))["status"] == "needs_answers"
+    assert await store.set_status(view.run_id, users[1], to="failed", expected="needs_answers") is False
+    assert await store.claim_retry(view.run_id, users[1], expected_attempts=0) is False
+    assert (await _run_row(db_client, view.run_id))["status"] == "needs_answers"
     with pytest.raises(RunNotFoundError):
         await coordinator.submit_answers(users[1], view.run_id, _first_option_answers(view.questions))
+
+
+async def test_completed_step_cannot_be_overwritten(pause_tape, db_client, users) -> None:
+    tape, _ = pause_tape
+    r1, _ = replay_interpretation(tape)
+    store = R1RunStore(db_client)
+    view = await R1RunCoordinator(r1, store).start_run(users[0], PAUSE_REQUIREMENTS)
+    record = await store.load_run(view.run_id, users[0])
+    extracted = record.completed["extraction"]
+
+    # A second insert of the same step is refused by the primary key (the store says False).
+    assert await store.insert_step(view.run_id, "extraction", extracted) is False
+    # A conditional update of a completed row matches nothing.
+    assert await store.complete_claimed_step(view.run_id, "extraction", extracted) is False
+    assert await store.claim_failed_step(view.run_id, "extraction") is False
 
 
 async def test_row_level_security_blocks_the_publishable_key(
@@ -141,8 +183,9 @@ async def test_row_level_security_blocks_the_publishable_key(
 
     public = await acreate_client(settings.supabase_url, settings.supabase_publishable_key)
     try:
-        read = await public.table("r1_runs").select("*").eq("run_id", view.run_id).execute()
-        assert read.data == []
+        for table in ("r1_runs", "r1_run_steps"):
+            read = await public.table(table).select("*").eq("run_id", view.run_id).execute()
+            assert read.data == []
         await public.table("r1_runs").update({"status": "finished"}).eq(
             "run_id", view.run_id
         ).execute()
@@ -150,20 +193,26 @@ async def test_row_level_security_blocks_the_publishable_key(
         pass  # a rejected write is as good as an ignored one
     finally:
         await public.postgrest.aclose()
-    assert (await _row(db_client, view.run_id))["status"] == "needs_answers"
+    assert (await _run_row(db_client, view.run_id))["status"] == "needs_answers"
 
 
-# ------------------------------------------------------------------------------------------- C4
+# ------------------------------------------------------------------------------- coordinator
 
 
-async def test_start_failure_saves_failed_not_retryable(pause_tape, db_client, users) -> None:
+async def test_start_failure_is_retryable_and_resumes(pause_tape, db_client, users) -> None:
     tape, _ = pause_tape
     r1, provider = replay_interpretation(tape)
+    coordinator = R1RunCoordinator(r1, R1RunStore(db_client))
     provider.fail_once.add(TAXONOMY_MAPPING_SCHEMA_NAME)
     with pytest.raises(R1RunFailedError) as caught:
-        await R1RunCoordinator(r1, R1RunStore(db_client)).start_run(users[0], PAUSE_REQUIREMENTS)
-    row = await _row(db_client, caught.value.run_id)
-    assert row["status"] == "failed" and row["retryable"] is False
+        await coordinator.start_run(users[0], PAUSE_REQUIREMENTS)
+    assert caught.value.retryable is True
+    steps = await _step_rows(db_client, caught.value.run_id)
+    assert steps["extraction"]["status"] == "completed"
+    assert steps["taxonomy_mapping"]["status"] == "failed"
+
+    resumed = await coordinator.retry_run(users[0], caught.value.run_id)
+    assert resumed.status == "needs_answers"
 
 
 async def test_retry_parity_and_limit(pause_tape, db_client, users) -> None:
@@ -175,22 +224,24 @@ async def test_retry_parity_and_limit(pause_tape, db_client, users) -> None:
     with pytest.raises(R1RunFailedError):
         await coordinator.submit_answers(users[0], view.run_id, _first_option_answers(view.questions))
 
-    provider.rewind()
     provider.fail_once.add(INFERRED_CATEGORIES_SCHEMA_NAME)
     with pytest.raises(R1RunFailedError) as caught:
         await coordinator.retry_run(users[0], view.run_id)
     assert caught.value.retryable is False
-    row = await _row(db_client, view.run_id)
-    assert row["attempts"] == 1 and row["retryable"] is False
+    assert (await _run_row(db_client, view.run_id))["attempts"] == 1
+    assert (await _step_rows(db_client, view.run_id))["category_inference"]["retryable"] is False
     with pytest.raises(RunConflictError):
         await coordinator.retry_run(users[0], view.run_id)
 
-    # A clean resume of a fresh run, replaying the same responses, equals the one-call state.
-    r1_clean, _ = replay_interpretation(tape)
-    clean = R1RunCoordinator(r1_clean, R1RunStore(db_client))
-    clean_view = await clean.start_run(users[0], PAUSE_REQUIREMENTS)
-    await clean.submit_answers(users[0], clean_view.run_id, _first_option_answers(clean_view.questions))
-    assert _same((await _row(db_client, clean_view.run_id))["state"], one_call_state)
+    # A retry that succeeds gives the same plans as the one-call run.
+    r1_retry, retry_provider = replay_interpretation(tape)
+    retrying = R1RunCoordinator(r1_retry, R1RunStore(db_client))
+    second = await retrying.start_run(users[0], PAUSE_REQUIREMENTS)
+    retry_provider.fail_once.add(INFERRED_CATEGORIES_SCHEMA_NAME)
+    with pytest.raises(R1RunFailedError):
+        await retrying.submit_answers(users[0], second.run_id, _first_option_answers(second.questions))
+    finished = await retrying.retry_run(users[0], second.run_id)
+    assert _same(_plans(finished.result), one_call_state["category_metric_plans"])
 
 
 async def test_restart_between_steps(pause_tape, db_client, users) -> None:
@@ -200,15 +251,15 @@ async def test_restart_between_steps(pause_tape, db_client, users) -> None:
         users[0], PAUSE_REQUIREMENTS
     )
 
-    # Brand-new R1, coordinator and store objects; only the row in r1_runs is shared.
+    # Brand-new R1, coordinator and store objects; only the rows in the run tables are shared.
     r1_second, _ = replay_interpretation(tape)
-    await R1RunCoordinator(r1_second, R1RunStore(db_client)).submit_answers(
+    finished = await R1RunCoordinator(r1_second, R1RunStore(db_client)).submit_answers(
         users[0], view.run_id, _first_option_answers(view.questions)
     )
-    assert _same((await _row(db_client, view.run_id))["state"], one_call_state)
+    assert _same(_plans(finished.result), one_call_state["category_metric_plans"])
 
 
-# ------------------------------------------------------------------------------------------- C5
+# ------------------------------------------------------------------------------- HTTP
 
 
 async def test_http_flow_status_codes_and_ownership(pause_tape, db_client, users) -> None:
@@ -245,6 +296,7 @@ async def test_http_flow_status_codes_and_ownership(pause_tape, db_client, users
             )
             assert answered.status_code == 200 and answered.json()["status"] == "finished"
             assert answered.json()["result"]
+            assert (await client.get(f"{_BASE}/{run_id}")).json()["result"] == answered.json()["result"]
             again = await client.post(
                 f"{_BASE}/{run_id}/clarification-answers", json={"answers": answers}
             )

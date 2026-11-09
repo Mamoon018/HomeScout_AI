@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -51,6 +52,9 @@ logger = logging.getLogger(PLACES_LOGGER_NAME)
 
 DEFAULT_DISCOVERY_CONCURRENCY = 3
 DEFAULT_ROUTES_CONCURRENCY = 3
+# Process-wide cap on Places calls across every R2 run (R2-C2 Iteration 1): five runs at full
+# per-run speed. Built once in the app lifespan.
+GLOBAL_PLACES_CONCURRENCY = 15
 _METERS_PER_KM = 1000.0
 _PLACES_FIELD_PREFIX = "places."
 
@@ -108,9 +112,25 @@ class AmenitySearch:
         owns_caller: bool = True,
         places_concurrency: int = DEFAULT_DISCOVERY_CONCURRENCY,
         routes_concurrency: int = DEFAULT_ROUTES_CONCURRENCY,
+        global_places_semaphore: asyncio.Semaphore | None = None,
+        owns_clients: bool = True,
+        max_places_per_category: int | None = None,
     ) -> None:
         self._places_client = places_client
+        # Test-cost cap (None = no limit): Google is asked for at most this many places per
+        # category. Discovery and the routing re-search use the same count, so they rank the same set.
+        self._max_result_count = (
+            DISCOVERY_MAX_RESULTS
+            if max_places_per_category is None
+            else min(DISCOVERY_MAX_RESULTS, max_places_per_category)
+        )
         self._routes_client = routes_client
+        # R2-C2 Iteration 1: per-run instances share the app's Places/Routes clients
+        # (`owns_clients` False, so closing a run never closes them) and one process-wide Places
+        # cap. Each Places call takes this run's slot first, then a global slot, so a run waiting
+        # on its own limit never holds a global slot. None keeps standalone behavior.
+        self._global_places_semaphore = global_places_semaphore
+        self._owns_clients = owns_clients
         # Metric resolution (the MCP tool gateway + tool-turn metric loop) was promoted to
         # Responsibility 3 (`SpecificMetricResolution`), which now owns the gateway. The shared LLM
         # caller is retained here for R2's own future LLM-driven work (relevance filtering /
@@ -226,7 +246,7 @@ class AmenitySearch:
             longitude=origin.longitude,
             radius_meters=radius_km * _METERS_PER_KM,
             field_mask=field_mask,
-            max_result_count=DISCOVERY_MAX_RESULTS,
+            max_result_count=self._max_result_count,
         )
         logger.info(
             json.dumps(
@@ -248,7 +268,7 @@ class AmenitySearch:
         request: DiscoveryRequest,
     ) -> places_v1.SearchNearbyResponse:
         """M1.1.b: run the bounded, no-routing searchNearby; map a failed call to a typed error."""
-        async with self._semaphore:
+        async with self._semaphore, self._global_places_slot():
             try:
                 return await self._places_client.search_nearby_discovery(
                     latitude=request.latitude,
@@ -403,7 +423,7 @@ class AmenitySearch:
         radius_km: float,
     ) -> tuple[str, dict[str, RouteLeg]]:
         """One category × mode routing re-search; return the mode and its place_id → RouteLeg map."""
-        async with self._semaphore:
+        async with self._semaphore, self._global_places_slot():
             try:
                 response = await self._places_client.search_nearby_routing(
                     latitude=origin.latitude,
@@ -411,7 +431,7 @@ class AmenitySearch:
                     radius_meters=radius_km * _METERS_PER_KM,
                     primary_type=plan.taxonomy_node,
                     travel_mode=mode,
-                    max_result_count=DISCOVERY_MAX_RESULTS,
+                    max_result_count=self._max_result_count,
                 )
             except PlacesClientError as exc:
                 raise RoutingRetrievalError(
@@ -693,10 +713,17 @@ class AmenitySearch:
             records[category_id] = category_records
         return records
 
+    def _global_places_slot(self) -> contextlib.AbstractAsyncContextManager:
+        """The process-wide Places slot, taken inside the run slot; a no-op when unset."""
+        if self._global_places_semaphore is None:
+            return contextlib.nullcontext()
+        return self._global_places_semaphore
+
     async def aclose(self) -> None:
-        """Close the async Places and Routes transports and the caller."""
-        await self._places_client.aclose()
-        await self._routes_client.aclose()
+        """Close the Places/Routes transports (when owned) and the caller (when owned)."""
+        if self._owns_clients:
+            await self._places_client.aclose()
+            await self._routes_client.aclose()
         # Close the shared caller only when this instance owns it; the DeepSearch feature
         # closes an injected caller itself. It is None in M1-only contexts.
         if self._owns_caller and self._llm_caller is not None:
@@ -737,4 +764,5 @@ def create_amenity_search(
         create_routes_async_client(settings),
         llm_caller=caller,
         owns_caller=owns_caller,
+        max_places_per_category=settings.max_places_per_category,
     )

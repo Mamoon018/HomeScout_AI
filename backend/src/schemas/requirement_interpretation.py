@@ -28,7 +28,7 @@ class RunResponse(BaseModel):
     `retryable` when failed (Retry when true, Start again when false)."""
 
     run_id: str
-    status: Literal["needs_answers", "finished", "failed"]
+    status: Literal["running", "needs_answers", "finished", "failed"]
     questions: list[ClarificationQuestion] | None = None
     result: list[CategoryMetricPlan] | None = None
     retryable: bool | None = None
@@ -40,7 +40,7 @@ class RunErrorResponse(BaseModel):
 
     error: str
     run_id: str | None = None
-    status: Literal["needs_answers", "finished", "failed"] | None = None
+    status: Literal["running", "needs_answers", "finished", "failed"] | None = None
     retryable: bool | None = None
 
 

@@ -1,10 +1,12 @@
+import dataclasses
 import json
 import logging
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Sequence, TypeVar
 
 from langdetect import DetectorFactory, detect
 from langdetect.lang_detect_exception import LangDetectException
@@ -21,6 +23,7 @@ from src.core.logging import DEEP_SEARCH_LOGGER_NAME
 from src.exceptions.deep_search import (
     CategoryMappingProviderError,
     CategoryMappingValidationError,
+    CheckpointMissingError,
     ClarificationAnswerError,
     ClarificationProviderError,
     ClarificationValidationError,
@@ -101,6 +104,8 @@ from src.services.deep_search.feature_schemas.schemas import (
     MetricSpec,
     PayloadRecord,
     R1StartOutcome,
+    R1StepCheckpoints,
+    R1StepId,
     RequirementInterpretationState,
     ResolvedCategory,
     ResolvedRequirements,
@@ -116,6 +121,8 @@ from src.services.deep_search.feature_schemas.schemas import (
 )
 
 logger = logging.getLogger(DEEP_SEARCH_LOGGER_NAME)
+
+_StepResultT = TypeVar("_StepResultT")
 
 MIN_INPUT_WORD_COUNT = 100
 ENGLISH_LANGUAGE_CODE = "en"
@@ -160,7 +167,18 @@ class UserRequirementsInterpretation:
     the same provider chain.
     """
 
-    def __init__(self, caller: StructuredLLMCaller, *, owns_caller: bool = True) -> None:
+    def __init__(
+        self,
+        caller: StructuredLLMCaller,
+        *,
+        owns_caller: bool = True,
+        max_categories: int | None = None,
+        max_specific_metrics: int | None = None,
+    ) -> None:
+        # Test-cost caps applied when the plans are compiled (None = no limit). See
+        # `compile_category_metric_plans`.
+        self._max_categories = max_categories
+        self._max_specific_metrics = max_specific_metrics
         # The shared caller holds the OpenAI-then-Groq chain and the fallback funnel (C3.1.2).
         # `self._providers` is kept so the Mechanism 1 inline loop and `aclose` read the same
         # bound chain. `owns_caller` is False when a composition root (the DeepSearch feature)
@@ -186,34 +204,76 @@ class UserRequirementsInterpretation:
     # Resumable entry points (C1): start, pause with questions, resume with answers.
     # ---------------------------------------------------------------------------------
 
-    async def start(self, payload: PayloadRecord) -> R1StartOutcome:
+    async def start(
+        self,
+        payload: PayloadRecord,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
+    ) -> R1StartOutcome:
         """Run extraction, 2A pass 1 and the router; finish, or pause with stored questions.
 
         Takes a payload that already passed `intake_and_assemble_payload`, so the input check
-        runs once. LLM calls happen in the same order as the one-call run.
+        runs once. LLM calls happen in the same order as the one-call run. With `checkpoints`,
+        every LLM step returns its saved result when it has one and saves a new result otherwise.
         """
         instruction = self.build_extraction_instruction(extraction_json_schema())
-        extracted = await self.execute_and_validate(payload, instruction)
+        extracted = await self._checkpointed_call(
+            "extraction",
+            lambda: self.execute_and_validate(payload, instruction),
+            checkpoints,
+        )
         state = self.assemble_handoff(payload, extracted)
 
-        await self.resolve_explicit_categories(state)
+        await self.resolve_explicit_categories(state, checkpoints=checkpoints)
         route = self.inspect_category_resolution(state)
         if route == "mechanism_3":
-            await self.complete_interpretation(state)
+            await self.complete_interpretation(state, checkpoints=checkpoints)
             return R1StartOutcome(status="finished", state=state)
 
-        await self.generate_clarification_questions(state)
+        await self.generate_clarification_questions(state, checkpoints=checkpoints)
         return R1StartOutcome(status="needs_answers", state=state)
+
+    async def _checkpointed_call(
+        self,
+        step_id: R1StepId,
+        call: Callable[[], Awaitable[_StepResultT]],
+        checkpoints: R1StepCheckpoints | None,
+    ) -> _StepResultT:
+        """Return a step's saved result, or make the call, save the result and return it.
+
+        Without `checkpoints` this only awaits the call, so the one-call path is unchanged.
+        `in_flight` stays set when the call or the save raises, so the caller knows which step
+        failed. With `allow_calls` False an unsaved step raises instead of making a paid call.
+        """
+        if checkpoints is None:
+            return await call()
+        if step_id in checkpoints.completed:
+            return checkpoints.completed[step_id]
+        if not checkpoints.allow_calls:
+            raise CheckpointMissingError(step_id)
+        checkpoints.in_flight = step_id
+        result = await call()
+        if checkpoints.on_completed is not None:
+            await checkpoints.on_completed(step_id, result)
+        checkpoints.completed[step_id] = result
+        checkpoints.in_flight = None
+        return result
 
     async def generate_clarification_questions(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> list[ClarificationQuestion]:
         """2B Stages 1-2: build the instruction, make the call, store the questions on the state."""
         instruction = self.build_clarification_questions_instruction(
             clarification_questions_json_schema()
         )
-        result = await self.execute_clarification_questions(state, instruction)
+        result = await self._checkpointed_call(
+            "clarification_questions",
+            lambda: self.execute_clarification_questions(state, instruction),
+            checkpoints,
+        )
         state.clarification_questions = list(result.questions)
         return state.clarification_questions
 
@@ -299,24 +359,27 @@ class UserRequirementsInterpretation:
     async def continue_after_answers(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Flag resolution, the second router call, then inference, depth and metrics.
 
-        Never generates questions. A retry calls this directly on the saved state, whose
-        answers are already recorded.
+        Never generates questions. A retry replays the run up to here with its saved answers.
         """
-        await self.resolve_category_flags(state)
+        await self.resolve_category_flags(state, checkpoints=checkpoints)
         self.inspect_category_resolution(state)
-        return await self.complete_interpretation(state)
+        return await self.complete_interpretation(state, checkpoints=checkpoints)
 
     async def complete_interpretation(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Mechanisms 4-6: inference, depth, metrics. Shared by every path to the end."""
-        await self.run_persona_driven_category_inference(state)
-        await self.run_per_category_depth_calibration(state)
-        return await self.run_per_category_metric_definition(state)
+        await self.run_persona_driven_category_inference(state, checkpoints=checkpoints)
+        await self.run_per_category_depth_calibration(state, checkpoints=checkpoints)
+        return await self.run_per_category_metric_definition(state, checkpoints=checkpoints)
 
     async def parse_unstructured_input(self, raw_input: str) -> RequirementInterpretationState:
         """Mechanism 1: drive stages 1, 3, 4, and 5 of unstructured input parsing."""
@@ -736,12 +799,18 @@ class UserRequirementsInterpretation:
     async def resolve_explicit_categories(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Component 2A: Operation 1 always, Operation 2 when the gate opens."""
         instruction = self.build_taxonomy_mapping_instruction(taxonomy_mapping_json_schema())
-        mapping = await self.execute_taxonomy_mapping(state, instruction)
+        mapping = await self._checkpointed_call(
+            "taxonomy_mapping",
+            lambda: self.execute_taxonomy_mapping(state, instruction),
+            checkpoints,
+        )
         self.assemble_resolved_requirements(state, mapping)
-        await self.resolve_category_flags(state)
+        await self.resolve_category_flags(state, checkpoints=checkpoints)
         return state
 
     def build_taxonomy_mapping_instruction(self, json_schema: dict) -> str:
@@ -891,7 +960,12 @@ class UserRequirementsInterpretation:
         )
         return resolved
 
-    async def resolve_category_flags(self, state: RequirementInterpretationState) -> None:
+    async def resolve_category_flags(
+        self,
+        state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
+    ) -> None:
         """Op2 gate plus orchestration: skip when no user responses, else resolve flags."""
         if not state.user_responses:
             logger.info(
@@ -934,7 +1008,11 @@ class UserRequirementsInterpretation:
             return
 
         instruction = self.build_flag_resolution_instruction(flag_resolution_json_schema())
-        result = await self.execute_flag_resolution(pairs, instruction)
+        result = await self._checkpointed_call(
+            "flag_resolution",
+            lambda: self.execute_flag_resolution(pairs, instruction),
+            checkpoints,
+        )
         self.merge_resolved_flags(state, result)
 
     def build_flag_resolution_instruction(self, json_schema: dict) -> str:
@@ -1070,12 +1148,18 @@ class UserRequirementsInterpretation:
     async def run_persona_driven_category_inference(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Mechanism 4 workflow: instruction, one constrained call, then strip and write."""
         assert state.resolved is not None  # Mechanism 2 always sets this before M4 runs.
 
         instruction = self.build_inference_instruction(inferred_categories_json_schema())
-        body = await self.execute_category_inference(state, instruction)
+        body = await self._checkpointed_call(
+            "category_inference",
+            lambda: self.execute_category_inference(state, instruction),
+            checkpoints,
+        )
         self.write_inferred_categories(state, body)
         return state
 
@@ -1251,6 +1335,8 @@ class UserRequirementsInterpretation:
     async def run_per_category_depth_calibration(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Mechanism 5 workflow: skip both-empty, else instruction, one call, then stamp."""
         assert state.resolved is not None  # Mechanism 2 always sets this before M5 runs.
@@ -1273,7 +1359,11 @@ class UserRequirementsInterpretation:
         instruction = self.build_depth_assignment_instruction(
             depth_assignment_json_schema()
         )
-        body = await self.execute_depth_assignment(state, instruction)
+        body = await self._checkpointed_call(
+            "depth_assignment",
+            lambda: self.execute_depth_assignment(state, instruction),
+            checkpoints,
+        )
         self.stamp_category_depths(state, body)
         return state
 
@@ -1446,6 +1536,8 @@ class UserRequirementsInterpretation:
     async def run_per_category_metric_definition(
         self,
         state: RequirementInterpretationState,
+        *,
+        checkpoints: R1StepCheckpoints | None = None,
     ) -> RequirementInterpretationState:
         """Mechanism 6 workflow: define LLM metrics per category, then compile the metric plans.
 
@@ -1485,7 +1577,11 @@ class UserRequirementsInterpretation:
             instruction = self.build_metric_definition_instruction(
                 metric_definition_json_schema()
             )
-            body = await self.execute_metric_definition(state, instruction)
+            body = await self._checkpointed_call(
+                "metric_definition",
+                lambda: self.execute_metric_definition(state, instruction),
+                checkpoints,
+            )
             survivors, _ = self.apply_metric_contract(state, body)
             self.report_metric_shortfalls(state, survivors)
             self.write_category_metrics(state, survivors)
@@ -1758,7 +1854,8 @@ class UserRequirementsInterpretation:
                     specific_metrics=list(specific_metrics),
                 )
             )
-        state.category_metric_plans = plans
+        state.category_metric_plans = self._apply_plan_caps(plans)
+        plans = state.category_metric_plans
 
         logger.info(
             json.dumps(
@@ -1778,6 +1875,51 @@ class UserRequirementsInterpretation:
             )
         )
         return state
+
+    def _apply_plan_caps(self, plans: list[CategoryMetricPlan]) -> list[CategoryMetricPlan]:
+        """Apply the test-cost caps to the compiled plans; with no caps, return them unchanged.
+
+        Categories: keep the first `max_categories`, choosing categories with specific metrics
+        first (only those create R3 work), then filling with the rest; kept plans stay in compile
+        order. Metrics: keep the first `max_specific_metrics` specific metrics of each kept plan.
+        Pre-defined metrics are never capped. One log line per cap that removed something.
+        """
+        kept = plans
+        if self._max_categories is not None and len(plans) > self._max_categories:
+            ranked = [p for p in plans if p.specific_metrics] + [
+                p for p in plans if not p.specific_metrics
+            ]
+            kept_ids = {p.category_id for p in ranked[: self._max_categories]}
+            kept = [p for p in plans if p.category_id in kept_ids]
+            self._log_cap_applied("categories", len(plans), len(kept))
+
+        if self._max_specific_metrics is not None:
+            limit = self._max_specific_metrics
+            before = sum(len(p.specific_metrics) for p in kept)
+            kept = [
+                dataclasses.replace(p, specific_metrics=p.specific_metrics[:limit])
+                if len(p.specific_metrics) > limit
+                else p
+                for p in kept
+            ]
+            after = sum(len(p.specific_metrics) for p in kept)
+            if after < before:
+                self._log_cap_applied("specific_metrics", before, after)
+        return kept
+
+    def _log_cap_applied(self, dimension: str, before: int, after: int) -> None:
+        """One WARNING per cap that removed items, so a smaller plan is never read as a bug."""
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "metric_compilation.cap_applied",
+                    "timestamp": _timestamp(),
+                    "dimension": dimension,
+                    "before": before,
+                    "after": after,
+                }
+            )
+        )
 
     async def aclose(self) -> None:
         """Close the shared caller after a run, unless a composition root owns it."""
@@ -1917,9 +2059,13 @@ def create_requirement_interpretation(
     sample runners keep closing it. When the DeepSearch feature injects a shared caller, R1
     does not own it and the feature closes it once.
     """
+    caps = {
+        "max_categories": settings.max_categories,
+        "max_specific_metrics": settings.max_specific_metrics,
+    }
     if llm_caller is None:
-        return UserRequirementsInterpretation(create_structured_llm_caller(settings))
-    return UserRequirementsInterpretation(llm_caller, owns_caller=False)
+        return UserRequirementsInterpretation(create_structured_llm_caller(settings), **caps)
+    return UserRequirementsInterpretation(llm_caller, owns_caller=False, **caps)
 
 
 def _stamp_category_identities(extracted: ExtractedRequirements) -> ExtractedRequirements:

@@ -1,5 +1,7 @@
 from typing import ClassVar, Literal
 
+from src.exceptions.mcp import McpConnectionError, McpToolUnavailableError
+
 # Why an M3 LLM step failed (C3.1.2 "Typed error"). `availability`: every provider in the chain
 # failed to serve the request; `content`: at least one provider answered unusably; `circuit_open`:
 # the run's breaker was open, so no call was made. Only `availability` moves the breaker counter.
@@ -295,8 +297,23 @@ class StateVersionMismatchError(Exception):
         self.expected = expected
 
 
+class CheckpointMissingError(Exception):
+    """Raised when rebuilding a run reaches a step that has no saved result.
+
+    Rebuilding a paused or finished run never makes an LLM call, so a missing row means the
+    saved rows are inconsistent. It is raised instead of paying for an unplanned call.
+    """
+
+    stage: ClassVar[str] = "replay"
+
+    def __init__(self, step_id: str) -> None:
+        super().__init__(f"Step {step_id!r} has no saved result to rebuild the run from")
+        self.step_id = step_id
+
+
 class RunStoreError(Exception):
-    """Raised when a `r1_runs` read or write could not be completed."""
+    """Raised when a run-table read or write (`r1_runs`, `r2_runs`, `r3_runs` and their step
+    tables) failed."""
 
     stage: ClassVar[str] = "run_store"
 
@@ -321,6 +338,21 @@ class RunConflictError(Exception):
         self.run_id = run_id
         self.status = status
         self.retryable = retryable
+
+
+class RunSupersededError(Exception):
+    """Raised inside a running R3 execution when a newer execution owns its row (lost fence).
+
+    The R3 save callback runs inside `run_specific_metric_resolution`, so stopping the run means
+    raising through the method (its `finally` still closes the gateway). Nothing is saved for it.
+    """
+
+    stage: ClassVar[str] = "superseded"
+
+    def __init__(self, run_id: str, operation: str) -> None:
+        super().__init__(f"Run {run_id} is owned by a newer execution ({operation})")
+        self.run_id = run_id
+        self.operation = operation
 
 
 class R1RunFailedError(Exception):
@@ -365,4 +397,42 @@ R1_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     InferenceProviderError,
     DepthAssignmentProviderError,
     MetricDefinitionProviderError,
+)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 2 over HTTP — retryable split (R2-C6).
+# ---------------------------------------------------------------------------------
+
+# Every typed error an R2 step can raise. Each carries a `stage`.
+R2_STAGE_ERRORS: tuple[type[Exception], ...] = (
+    PlaceDiscoveryError,
+    AccessibilityEnrichmentError,
+    ResultAttachmentError,
+)
+
+# The provider failures (Places / Routes call failed after its retries). Retryable once, unless
+# the cause chain shows a config error (bad key, API off, request rejected).
+R2_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
+    PlaceDiscoveryCallError,
+    RoutingRetrievalError,
+    TransitRetrievalError,
+)
+
+
+# ---------------------------------------------------------------------------------
+# Responsibility 3 over HTTP — retryable split (R3-C7).
+# ---------------------------------------------------------------------------------
+
+# Provider and connection failures: retryable once. `McpConnectionError` is not retryable when its
+# cause chain shows a refused key (401 / 403), which the coordinator checks (R3-C7 Iteration 1).
+R3_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
+    MetricResolutionProviderError,
+    McpConnectionError,
+)
+
+# Setup mismatches that fail the same way on every attempt: never retryable.
+R3_STAGE_ERRORS: tuple[type[Exception], ...] = (
+    MetricResolutionValidationError,
+    McpToolUnavailableError,
 )

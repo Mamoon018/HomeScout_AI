@@ -269,6 +269,9 @@ def _gateway(
     api_key: str | None = None,
     events: list | None = None,
     flaky: dict | None = None,
+    global_search_semaphore: asyncio.Semaphore | None = None,
+    global_firecrawl_semaphore: asyncio.Semaphore | None = None,
+    firecrawl_rate_limiter=None,
 ) -> McpToolGateway:
     # Default the A7 per-minute bucket effectively unlimited so a multi-call test is not paced by
     # real time; the bucket's pacing is covered directly by the `_TokenBucket` unit test.
@@ -285,6 +288,9 @@ def _gateway(
         firecrawl_rate_per_minute=firecrawl_rate_per_minute,
         firecrawl_probe_url=probe_url,
         client_factory=factory,
+        global_search_semaphore=global_search_semaphore,
+        global_firecrawl_semaphore=global_firecrawl_semaphore,
+        firecrawl_rate_limiter=firecrawl_rate_limiter,
     )
 
 
@@ -1661,3 +1667,143 @@ async def test_iteration6_reopen_uses_new_session_snapshot():
         assert parallel.calls == firecrawl.calls == [None, "last", None, "last"]
     finally:
         await gateway.aclose()
+
+
+# ------------------------------------------------------------------- R3-C2 Iteration 1 (app-wide limits)
+def _tracked(track: dict, per_gateway: str, body_for):
+    """A handler that records in-flight calls overall and for one gateway."""
+
+    async def handler(first, *_rest):
+        track["now"] += 1
+        track[per_gateway] = track.get(per_gateway, 0) + 1
+        track["max"] = max(track["max"], track["now"])
+        track[f"max_{per_gateway}"] = max(track.get(f"max_{per_gateway}", 0), track[per_gateway])
+        try:
+            await asyncio.sleep(0.02)
+            return body_for(first)
+        finally:
+            track["now"] -= 1
+            track[per_gateway] -= 1
+
+    return handler
+
+
+def _search_body(objective):
+    return {"results": [{"url": f"http://{objective}", "title": objective, "excerpts": [objective]}]}
+
+
+def _scrape_body(url):
+    return {"markdown": "t", "metadata": {"sourceURL": url}}
+
+
+async def test_r3_app_wide_search_slots_are_shared_across_gateways() -> None:
+    shared = asyncio.Semaphore(5)
+    track = {"now": 0, "max": 0}
+    gateways = [
+        _gateway(
+            _parallel_server(_tracked(track, name, _search_body)),
+            _firecrawl_server(),
+            search_concurrency=4,
+            global_search_semaphore=shared,
+        )
+        for name in ("a", "b")
+    ]
+    for gateway in gateways:
+        await gateway.open()
+    try:
+        await asyncio.gather(
+            *(g.search_web(f"obj-{i}", ["q"]) for g in gateways for i in range(8))
+        )
+    finally:
+        for gateway in gateways:
+            await gateway.aclose()
+    assert 4 < track["max"] <= 5  # both gateways overlapped, never past the app-wide pool
+    assert track["max_a"] <= 4 and track["max_b"] <= 4  # and never past each run's own limit
+
+
+async def test_r3_app_wide_firecrawl_slots_are_shared_across_gateways() -> None:
+    shared = asyncio.Semaphore(2)
+    track = {"now": 0, "max": 0}
+    gateways = [
+        _gateway(
+            _parallel_server(),
+            _firecrawl_server(scrape_handler=_tracked(track, name, _scrape_body)),
+            firecrawl_concurrency=2,
+            global_firecrawl_semaphore=shared,
+        )
+        for name in ("a", "b")
+    ]
+    for gateway in gateways:
+        await gateway.open()
+    try:
+        await asyncio.gather(
+            *(g.scrape_page(f"{_SITE}/{name}-{i}") for name, g in zip("ab", gateways) for i in range(4))
+        )
+    finally:
+        for gateway in gateways:
+            await gateway.aclose()
+    assert track["max"] == 2  # two gateways with 2 slots each still share one pool of 2
+
+
+async def test_r3_a_full_firecrawl_pool_does_not_delay_a_parallel_search() -> None:
+    firecrawl_pool = asyncio.Semaphore(2)
+    await firecrawl_pool.acquire()
+    await firecrawl_pool.acquire()  # every app-wide Firecrawl slot is taken
+    gateway = _gateway(
+        _parallel_server(),
+        _firecrawl_server(),
+        global_search_semaphore=asyncio.Semaphore(10),
+        global_firecrawl_semaphore=firecrawl_pool,
+    )
+    await gateway.open()
+    try:
+        result = await asyncio.wait_for(gateway.search_web("o", ["q"]), timeout=2)
+    finally:
+        await gateway.aclose()
+    assert isinstance(result, WebSearchResult)
+
+
+async def test_r3_a_given_rate_limiter_replaces_the_gateways_own_bucket() -> None:
+    class CountingBucket(mcp_tools._TokenBucket):
+        acquired = 0
+
+        async def acquire(self) -> None:
+            CountingBucket.acquired += 1
+            await super().acquire()
+
+    shared = CountingBucket(10_000)
+    gateways = [
+        _gateway(_parallel_server(), _firecrawl_server(), firecrawl_rate_limiter=shared)
+        for _ in range(2)
+    ]
+    for gateway in gateways:
+        await gateway.open()
+    try:
+        assert all(g._firecrawl_rate is shared for g in gateways)
+        await gateways[0].scrape_page(f"{_SITE}/one")
+        await gateways[1].map_site(_SITE)
+    finally:
+        for gateway in gateways:
+            await gateway.aclose()
+    assert CountingBucket.acquired == 2  # both gateways paced by the one per-key limiter
+
+
+def test_r3_composition_root_passes_the_app_wide_limits_into_the_gateway() -> None:
+    settings = Settings.model_construct(
+        parallel_api_key=None,
+        firecrawl_api_key="fc",
+        parallel_mcp_url="http://parallel",
+        firecrawl_mcp_url="http://firecrawl",
+        firecrawl_probe_url=_PROBE_URL,
+        r3_parallel_search_concurrency=10,
+        r3_firecrawl_concurrency=2,
+        r3_firecrawl_rate_per_minute=10,
+    )
+    limits = mcp_tools.create_mcp_provider_limits(settings)
+    gateway = create_mcp_tool_gateway(settings, limits=limits)
+    assert gateway._global_search_sem is limits.search_slots
+    assert gateway._global_firecrawl_sem is limits.firecrawl_slots
+    assert gateway._firecrawl_rate is limits.firecrawl_rate
+    plain = create_mcp_tool_gateway(settings)  # no limits: today's per-instance gateway
+    assert plain._global_search_sem is None and plain._global_firecrawl_sem is None
+    assert plain._firecrawl_rate is not limits.firecrawl_rate

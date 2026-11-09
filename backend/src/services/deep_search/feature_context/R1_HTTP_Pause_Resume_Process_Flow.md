@@ -23,7 +23,7 @@ R1 needs **6 components**. Four of them add the pause, the saving and the endpoi
 | Shared LLM caller and the R1 factory | `create_structured_llm_caller`, `create_requirement_interpretation` | Building R1 inside the app |
 | Typed R1 errors, each with a `stage` | `src/exceptions/deep_search.py` | Marking a run "Failed" with the reason |
 | FastAPI app, lifespan, error handler | `src/app/main.py` | Hosting the endpoints |
-| Supabase project, client and migrations folder | `src/clients/supabase.py`, `supabase/migrations/` | The database |
+| Supabase project, client and migrations folder | `src/clients/supabase.py`, `backend/supabase/migrations/` | The database |
 
 **Two gaps the code shows:**
 
@@ -150,7 +150,7 @@ No table or write path exists for deep search. The backend's Supabase client cur
 
 ### Mandatory Sub-Tasks Independent of Approaches Taken
 
-- A migration in `supabase/migrations/` for an `r1_runs` table with these columns:
+- A migration in `backend/supabase/migrations/` for an `r1_runs` table with these columns:
   - `run_id`
   - `user_id`: the verified user who started the run
   - `status`: one of `needs_answers`, `finished`, `failed`

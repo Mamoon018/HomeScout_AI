@@ -28,7 +28,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -488,6 +488,9 @@ class McpToolGateway:
         firecrawl_rate_per_minute: int = FIRECRAWL_RATE_PER_MINUTE,
         firecrawl_probe_url: str = FIRECRAWL_PROBE_URL_DEFAULT,
         client_factory: ClientFactory = _streamable_http_factory,
+        global_search_semaphore: asyncio.Semaphore | None = None,
+        global_firecrawl_semaphore: asyncio.Semaphore | None = None,
+        firecrawl_rate_limiter: _TokenBucket | None = None,
     ) -> None:
         self._raw_tool_definitions: RawToolDefinitions | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -503,7 +506,18 @@ class McpToolGateway:
         # the retained crawl path. The per-minute bucket (A7) is a second, shared Firecrawl gate.
         self._search_sem = asyncio.Semaphore(search_concurrency)
         self._firecrawl_sem = asyncio.Semaphore(firecrawl_concurrency)
-        self._firecrawl_rate = _TokenBucket(firecrawl_rate_per_minute)
+        # R3-C2 Iteration 1: the provider limits are per account key, not per run, so R3's per-run
+        # gateways share one app-wide slot pool per provider (taken after this gateway's own slot)
+        # and one Firecrawl per-minute limiter. A given limiter replaces this gateway's own bucket:
+        # the per-minute budget belongs to the key, and two buckets would pace each call twice.
+        # Left unset, the gateway behaves exactly as before.
+        self._global_search_sem = global_search_semaphore
+        self._global_firecrawl_sem = global_firecrawl_semaphore
+        self._firecrawl_rate = (
+            firecrawl_rate_limiter
+            if firecrawl_rate_limiter is not None
+            else _TokenBucket(firecrawl_rate_per_minute)
+        )
 
     async def open(self) -> None:
         """Start both sessions together, then verify both catalogs.
@@ -679,6 +693,7 @@ class McpToolGateway:
             arguments,
             timeout=self._parallel_config.call_timeout_seconds,
             retry_kinds={"timeout", "transport", "rate_limited"},
+            global_semaphore=self._global_search_sem,
         )
         if isinstance(outcome, ToolFailure):
             return outcome
@@ -708,6 +723,7 @@ class McpToolGateway:
             retry_kinds=set(_TRANSIENT_KINDS),
             target=url,
             rate=self._firecrawl_rate,
+            global_semaphore=self._global_firecrawl_sem,
         )
         if isinstance(outcome, ToolFailure):
             return outcome
@@ -736,6 +752,7 @@ class McpToolGateway:
             retry_kinds=set(_TRANSIENT_KINDS),
             target=url,
             rate=self._firecrawl_rate,
+            global_semaphore=self._global_firecrawl_sem,
         )
         if isinstance(outcome, ToolFailure):
             return outcome
@@ -827,6 +844,7 @@ class McpToolGateway:
             timeout=self._firecrawl_config.call_timeout_seconds,
             retry_kinds={"rate_limited"},
             rate=self._firecrawl_rate,
+            global_semaphore=self._global_firecrawl_sem,
         )
         if isinstance(start, ToolFailure):
             return start
@@ -860,6 +878,7 @@ class McpToolGateway:
         retry_kinds: set[str],
         target: str | None = None,
         rate: _TokenBucket | None = None,
+        global_semaphore: asyncio.Semaphore | None = None,
     ) -> "object | ToolFailure":
         """One bounded call with transient retry; reuses the same `Client` on every attempt.
 
@@ -874,7 +893,9 @@ class McpToolGateway:
         retries_by_kind: dict[str, int] = {}
         attempt = 0
         while True:
-            outcome = await self._single_call(semaphore, client, tool, arguments, timeout, rate)
+            outcome = await self._single_call(
+                semaphore, client, tool, arguments, timeout, rate, global_semaphore
+            )
             if not isinstance(outcome, ToolFailure):
                 return outcome
             _log_attempt(tool, attempt, outcome, target)
@@ -896,6 +917,7 @@ class McpToolGateway:
         arguments: dict,
         timeout: float,
         rate: _TokenBucket | None = None,
+        global_semaphore: asyncio.Semaphore | None = None,
     ) -> "object | ToolFailure":
         """Issue one `call_tool` under a semaphore slot and a timeout; classify any failure.
 
@@ -903,11 +925,14 @@ class McpToolGateway:
         in-flight calls never exceeds the semaphore size. A `rate` bucket (A7, Firecrawl path) is
         acquired *before* the slot and *outside* the per-call timeout — waiting for the per-minute
         window is pacing, not the call being slow, so it must not count against the call's budget.
+        `global_semaphore` is the app-wide slot pool for this provider (R3-C2 Iteration 1), taken
+        inside the run's own slot and also outside the timeout: a call waiting on its own run's limit
+        never holds an app-wide slot, and waiting for a slot is not the call being slow.
         """
         try:
             if rate is not None:
                 await rate.acquire()
-            async with semaphore:
+            async with semaphore, _optional_slot(global_semaphore):
                 async with asyncio.timeout(timeout):
                     result = await client.call_tool(
                         tool, arguments, read_timeout_seconds=timeout
@@ -956,6 +981,7 @@ class McpToolGateway:
                 timeout=min(self._firecrawl_config.call_timeout_seconds, remaining),
                 retry_kinds={"rate_limited"},
                 rate=self._firecrawl_rate,
+                global_semaphore=self._global_firecrawl_sem,
             )
             if isinstance(outcome, ToolFailure):
                 if outcome.kind == "timeout":
@@ -1276,9 +1302,37 @@ def _log_attempt(
     logger.warning(json.dumps(record))
 
 
+def _optional_slot(semaphore: asyncio.Semaphore | None) -> AbstractAsyncContextManager:
+    """The app-wide slot when one is configured, else a no-op context."""
+    return semaphore if semaphore is not None else nullcontext()
+
+
 # --------------------------------------------------------------------------------------------------
 # Composition root.
 # --------------------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class McpProviderLimits:
+    """The app-wide web-provider limits shared by every R3 run's gateway (R3-C2 Iteration 1).
+
+    Built once per process in the app lifespan. `search_slots` bounds Parallel `web_search` calls,
+    `firecrawl_slots` bounds every Firecrawl call, and `firecrawl_rate` paces Firecrawl call
+    starts per minute. Each call takes only its own provider's limits. Nothing here needs closing.
+    """
+
+    search_slots: asyncio.Semaphore
+    firecrawl_slots: asyncio.Semaphore
+    firecrawl_rate: _TokenBucket
+
+
+def create_mcp_provider_limits(settings: Settings) -> McpProviderLimits:
+    """Build the three app-wide limits from settings (each set from that provider's plan)."""
+    return McpProviderLimits(
+        search_slots=asyncio.Semaphore(settings.r3_parallel_search_concurrency),
+        firecrawl_slots=asyncio.Semaphore(settings.r3_firecrawl_concurrency),
+        firecrawl_rate=_TokenBucket(settings.r3_firecrawl_rate_per_minute),
+    )
+
+
 def _normalize_key(value: str | None) -> str | None:
     """Treat a blank or whitespace-only env value as no key, so keyless handling stays `is None`."""
     if value is None:
@@ -1287,8 +1341,14 @@ def _normalize_key(value: str | None) -> str | None:
     return stripped or None
 
 
-def create_mcp_tool_gateway(settings: Settings) -> McpToolGateway:
-    """Build the gateway from settings. Opens nothing: no I/O, no session until `open()`."""
+def create_mcp_tool_gateway(
+    settings: Settings, *, limits: McpProviderLimits | None = None
+) -> McpToolGateway:
+    """Build the gateway from settings. Opens nothing: no I/O, no session until `open()`.
+
+    `limits` are the app-wide provider limits an R3 run's gateway shares with every other run;
+    without them the gateway keeps only its own per-instance limits.
+    """
     parallel = McpServerConfig(
         name="parallel",
         url=settings.parallel_mcp_url,
@@ -1306,4 +1366,7 @@ def create_mcp_tool_gateway(settings: Settings) -> McpToolGateway:
         firecrawl,
         firecrawl_probe_url=_normalize_key(settings.firecrawl_probe_url)
         or FIRECRAWL_PROBE_URL_DEFAULT,
+        global_search_semaphore=limits.search_slots if limits is not None else None,
+        global_firecrawl_semaphore=limits.firecrawl_slots if limits is not None else None,
+        firecrawl_rate_limiter=limits.firecrawl_rate if limits is not None else None,
     )

@@ -58,8 +58,9 @@ _STORE_UNAVAILABLE = {
 
 
 _RETRY_NOTES = {
-    "start": "`retryable` is always false here: no answers are saved yet, so start a new run.",
-    "answers": "`retryable` is true on the first failure after answers were saved "
+    "start": "`retryable` is true on the first failure of an LLM step: the requirements and "
+    "every finished step are saved, so the page can offer Retry.",
+    "answers": "`retryable` is true on the first failure of an LLM step "
     "(the page can offer Retry).",
     "retry": "`retryable` is always false here: the one allowed retry is used, so start a new run.",
 }
@@ -68,7 +69,7 @@ _RETRY_NOTES = {
 def _run_failed(endpoint: str) -> dict[int | str, dict[str, Any]]:
     """502 / 503 / 500 when R1 itself fails. The run is saved as `failed`."""
     retry_note = _RETRY_NOTES[endpoint]
-    retryable_possible = endpoint == "answers"
+    retryable_possible = endpoint in ("start", "answers")
     example = {
         "error": "Requirement interpretation failed",
         "run_id": "3f2b8c1e-0000-4000-8000-000000000000",
@@ -187,12 +188,15 @@ async def submit_answers_route(
 @router.post(
     "/{run_id}/retry",
     response_model=RunResponse,
+    description="Resumes a failed run at its failed step; finished steps are not called again. "
+    "The reply carries `result` when the run finishes, or `questions` when the failed step was "
+    "question generation (the run then waits for answers).",
     responses={
         **_NOT_FOUND,
         **_conflict(
             "The run has not failed, it cannot be retried (`retryable` false or the one "
-            "retry is used), another retry already started, or it was saved by an older "
-            "version (start again)."
+            "retry is used), another retry already started, it was cut off while running, "
+            "or it was saved by an older version (start again)."
         ),
         **_run_failed("retry"),
     },
@@ -208,6 +212,8 @@ async def retry_run_route(
 @router.get(
     "/{run_id}",
     response_model=RunResponse,
+    description="Read-only. `status` is `running` while a request is still working on the run; "
+    "a run left `running` for over 3 minutes (cut off) reads as `failed` with `retryable` false.",
     responses={
         **_NOT_FOUND,
         status.HTTP_503_SERVICE_UNAVAILABLE: _STORE_UNAVAILABLE,

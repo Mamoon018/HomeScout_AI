@@ -25,10 +25,9 @@ from src.services.deep_search.specific_metric_resolution import (
     _resolve_verdict,
 )
 from src.services.deep_search.feature_schemas.schemas import (
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricSpec,
     PredefinedMetricsRecord,
@@ -359,13 +358,11 @@ async def test_discovery_empty_search_yields_none_with_telemetry():
 # --------------------------------------------------------------------------------------------------
 # STEP 3 orchestration (pre-pass + fan-out), RC7 / RC8.
 # --------------------------------------------------------------------------------------------------
-def _state_for_batch() -> AmenitySearchState:
+def _state_for_batch() -> SpecificMetricResolutionState:
     eligible = CategoryMetricPlan(1, "dentist", "specific_attributes", [], [_METRIC])
     basic = CategoryMetricPlan(2, "park", "basic_profile", [], [])  # RC7: no work item
     cp = CanonicalPlace("x", {})
-    return AmenitySearchState(
-        origin=GeoPoint(0.0, 0.0),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[eligible, basic],
         discovered_places={1: {"pA": cp, "pB": cp, "pD": cp}, 2: {"pC": cp}},
         predefined_records={

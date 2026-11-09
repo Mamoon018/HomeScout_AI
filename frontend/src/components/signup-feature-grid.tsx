@@ -26,6 +26,7 @@ const features: FeatureType[] = [
     icon: HouseHeart,
     iconClassName: 'text-amber-400',
     borderClassName: 'border-amber-400/50',
+    buttonBorderClassName: 'border-amber-400 dark:border-amber-400',
     neonBorderClassName: 'secondary-neon-amber',
     description: 'Tell us what matters to you!',
     secondaryContent: <HomeWishlistResultsPanel />,
@@ -35,6 +36,7 @@ const features: FeatureType[] = [
     icon: Building2,
     iconClassName: 'text-sky-400',
     borderClassName: 'border-sky-400/50',
+    buttonBorderClassName: 'border-sky-400 dark:border-sky-400',
     neonBorderClassName: 'secondary-neon-sky',
     description:
       'Scan neighborhoods, filters, and listings across multiple sources at once.',
@@ -45,6 +47,7 @@ const features: FeatureType[] = [
     icon: FileBarChart,
     iconClassName: 'text-emerald-400',
     borderClassName: 'border-emerald-400/50',
+    buttonBorderClassName: 'border-emerald-400 dark:border-emerald-400',
     neonBorderClassName: 'secondary-neon-emerald',
     description:
       'Get composite scores on value, condition, location, marts, & critical city points.',
@@ -55,6 +58,7 @@ const features: FeatureType[] = [
     icon: Puzzle,
     iconClassName: 'text-violet-400',
     borderClassName: 'border-violet-400/50',
+    buttonBorderClassName: 'border-violet-400 dark:border-violet-400',
     neonBorderClassName: 'secondary-neon-violet',
     description:
       'Weigh dozens of signals to surface homes that truly fit your priorities.',
@@ -65,6 +69,7 @@ const features: FeatureType[] = [
     icon: MessagesSquare,
     iconClassName: 'text-orange-400',
     borderClassName: 'border-orange-400/50',
+    buttonBorderClassName: 'border-orange-400 dark:border-orange-400',
     neonBorderClassName: 'secondary-neon-orange',
     description:
       'Coordinate messages, inquiry requests, and follow-ups with owners in one thread.',
@@ -75,6 +80,7 @@ const features: FeatureType[] = [
     icon: Star,
     iconClassName: 'text-fuchsia-400',
     borderClassName: 'border-fuchsia-400/50',
+    buttonBorderClassName: 'border-fuchsia-400 dark:border-fuchsia-400',
     neonBorderClassName: 'secondary-neon-fuchsia',
     description:
       'Keeps you in loop on search updates and critical communication stages.',

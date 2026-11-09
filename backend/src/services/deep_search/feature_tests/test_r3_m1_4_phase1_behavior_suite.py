@@ -27,10 +27,9 @@ from src.clients.mcp_tools import RawToolDefinition, SearchExcerpt, ToolFailure,
 from src.exceptions.deep_search import MetricResolutionProviderError
 from src.exceptions.llm import LLMProviderError
 from src.services.deep_search.feature_schemas.schemas import (
-    AmenitySearchState,
+    SpecificMetricResolutionState,
     CanonicalPlace,
     CategoryMetricPlan,
-    GeoPoint,
     MetricResolutionSource,
     MetricSpec,
     PredefinedMetricsRecord,
@@ -218,11 +217,9 @@ def _rec(place_id: str, word: str) -> PredefinedMetricsRecord:
     )
 
 
-def _state(words: list[str]) -> AmenitySearchState:
+def _state(words: list[str]) -> SpecificMetricResolutionState:
     plan = CategoryMetricPlan(1, "climbing_gym", "specific_attributes", [], METRICS)
-    return AmenitySearchState(
-        origin=GeoPoint(0.0, 0.0),
-        radius_km=2.0,
+    return SpecificMetricResolutionState(
         category_metric_plans=[plan],
         discovered_places={1: {w.lower(): CanonicalPlace(w.lower(), {}) for w in words}},
         predefined_records={1: {w.lower(): _rec(w.lower(), w) for w in words}},

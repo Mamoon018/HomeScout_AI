@@ -3,4 +3,4 @@
 backend/certs/
 .env
 sample_output/
-
+.playwright-mcp/

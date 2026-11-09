@@ -1,9 +1,10 @@
-"""Manual, stage-by-stage run of R1's pause/resume entry points (C1) and state saving (C2).
+"""Manual, stage-by-stage run of R1's pause/resume entry points (C1) and step payloads.
 
 Not a test: it asserts nothing and writes nothing to disk or to Supabase. It seeds a
 Mechanism-1-style `RequirementInterpretationState` (so extraction is not re-run), then walks the
 web path the coordinator takes: 2A pass 1 + router -> generate and store the questions (the
-pause) -> save the state to JSON and load it back -> record answers -> continue after answers.
+pause) -> save the questions step payload to JSON and load it back -> record answers ->
+continue after answers.
 Provider attempts and raw bodies are read back off DEEP_SEARCH_LOGGER_NAME, as in
 `category_resolution_sample_run.py`.
 
@@ -37,7 +38,12 @@ from src.services.deep_search.feature_schemas.schemas import (
     PayloadRecord,
     RequirementInterpretationState,
 )
-from src.services.deep_search.r1_run_store import STATE_SCHEMA_VERSION, dump_state, load_state
+from src.services.deep_search.r1_run_store import (
+    STEP_SCHEMA_VERSION,
+    dump_state,
+    dump_step_output,
+    load_step_output,
+)
 from src.services.deep_search.requirement_interpretation import (
     LLM_PROVIDER_ATTEMPT_EVENT,
     LLM_PROVIDER_RAW_BODY_EVENT,
@@ -145,7 +151,7 @@ async def run_sample(answers_arg: str | None) -> RequirementInterpretationState:
     try:
         state = RequirementInterpretationState(payload=_SAMPLE_PAYLOAD, extracted=_SAMPLE_EXTRACTED)
         _section("SEEDED STATE (as after Mechanism 1)")
-        print(json.dumps(dump_state(state)["state"], indent=2, ensure_ascii=False))
+        print(json.dumps(dump_state(state), indent=2, ensure_ascii=False))
 
         await interpretation.resolve_explicit_categories(state)
         _section("2A PASS 1 - PROVIDER ATTEMPTS")
@@ -168,13 +174,16 @@ async def run_sample(answers_arg: str | None) -> RequirementInterpretationState:
         _section("PAUSE - QUESTIONS STORED ON THE STATE")
         print(json.dumps([q.model_dump() for q in questions], indent=2, ensure_ascii=False))
 
-        saved = json.loads(json.dumps(dump_state(state)))
-        loaded = load_state(saved)
-        _section("SAVED STATE (C2)")
-        print(f"version: {saved['version']} (current {STATE_SCHEMA_VERSION})")
+        # The questions are what a paused run saves for this step (r1_run_steps row).
+        saved = json.loads(
+            json.dumps(dump_step_output("clarification_questions", {"questions": questions}))
+        )
+        reloaded = load_step_output("clarification_questions", saved)
+        _section("SAVED QUESTIONS STEP PAYLOAD")
+        print(f"schema_version: {saved['schema_version']} (current {STEP_SCHEMA_VERSION})")
         print(f"json size: {len(json.dumps(saved))} chars")
-        print(f"loaded state equals the paused state: {loaded == state}")
-        print(f"pass counter in the saved copy: {loaded.category_resolution_passes}")
+        print(f"reloaded questions equal the stored ones: {list(reloaded.questions) == questions}")
+        loaded = state
 
         if answers_arg:
             answers = _parse_answers(answers_arg)
@@ -227,7 +236,7 @@ def _print_attempts(collector: _RecordCollector, stage: str) -> None:
 
 def _print_plans(state: RequirementInterpretationState) -> None:
     _section("RESULT - CATEGORY METRIC PLANS (what the page and R2 receive)")
-    plans = dump_state(state)["state"]["category_metric_plans"]
+    plans = dump_state(state)["category_metric_plans"]
     print(json.dumps(plans, indent=2, ensure_ascii=False))
     print(f"\nplan count: {len(plans)}")
 
