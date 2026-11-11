@@ -1,9 +1,12 @@
 import type { CSSProperties } from 'react'
 import { CheckIcon, FastForwardIcon } from 'lucide-react'
 
-import { MapPreview } from '@/features/search-progress/components/map-preview'
 import {
-  MAP_STEP_INDEX,
+  ClarificationPreview,
+  type ClarificationPreviewProps,
+} from '@/features/search-progress/components/clarification-preview'
+import {
+  CLARITY_STEP_INDEX,
   RUN_TIMING,
   SEARCH_STEPS,
   STEP_COUNT,
@@ -14,11 +17,12 @@ import {
 import { cn } from '@/lib/utils'
 
 type SearchProgressTimelineProps = {
-  /** -1 = all pending, 0..4 = active step, 5 = all completed. */
+  /** -1 = all pending, 0..1 = active step, 2 = all completed. */
   activeStep: number
-  /** Map preview fades out before a re-run. */
+  /** Previews fade out before a re-run. */
   resetting?: boolean
-  radiusKm?: number
+  /** Questions R1 is asking (or has had answered) under the clarity-check step. */
+  clarification?: Omit<ClarificationPreviewProps, 'leaving' | 'className'> | null
   className?: string
 }
 
@@ -33,10 +37,13 @@ const STATE_TRANSITION =
   'transition-[color,border-color,background-color,opacity,box-shadow] duration-300 ease-Easing-Out'
 
 /**
- * Grid columns: marker | icon rail | connector | label pill.
+ * Grid columns: marker | icon rail | connector | label pill. The list owns the columns and
+ * every row is a subgrid of them, so the pill column is as wide as the widest pill and all
+ * pills (and the previews under them) share one width.
  * Rail column = 40px tile + 6px padding each side.
  */
-const ROW_GRID = 'grid grid-cols-[24px_52px_48px_minmax(0,1fr)] items-start gap-x-3'
+const LIST_GRID = 'grid grid-cols-[24px_52px_48px_minmax(0,max-content)] gap-x-3 gap-y-4'
+const ROW_GRID = 'col-span-4 grid grid-cols-subgrid items-start'
 
 /**
  * Rounded-rect outline for the 40px tile (10px radius, centred 1.5px stroke),
@@ -49,7 +56,7 @@ const TILE_OUTLINE_PATH =
 export function SearchProgressTimeline({
   activeStep,
   resetting = false,
-  radiusKm = 2,
+  clarification = null,
   className,
 }: SearchProgressTimelineProps) {
   return (
@@ -57,7 +64,7 @@ export function SearchProgressTimeline({
     <section
       aria-labelledby="progress-tracker-title"
       className={cn(
-        'w-full animate-in fade-in-0 duration-200 rounded-[22px] border border-Border-Subtle bg-Surface-Primary p-5 shadow-[0_8px_24px_rgba(0,0,0,0.18)] backdrop-blur-xl md:p-6',
+        'w-full animate-in fade-in-0 duration-200 rounded-[22px] border border-Border-Subtle bg-Surface-Primary p-5 shadow-(--fs-panel-shadow) backdrop-blur-xl md:p-6',
         className,
       )}
     >
@@ -71,21 +78,20 @@ export function SearchProgressTimeline({
 
       {/* The rail is positioned against this wrapper, so it doesn't reach the title. */}
       <div className="relative">
-        {/* T4.1 rail: one shared rounded column behind all five icon tiles */}
+        {/* T4.1 rail: one shared rounded column behind the icon tiles */}
         <div
           aria-hidden="true"
           className="absolute -top-1.5 -bottom-1.5 left-9 w-[52px] rounded-xl border border-[color-mix(in_srgb,var(--color-Brand-500)_50%,transparent)] bg-Surface-Primary"
         />
-        <ol aria-label="Search progress" className="relative flex flex-col gap-4">
+        <ol aria-label="Search progress" className={cn('relative', LIST_GRID)}>
           {SEARCH_STEPS.map((step, index) => (
             <StepRow
               key={step.title}
               step={step}
               number={index + 1}
               status={stepStatus(index, activeStep)}
-              showMap={index === MAP_STEP_INDEX && activeStep >= MAP_STEP_INDEX}
-              mapLeaving={resetting}
-              radiusKm={radiusKm}
+              leaving={resetting}
+              clarification={index === CLARITY_STEP_INDEX ? clarification : null}
             />
           ))}
         </ol>
@@ -98,15 +104,22 @@ type StepRowProps = {
   step: SearchStep
   number: number
   status: StepStatus
-  showMap: boolean
-  mapLeaving: boolean
-  radiusKm: number
+  leaving: boolean
+  clarification: SearchProgressTimelineProps['clarification']
 }
 
-function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRowProps) {
+function StepRow({
+  step,
+  number,
+  status,
+  leaving,
+  clarification,
+}: StepRowProps) {
   const Icon = step.icon
   const isActive = status === 'active'
   const isPending = status === 'pending'
+  // Waiting on the renter: nothing is in progress, so the timer and typing dots stop.
+  const waiting = isActive && clarification?.phase === 'asking'
 
   return (
     <li
@@ -122,7 +135,7 @@ function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRo
         // Drawn as slim 2px × 6px bars with 4px gaps, centred on the 24px marker.
         // --segment-color is a registered <color>, so grey → green still eases.
         'after:absolute after:top-8 after:-bottom-6 after:left-[11px] after:w-0.5 after:bg-[repeating-linear-gradient(to_bottom,var(--segment-color)_0_6px,transparent_6px_10px)] last:after:hidden',
-        '[--segment-color:rgb(255_255_255/0.2)] data-[state=completed]:[--segment-color:var(--color-Status-Success)]',
+        '[--segment-color:rgba(74,90,42,0.18)] data-[state=completed]:[--segment-color:var(--color-Status-Success)]',
         'transition-[--segment-color] duration-300',
       )}
     >
@@ -135,7 +148,7 @@ function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRo
           className={cn(
             'flex size-6 items-center justify-center rounded-full border-2',
             STATE_TRANSITION,
-            status === 'pending' && 'border-white/12 text-muted-foreground/70',
+            status === 'pending' && 'border-(--fs-tile-border) text-muted-foreground',
             status === 'active' &&
               'animate-step-pulse border-Brand-500 text-Brand-500 motion-reduce:animate-none',
             status === 'completed' && 'border-Status-Success text-muted-foreground',
@@ -170,7 +183,7 @@ function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRo
               isPending ? 'opacity-40' : 'opacity-100',
             )}
           />
-          {isPending ? null : <TileOutline animate={isActive} />}
+          {isPending ? null : <TileOutline animate={isActive && !waiting} />}
         </span>
       </span>
 
@@ -188,15 +201,15 @@ function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRo
             strokeDasharray="6 6"
             className={cn(
               'transition-[stroke] duration-300',
-              isPending ? 'stroke-white/15' : 'stroke-(--step-color)',
-              isActive && 'animate-connector-flow motion-reduce:animate-none',
+              isPending ? 'stroke-[rgba(74,90,42,0.2)]' : 'stroke-(--step-color)',
+              isActive && !waiting && 'animate-connector-flow motion-reduce:animate-none',
             )}
           />
         </svg>
       </span>
 
-      {/* T6 label pill (+ T7 dots), and T8 map below it on step 4 */}
-      <div className="flex w-fit max-w-full min-w-0 flex-col">
+      {/* T6 label pill (+ T7 dots) */}
+      <div className="flex w-full min-w-0 flex-col">
         <span className="flex h-10 min-w-0 items-center">
           <span
             className={cn(
@@ -204,40 +217,44 @@ function StepRow({ step, number, status, showMap, mapLeaving, radiusKm }: StepRo
               STATE_TRANSITION,
               // Pending: dark base, grey border, dimmed muted text.
               status === 'pending' &&
-                'border-white/20 bg-(--tracker-pill-base) text-muted-foreground',
+                'border-(--fs-option-border) bg-(--tracker-pill-base) text-muted-foreground',
               // Reached: dark base with a faint step-colour tint, solid label colour.
               status !== 'pending' &&
                 'bg-[color-mix(in_srgb,var(--step-color)_8%,var(--tracker-pill-base))] text-(--tracker-label)',
               status === 'active' &&
-                'border-(--step-color) font-semibold shadow-[0_0_14px_color-mix(in_srgb,var(--step-color)_35%,transparent)]',
+                'border-(--step-color) font-semibold shadow-[0_4px_14px_color-mix(in_srgb,var(--step-color)_28%,transparent)]',
               status === 'completed' &&
                 'border-[color-mix(in_srgb,var(--step-color)_60%,transparent)]',
             )}
           >
             <span className={cn('truncate', isPending && 'opacity-60')}>{step.description}</span>
-            {isActive ? <TypingDots /> : null}
+            {waiting && clarification ? (
+              <QuestionCount count={clarification.questions.length} />
+            ) : isActive ? (
+              <TypingDots />
+            ) : null}
           </span>
         </span>
-
-        {showMap ? (
-          // w-0 + min-w-full: the map takes the pill's width instead of widening the column.
-          <div className="grid w-0 min-w-full animate-map-expand motion-reduce:animate-none">
-            <div className="min-h-0 overflow-hidden">
-              <MapPreview
-                radiusKm={radiusKm}
-                scanning={isActive}
-                className={cn(
-                  'mt-3',
-                  STATE_TRANSITION,
-                  // Full brightness while exploring and after; only fades out before a re-run.
-                  mapLeaving ? 'opacity-0' : 'opacity-100',
-                )}
-              />
-            </div>
-          </div>
-        ) : null}
       </div>
+
+      {/* T9 clarification: full panel width on phones, the pill column from md up */}
+      {clarification ? (
+        <div className="col-span-4 mt-3 grid w-0 min-w-full animate-map-expand motion-reduce:animate-none md:col-span-1 md:col-start-4">
+          <div className="min-h-0 overflow-hidden">
+            <ClarificationPreview {...clarification} leaving={leaving} />
+          </div>
+        </div>
+      ) : null}
     </li>
+  )
+}
+
+/** Tells the renter how many questions are waiting while the step is paused. */
+function QuestionCount({ count }: { count: number }) {
+  return (
+    <span className="shrink-0 rounded-full border border-(--step-color)/40 bg-(--step-color)/10 px-2 py-0.5 text-xs font-semibold text-(--tracker-label) tabular-nums">
+      {count} {count === 1 ? 'question' : 'questions'}
+    </span>
   )
 }
 

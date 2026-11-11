@@ -14,63 +14,45 @@ describe('SearchProgressTimeline', () => {
     expect(within(panel).getByRole('list', { name: 'Search progress' })).toBeInTheDocument()
   })
 
-  it('renders all 5 steps as pending before a run starts', () => {
+  it('renders the two steps as pending before a run starts', () => {
     render(<SearchProgressTimeline activeStep={-1} />)
 
-    expect(rows()).toHaveLength(5)
-    expect(rows().map((row) => row.dataset.state)).toEqual(Array(5).fill('pending'))
-    expect(screen.queryByRole('img', { name: /Map of the area/ })).not.toBeInTheDocument()
+    expect(rows()).toHaveLength(2)
+    expect(rows().map((row) => row.dataset.state)).toEqual(['pending', 'pending'])
+    expect(rows()[0]).toHaveTextContent('Checking if anything needs clarification')
+    expect(rows()[1]).toHaveTextContent('Breaking your needs into higher-level categories')
   })
 
-  it('marks earlier steps completed and the current one active', () => {
-    render(<SearchProgressTimeline activeStep={2} />)
+  it('marks the clarity check completed and the categories step active', () => {
+    render(<SearchProgressTimeline activeStep={1} />)
 
-    expect(rows().map((row) => row.dataset.state)).toEqual([
-      'completed',
-      'completed',
-      'active',
-      'pending',
-      'pending',
-    ])
-    expect(rows()[2]).toHaveAttribute('aria-current', 'step')
-    expect(rows()[2]).toHaveTextContent('Calling tools one by one to gather more information')
+    expect(rows().map((row) => row.dataset.state)).toEqual(['completed', 'active'])
+    expect(rows()[1]).toHaveAttribute('aria-current', 'step')
   })
 
   it('gives each step its own colour and times only the active step', () => {
     render(<SearchProgressTimeline activeStep={1} />)
-    const [done, active, pending] = rows()
+    const [done, active] = rows()
     const outline = (row: HTMLElement) => row.querySelector('path[pathLength="100"]')
     const connector = (row: HTMLElement) => row.querySelector('line')
 
     expect(rows().map((row) => row.style.getPropertyValue('--step-color'))).toEqual([
-      'var(--color-Step-1)',
       'var(--color-Step-2)',
-      'var(--color-Step-3)',
-      'var(--color-Step-4)',
-      'var(--color-Step-5)',
+      'var(--color-Step-1)',
     ])
 
-    // Tile outline: fully drawn when completed, drawing (3s timer) when active, absent when pending.
+    // Tile outline: fully drawn when completed, drawing (3s timer) when active.
     expect(outline(done)).not.toHaveClass('animate-tile-border-draw')
     expect(outline(active)).toHaveClass('animate-tile-border-draw')
     expect(outline(active)).toHaveStyle({ animationDuration: '3000ms' })
-    expect(outline(pending)).toBeNull()
 
     // Connector flows only while the step is active.
     expect(connector(done)).not.toHaveClass('animate-connector-flow')
     expect(connector(active)).toHaveClass('animate-connector-flow')
-    expect(connector(pending)).not.toHaveClass('animate-connector-flow')
   })
 
-  it('shows the map preview once step 4 is active and keeps it after', () => {
-    const { rerender } = render(<SearchProgressTimeline activeStep={3} />)
-    const map = within(rows()[3]).getByRole('img', {
-      name: 'Map of the area around the submitted address, with a 2 km search radius',
-    })
-    expect(map).toBeInTheDocument()
-
-    rerender(<SearchProgressTimeline activeStep={5} />)
-    expect(screen.getByRole('img', { name: /Map of the area/ })).toBeInTheDocument()
-    expect(rows().map((row) => row.dataset.state)).toEqual(Array(5).fill('completed'))
+  it('shows every step completed at the end', () => {
+    render(<SearchProgressTimeline activeStep={2} />)
+    expect(rows().map((row) => row.dataset.state)).toEqual(['completed', 'completed'])
   })
 })

@@ -1,18 +1,15 @@
 /**
- * Sign-in agent workflow (Olive Glass theme).
- * Text inside cards is wheat; each feature's accent (--accent) is for signals only.
+ * Sign-in agent workflow (Frosted Sage theme).
+ * Text inside cards is ink; each feature's accent (--accent) is for signals only.
  * Text colours are always solid: no opacity on text.
  */
 
 .wf {
-  --wf-wheat: #e6d3a3;
-  /* Text is a touch brighter than the wires so small type reads clearly on glass. */
-  --wf-text: #eedcb0;
-  --wf-wheat-hi: #f6ebc8;
-  --wf-muted: #aeb3a0;
-  --wf-lime: #bfe36b;
-  --wf-ink: 16, 22, 10;
-  --wf-hairline: rgba(230, 211, 163, 0.12);
+  --wf-wire: var(--fs-wire);
+  --wf-text: var(--fs-ink);
+  --wf-muted: var(--fs-muted);
+  --wf-done: var(--fs-done);
+  --wf-hairline: var(--fs-tile-border);
   --wf-ease: cubic-bezier(0.16, 1, 0.3, 1);
 
   position: relative;
@@ -56,12 +53,12 @@
 .wf-wire {
   --wf-glow: 1.5px;
   fill: none;
-  stroke: var(--wf-wheat);
+  stroke: var(--wf-wire);
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   opacity: 0.3;
-  filter: drop-shadow(0 0 var(--wf-glow) rgba(230, 211, 163, 0.75));
+  filter: drop-shadow(0 0 var(--wf-glow) rgba(94, 107, 56, 0.4));
   transition:
     opacity 0.4s ease,
     filter 0.4s ease;
@@ -78,11 +75,11 @@
 }
 
 .wf-arrow {
-  fill: var(--wf-wheat);
+  fill: var(--wf-wire);
 }
 
 .wf-junction {
-  fill: var(--wf-wheat);
+  fill: var(--wf-wire);
   opacity: 0.85;
 }
 
@@ -95,18 +92,16 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--wf-wheat-hi);
-  box-shadow:
-    0 0 10px 3px rgba(230, 211, 163, 0.85),
-    0 0 24px 8px rgba(230, 211, 163, 0.35);
+  background: var(--fs-dot);
+  box-shadow: 0 0 10px 3px var(--fs-dot-glow);
   offset-rotate: 0deg;
   offset-distance: 0%;
   pointer-events: none;
 }
 
 .wf-light-svg {
-  fill: var(--wf-wheat-hi);
-  filter: drop-shadow(0 0 6px rgba(230, 211, 163, 0.85));
+  fill: #f5b73b;
+  filter: drop-shadow(0 0 5px var(--fs-dot-glow));
 }
 
 @keyframes wf-travel {
@@ -131,11 +126,11 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 1px solid rgba(230, 211, 163, 0.6);
+  border: 1px solid var(--fs-accent);
   border-radius: 50%;
-  background: rgba(60, 74, 38, 0.85);
-  color: var(--wf-wheat);
-  box-shadow: 0 0 10px rgba(230, 211, 163, 0.25);
+  background: var(--fs-accent);
+  color: var(--fs-on-accent);
+  box-shadow: 0 4px 12px rgba(38, 48, 26, 0.22);
   cursor: pointer;
   transition:
     box-shadow 0.4s ease,
@@ -151,17 +146,16 @@
 
 .wf-node[data-lit] {
   box-shadow:
-    0 0 0 4px rgba(230, 211, 163, 0.15),
-    0 0 18px rgba(230, 211, 163, 0.55);
+    0 0 0 4px rgba(224, 138, 0, 0.22),
+    0 4px 14px rgba(224, 138, 0, 0.35);
 }
 
 .wf-node:hover {
-  border-color: var(--wf-wheat);
-  background: rgba(72, 88, 46, 0.95);
+  background: color-mix(in srgb, var(--fs-accent), black 14%);
 }
 
 .wf-node:focus-visible {
-  outline: 2px solid var(--wf-wheat);
+  outline: 2px solid var(--fs-accent);
   outline-offset: 3px;
 }
 
@@ -194,19 +188,17 @@
 
 .wf-card {
   --wf-card-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    0 14px 36px rgba(var(--wf-ink), 0.25);
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 14px 36px rgba(38, 48, 26, 0.14);
 
   display: flex;
   flex-direction: column;
   gap: 9px;
   box-sizing: border-box;
   padding: 11px 12px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--fs-card-border);
   border-radius: 14px;
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)),
-    rgba(var(--wf-ink), var(--wf-scrim, 0.56));
+  background: var(--fs-card);
   -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
   box-shadow: var(--wf-card-shadow);
@@ -236,11 +228,11 @@
 }
 
 .wf-card[data-state='running'] {
-  border-color: var(--wf-wheat);
+  border-color: var(--accent);
   box-shadow:
-    0 0 0 1px rgba(230, 211, 163, 0.35),
-    0 0 30px rgba(230, 211, 163, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 14px 36px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .wf-card-header {
@@ -295,7 +287,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: rgba(174, 179, 160, 0.55);
+  background: rgba(77, 90, 54, 0.4);
 }
 
 .wf-card[data-state='running'] .wf-chip {
@@ -308,11 +300,11 @@
 }
 
 .wf-card[data-state='done'] .wf-chip {
-  color: var(--wf-lime);
+  color: var(--wf-done);
 }
 
 .wf-card[data-state='done'] .wf-chip-dot {
-  background: var(--wf-lime);
+  background: var(--wf-done);
 }
 
 @keyframes wf-pulse {
@@ -379,7 +371,7 @@
   padding: 6px 9px;
   border: 1px solid var(--wf-hairline);
   border-radius: 8px;
-  background: rgba(var(--wf-ink), 0.35);
+  background: var(--fs-tile);
 }
 
 .wf-live-dot {
@@ -398,7 +390,7 @@
   min-width: 0;
   overflow: hidden;
   border-radius: 2px;
-  background: rgba(230, 211, 163, 0.12);
+  background: rgba(74, 90, 42, 0.14);
 }
 
 .wf-bar-fill {
@@ -484,7 +476,7 @@
 }
 
 .wf-stat + .wf-stat {
-  border-left: 1px solid rgba(230, 211, 163, 0.14);
+  border-left: 1px solid var(--fs-tile-border);
 }
 
 .wf-stat-label {
@@ -508,10 +500,6 @@
   letter-spacing: -0.01em;
 }
 
-/* The key stat stands out by weight; it stays wheat like every other value. */
-.wf-stat-value[data-strong] {
-  font-weight: 700;
-}
 
 .wf-bar-rows {
   display: flex;
@@ -633,9 +621,9 @@
 .wf-bubble[data-from='agent'] {
   align-self: flex-end;
   text-align: right;
-  border: 1px solid rgba(230, 211, 163, 0.16);
+  border: 1px solid var(--fs-tile-border);
   border-radius: 8px 8px 2px 8px;
-  background: rgba(230, 211, 163, 0.08);
+  background: var(--fs-tile);
 }
 
 .wf-bubble[data-from='owner'] {

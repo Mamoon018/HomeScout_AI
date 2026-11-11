@@ -51,7 +51,7 @@ type NeighborhoodBriefComposerProps = {
   /** While true, the send button becomes a stop button. */
   isSubmitting?: boolean
   onStop?: () => void
-  /** While a search runs: textarea read-only, every control disabled. */
+  /** While a search runs: only the send button is disabled. */
   locked?: boolean
   className?: string
 }
@@ -137,9 +137,9 @@ export function NeighborhoodBriefComposer({
       {/* C0 — composer card */}
       <InputGroup
         className={cn(
-          'overflow-hidden rounded-[22px] border-Border-Subtle bg-Surface-Primary shadow-[0_8px_24px_rgba(0,0,0,0.18)] backdrop-blur-xl dark:bg-Surface-Primary',
+          'overflow-hidden rounded-[22px] border-Border-Subtle bg-Surface-Primary shadow-(--fs-panel-shadow) backdrop-blur-xl dark:bg-Surface-Primary',
           MOTION,
-          'hover:border-white/16 hover:shadow-Shadow-Elevated',
+          'hover:border-(--fs-accent) hover:shadow-Shadow-Elevated',
           'has-[[data-slot=input-group-control]:focus-visible]:border-[color-mix(in_srgb,var(--color-Brand-500)_55%,transparent)] has-[[data-slot=input-group-control]:focus-visible]:ring-0',
         )}
       >
@@ -149,14 +149,12 @@ export function NeighborhoodBriefComposer({
           aria-label="Composer options"
           className={cn(
             'flex-wrap justify-between gap-2 px-3 pt-3 pb-2.5 font-normal',
-            // Disabled controls ignore the pointer, so the zone shows not-allowed.
-            locked ? 'cursor-not-allowed' : 'cursor-default',
+            'cursor-default',
           )}
         >
           <div className="flex flex-wrap items-center gap-1.5">
             {/* H1 — model selector */}
             <Select
-              disabled={locked}
               value={model}
               onValueChange={(value) => value && setModel(value as ComposerModel)}
             >
@@ -166,12 +164,12 @@ export function NeighborhoodBriefComposer({
                   'h-8 gap-2 rounded-full border-Border-Subtle bg-Neutral-900 pr-2.5 pl-1 text-sm font-semibold text-(--composer-model-text) dark:bg-Neutral-900 dark:hover:bg-Neutral-900',
                   MOTION,
                   FOCUS_RING,
-                  'hover:border-white/16 hover:shadow-Shadow-Subtle',
-                  'data-popup-open:border-white/16 data-popup-open:bg-Surface-Secondary dark:data-popup-open:bg-Surface-Secondary',
+                  'hover:border-(--fs-accent) hover:shadow-Shadow-Subtle',
+                  'data-popup-open:border-(--fs-accent) data-popup-open:bg-Surface-Secondary dark:data-popup-open:bg-Surface-Secondary',
                   'data-disabled:pointer-events-none data-disabled:opacity-50',
                 )}
               >
-                <span className="flex size-6 items-center justify-center overflow-hidden rounded-md bg-Neutral-000 [&_svg]:size-5!">
+                <span className="flex size-6 items-center justify-center [&_svg]:size-6! [&_svg]:drop-shadow-none">
                   <WaxingMoonLogo />
                 </span>
                 <SelectValue />
@@ -193,7 +191,6 @@ export function NeighborhoodBriefComposer({
 
             {/* H2 — search toggle */}
             <Toggle
-              disabled={locked}
               pressed={searchEnabled}
               onPressedChange={setSearchEnabled}
               className={cn(
@@ -213,7 +210,6 @@ export function NeighborhoodBriefComposer({
 
             {/* H3 — reasoning selector */}
             <Select
-              disabled={locked}
               value={reasoning}
               onValueChange={(value) => value && setReasoning(value as ComposerReasoning)}
             >
@@ -277,7 +273,6 @@ export function NeighborhoodBriefComposer({
             value={brief}
             onChange={(event) => setBrief(event.target.value)}
             onKeyDown={handleKeyDown}
-            readOnly={locked}
             aria-label={PLACEHOLDER_LABEL}
             rows={3}
             className="secondary-card-scroll field-sizing-fixed max-h-60 min-h-[100px] overflow-y-auto bg-transparent px-4 py-3 text-foreground dark:bg-transparent"

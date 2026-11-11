@@ -1,13 +1,12 @@
 /**
- * Olive sign-in hero. Manrope lines, Fraunces italic keywords, and a "mini wire"
+ * Frosted Sage hero. Manrope lines, Fraunces italic keywords, and a "mini wire"
  * under "the match." with a spark that travels it like the workflow's light.
  * Text colours are solid: no opacity on text.
  */
 
 .oh {
-  --oh-wheat: #e6d3a3;
-  --oh-wheat-light: #f4e9cc;
-  --oh-wheat-hi: #f6ebc8;
+  --oh-ink: var(--fs-ink);
+  --oh-accent: var(--fs-accent);
 
   display: flex;
   flex-direction: column;
@@ -20,7 +19,7 @@
   flex-direction: column;
   gap: 16px;
   margin: 0;
-  color: var(--oh-wheat);
+  color: var(--oh-ink);
 }
 
 /* ── Line group 1 ───────────────────────────────────────────────────────── */
@@ -40,8 +39,7 @@
   font-optical-sizing: auto;
   font-size: 1.1em;
   letter-spacing: -0.01em;
-  color: var(--oh-wheat-light);
-  text-shadow: 0 1px 12px rgba(16, 22, 10, 0.35);
+  color: var(--oh-accent);
 }
 
 /* ── Line group 2 ───────────────────────────────────────────────────────── */
@@ -66,8 +64,8 @@
   left: 0;
   height: 1.6px;
   border-radius: 1px;
-  background: rgba(230, 211, 163, 0.45);
-  box-shadow: 0 0 6px rgba(230, 211, 163, 0.45);
+  background: var(--fs-wire);
+  opacity: 0.55;
 }
 
 /* Full-width track: the spark moves with transform (compositor only), and the
@@ -89,10 +87,8 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--oh-wheat-hi);
-  box-shadow:
-    0 0 10px 3px rgba(230, 211, 163, 0.85),
-    0 0 22px 6px rgba(230, 211, 163, 0.3);
+  background: var(--fs-dot);
+  box-shadow: 0 0 8px 2px var(--fs-dot-glow);
   opacity: 0;
   animation: oh-spark-travel 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
@@ -120,7 +116,7 @@
   font-size: 17px;
   font-weight: 500;
   line-height: 1.5;
-  color: #c2c0aa;
+  color: var(--fs-muted);
   text-wrap: balance;
 }
 

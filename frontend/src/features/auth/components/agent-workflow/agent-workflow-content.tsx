@@ -30,7 +30,7 @@ export function HomeWishlistContent() {
 const DEEP_SEARCH_STATS = [
   { label: 'Radius', value: '2.5 mi' },
   { label: 'Budget', value: '$350–520k', tight: true },
-  { label: 'Listings', value: '128 found', strong: true },
+  { label: 'Listings', value: '128 found' },
 ]
 
 export function DeepSearchContent() {
@@ -44,7 +44,7 @@ export function DeepSearchContent() {
         {DEEP_SEARCH_STATS.map((stat) => (
           <div key={stat.label} className="wf-stat">
             <dt className="wf-stat-label">{stat.label}</dt>
-            <dd className="wf-stat-value" data-strong={stat.strong || undefined} data-tight={stat.tight || undefined}>
+            <dd className="wf-stat-value" data-tight={stat.tight || undefined}>
               {stat.value}
             </dd>
           </div>

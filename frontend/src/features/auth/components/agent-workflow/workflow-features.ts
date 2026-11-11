@@ -28,10 +28,10 @@ export type WorkflowFeature = {
 
 /** Feature order is the workflow order: the agent runs them left to right. */
 export const WORKFLOW_FEATURES: WorkflowFeature[] = [
-  { title: 'Home Wishlist', accent: '#FCD34D', icon: HouseHeart, Content: HomeWishlistContent },
-  { title: 'Deep Search', accent: '#7DD3FC', icon: Building2, Content: DeepSearchContent },
-  { title: 'Analysis Report', accent: '#A8D5C6', icon: FileBarChart, Content: AnalysisReportContent },
-  { title: 'Matching Engine', accent: '#F9A8D4', icon: Puzzle, Content: MatchingEngineContent },
-  { title: 'Owners Outreach', accent: '#FDBA74', icon: MessagesSquare, compact: true, Content: OwnersOutreachContent },
-  { title: 'User Feedback', accent: '#FCA5A5', icon: Star, compact: true, Content: UserFeedbackContent },
+  { title: 'Home Wishlist', accent: '#9A6B00', icon: HouseHeart, Content: HomeWishlistContent },
+  { title: 'Deep Search', accent: '#1D6FA3', icon: Building2, Content: DeepSearchContent },
+  { title: 'Analysis Report', accent: '#1F7A80', icon: FileBarChart, Content: AnalysisReportContent },
+  { title: 'Matching Engine', accent: '#B0306E', icon: Puzzle, Content: MatchingEngineContent },
+  { title: 'Owners Outreach', accent: '#B35A12', icon: MessagesSquare, compact: true, Content: OwnersOutreachContent },
+  { title: 'User Feedback', accent: '#B3302F', icon: Star, compact: true, Content: UserFeedbackContent },
 ]

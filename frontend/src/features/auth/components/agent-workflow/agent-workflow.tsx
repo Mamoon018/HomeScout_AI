@@ -23,11 +23,6 @@ const CANVAS_HEIGHT = 512
 const MIN_CANVAS_SCALE = 0.8
 
 const CARD_LEFT = [44, 179, 314, 449, 584, 719]
-/**
- * Dark olive tint inside each card, rising left to right. The sky brightens to the
- * right, so without it the right-hand cards drop below 4.5:1 for their muted text.
- */
-const CARD_SCRIM = [0.1, 0.18, 0.26, 0.4, 0.46, 0.56]
 const BOTTOM_LANE_TOP = 256
 
 const WIRES = [
@@ -209,7 +204,7 @@ export function AgentWorkflow({ className }: { className?: string }) {
     const style = {
       '--accent': feature.accent,
       ...(isCanvas
-        ? { left: CARD_LEFT[index], top: topLane ? 0 : BOTTOM_LANE_TOP, '--wf-scrim': CARD_SCRIM[index] }
+        ? { left: CARD_LEFT[index], top: topLane ? 0 : BOTTOM_LANE_TOP }
         : {}),
     } as CSSProperties
     return (

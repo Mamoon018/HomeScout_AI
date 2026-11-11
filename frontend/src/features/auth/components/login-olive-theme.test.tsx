@@ -45,12 +45,15 @@ describe('Sign-in Olive Glass theme', () => {
     expect(document.documentElement).not.toHaveClass('auth-olive')
   })
 
-  it('leaves the sign-up page on the dark theme', () => {
-    render(
+  it('applies the same olive theme on the sign-up page, only while it is shown', () => {
+    const { unmount } = render(
       <MemoryRouter>
         <SignupPage />
       </MemoryRouter>,
     )
+    expect(document.documentElement).toHaveClass('theme-olive', 'auth-olive')
+
+    unmount()
     expect(document.documentElement).not.toHaveClass('auth-olive')
   })
 
@@ -66,7 +69,7 @@ describe('Sign-in Olive Glass theme', () => {
       .filter((item) => item.tagName === 'ARTICLE')
       .map((card) => card.style.getPropertyValue('--accent'))
 
-    expect(accents).toEqual(['#FCD34D', '#7DD3FC', '#A8D5C6', '#F9A8D4', '#FDBA74', '#FCA5A5'])
+    expect(accents).toEqual(['#9A6B00', '#1D6FA3', '#1F7A80', '#B0306E', '#B35A12', '#B3302F'])
     expect(screen.queryByRole('button', { name: /see results/i })).toBeNull()
   })
 
@@ -99,16 +102,28 @@ describe('Sign-in Olive Glass theme', () => {
     ])
   })
 
-  it('keeps the old feature grid on the sign-up page', () => {
+  it('gives the sign-up page the sign-in heading, menu, workflow and an olive form card', () => {
     render(
       <MemoryRouter>
         <SignupPage />
       </MemoryRouter>,
     )
-    expect(screen.queryByRole('list', { name: 'How the Homescout agent works' })).toBeNull()
-    expect(document.querySelectorAll('[data-slot="feature-card-root"]')).toHaveLength(6)
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Let us run the whole home hunt for you!')
-    expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull()
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'Tell us your perfect apartment and neighborhood. Our agent finds the match.',
+    )
+    const menu = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(menu).getAllByRole('link').map((link) => link.textContent)).toEqual([
+      'Home',
+      'Product',
+      'Price',
+      'Reviews',
+      'About us',
+    ])
+    expect(screen.getByRole('list', { name: 'How the Homescout agent works' })).toBeTruthy()
+    expect(document.querySelectorAll('[data-slot="feature-card-root"]')).toHaveLength(0)
+    expect(document.querySelector('[data-slot="auth-card"]')).toBeTruthy()
+    expect(document.querySelector('[data-slot="auth-submit"]')).toBeTruthy()
+    expect(screen.getByText('Create your account')).toBeTruthy()
   })
 })
 

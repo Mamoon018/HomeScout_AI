@@ -15,7 +15,7 @@ export function ResultPreview({ leaving = false, className }: ResultPreviewProps
     <section
       aria-label="Result"
       className={cn(
-        'flex w-full flex-col gap-2 rounded-[22px] border border-Border-Subtle bg-Surface-Primary p-5 shadow-[0_8px_24px_rgba(0,0,0,0.18)] backdrop-blur-xl',
+        'flex w-full flex-col gap-2 rounded-[22px] border border-Border-Subtle bg-Surface-Primary p-5 shadow-(--fs-panel-shadow) backdrop-blur-xl',
         'animate-in fade-in-0 slide-in-from-bottom-2 animation-duration-300 ease-Easing-Out',
         'transition-opacity duration-200',
         leaving && 'opacity-0',

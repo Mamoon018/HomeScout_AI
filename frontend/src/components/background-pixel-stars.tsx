@@ -22,13 +22,13 @@ const PALETTES: Record<StarTone, StarPalette> = {
     trailRgb: '180, 242, 255',
     headColor: '#ffffff',
   },
-  // Olive Glass: theme tones only (no purple/indigo), smaller and quieter
+  // Frosted Sage: faint deep-olive and amber specks that read on the light page
   olive: {
-    colors: ['#E6D3A3', '#BFE36B', '#7DD3FC', '#F9A8D4', '#FCD34D', '#F4F6EC'],
+    colors: ['#5E6B38', '#4A5A2A', '#9A6B00', '#8A9A5C', '#B35A12', '#6B7458'],
     sizes: [3, 4],
-    opacity: [0.35, 0.8],
-    trailRgb: '230, 211, 163',
-    headColor: '#F4F6EC',
+    opacity: [0.14, 0.4],
+    trailRgb: '94, 107, 56',
+    headColor: '#E08A00',
   },
 }
 

@@ -10,13 +10,6 @@ function advance(ms: number) {
   })
 }
 
-function stepStates() {
-  return within(screen.getByRole('list', { name: 'Search progress' }))
-    .getAllByRole('listitem')
-    .map((row) => row.dataset.state?.[0])
-    .join('')
-}
-
 function submitBrief(text?: string) {
   const textarea = screen.getByRole('textbox', { name: TEXTAREA_NAME })
   if (text !== undefined) {
@@ -25,7 +18,9 @@ function submitBrief(text?: string) {
   fireEvent.submit(screen.getByRole('form', { name: 'Neighborhood brief' }))
 }
 
-describe('HomePage search run', () => {
+const PLAN_HEADING = { name: "What I'll look for" }
+
+describe('HomePage R1 run', () => {
   beforeEach(() => {
     vi.useFakeTimers()
   })
@@ -34,58 +29,93 @@ describe('HomePage search run', () => {
     vi.useRealTimers()
   })
 
-  it('runs intro, five 3s steps, then shows the result and unlocks the composer', () => {
-    render(<HomePage message="Welcome King jee!" />)
+  it('reads the brief, plans, shows the result, then unlocks the composer', () => {
+    render(<HomePage message="Welcome King jee!" clarificationQuestions={[]} />)
     submitBrief('Quiet street near a park')
 
     // 0ms: heading fades, composer locks.
-    expect(screen.getByRole('textbox', { name: TEXTAREA_NAME })).toHaveAttribute('readonly')
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
-    expect(screen.getByRole('combobox', { name: /Model/ })).toHaveAttribute('data-disabled')
+    expect(screen.queryByRole('heading', { name: 'Instructions decoded' })).not.toBeInTheDocument()
 
-    // 200ms: heading leaves the layout; timeline not yet shown.
-    advance(200)
-    expect(screen.getByRole('heading', { name: 'Start your Homescout', hidden: true })).not.toBeVisible()
-    expect(screen.queryByRole('list', { name: 'Search progress' })).not.toBeInTheDocument()
+    // 600ms: the breakdown opens with all three readings together.
+    advance(600)
+    expect(screen.getByRole('heading', { name: 'Instructions decoded' })).toBeInTheDocument()
+    for (const name of ['User Persona', 'What you asked for', 'Not sure yet']) {
+      expect(screen.getByRole('region', { name })).toBeInTheDocument()
+    }
+    expect(screen.getByText('relocating to Munich in February')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', PLAN_HEADING)).not.toBeInTheDocument()
 
-    // 600ms: timeline appears with step 1 active.
-    advance(400)
-    expect(stepStates()).toBe('apppp')
-    expect(screen.getByText('Step 1 of 5: Breaking your needs into higher-level categories')).toBeInTheDocument()
+    // Extraction ends, planning starts.
+    advance(2800)
+    expect(screen.getByRole('heading', PLAN_HEADING)).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Categories' })).not.toBeInTheDocument()
 
-    advance(3000)
-    expect(stepStates()).toBe('cappp')
-    advance(3000 * 2)
-    expect(stepStates()).toBe('cccap')
-    expect(screen.getByRole('img', { name: /Map of the area/ })).toBeInTheDocument()
-    expect(screen.queryByRole('region', { name: 'Result' })).not.toBeInTheDocument()
-
-    advance(3000 * 2)
-    expect(stepStates()).toBe('ccccc')
-    expect(screen.getByRole('region', { name: 'Result' })).toHaveTextContent('82 / 100')
-    expect(screen.getByRole('textbox', { name: TEXTAREA_NAME })).not.toHaveAttribute('readonly')
-    expect(screen.getByRole('textbox', { name: TEXTAREA_NAME })).toHaveValue('Quiet street near a park')
+    // Plan lands: categories with their deep checks, composer unlocked.
+    advance(2400)
+    const categories = screen.getByRole('list', { name: 'Categories' })
+    expect(within(categories).getByText('Transit station')).toBeInTheDocument()
+    expect(within(categories).getByText('Rail service type')).toBeInTheDocument()
+        expect(screen.getByRole('textbox', { name: TEXTAREA_NAME })).toHaveValue('Quiet street near a park')
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
   })
 
-  it('resets to pending and restarts from step 1 on a new search', () => {
-    render(<HomePage message="Welcome King jee!" />)
+  it('folds the breakdown away once the plan lands, and can reopen it', () => {
+    render(<HomePage message="Welcome King jee!" clarificationQuestions={[]} />)
     submitBrief('Quiet street near a park')
-    advance(600 + 15000)
-    expect(screen.getByRole('region', { name: 'Result' })).toBeInTheDocument()
+    advance(600 + 2800 + 2400)
+
+    expect(screen.getByRole('button', { name: 'Hide breakdown' })).toHaveAttribute('aria-expanded', 'true')
+    advance(1200)
+    const toggle = screen.getByRole('button', { name: 'Show breakdown' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText(/8 things about you/)).toBeInTheDocument()
+
+    fireEvent.click(toggle)
+    expect(screen.getByRole('button', { name: 'Hide breakdown' })).toBeInTheDocument()
+  })
+
+  it('restarts from the breakdown on a new search', () => {
+    render(<HomePage message="Welcome King jee!" clarificationQuestions={[]} />)
+    submitBrief('Quiet street near a park')
+    advance(600 + 2800 + 2400)
+    expect(screen.getByRole('list', { name: 'Categories' })).toBeInTheDocument()
 
     submitBrief()
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
 
-    // Result and map fade out, then every step goes back to pending.
     advance(200)
-    expect(screen.queryByRole('region', { name: 'Result' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('img', { name: /Map of the area/ })).not.toBeInTheDocument()
-    expect(stepStates()).toBe('ppppp')
+    expect(screen.queryByRole('heading', { name: 'Instructions decoded' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Categories' })).not.toBeInTheDocument()
 
     advance(300)
-    expect(stepStates()).toBe('apppp')
+    expect(screen.getByRole('heading', { name: 'Instructions decoded' })).toBeInTheDocument()
     // Heading stays hidden for the rest of the session.
     expect(screen.getByRole('heading', { name: 'Start your Homescout', hidden: true })).not.toBeVisible()
+  })
+
+  it('pauses for the question, shows the answer in the breakdown, then plans', async () => {
+    render(<HomePage message="Welcome King jee!" />)
+    submitBrief('Quiet street near a park')
+    advance(600 + 2800)
+
+    // The question hangs off "Not sure yet"; nothing moves while the renter answers.
+    expect(screen.getByRole('form', { name: 'Clarification questions' })).toBeInTheDocument()
+    expect(screen.getByText('Needs one answer from you')).toBeInTheDocument()
+    advance(10000)
+    expect(screen.queryByRole('heading', PLAN_HEADING)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'a private balcony or loggia' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await act(async () => {})
+
+    // The category now carries what the renter meant, and the plan starts.
+    expect(
+      within(screen.getByRole('region', { name: 'What you asked for' })).getByText('a private balcony or loggia'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('heading', PLAN_HEADING)).toBeInTheDocument()
+
+    advance(2400)
+    expect(screen.getByRole('list', { name: 'Categories' })).toBeInTheDocument()
   })
 })

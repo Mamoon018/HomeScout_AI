@@ -1,77 +1,134 @@
 /**
- * Olive Glass theme — Home page.
+ * Frosted Sage theme: Home, sign-in and sign-up.
  *
- * Applied as `theme-olive` on <html> while the Home page is mounted (see
- * HomePage.tsx), so dropdowns portaled to <body> pick it up too. It only
- * re-points tokens; components keep using the same token classes.
+ * Applied as `theme-olive` on <html> while one of those pages is mounted, so
+ * dropdowns portaled to <body> pick it up too. It re-points the design tokens;
+ * components keep using the same token classes. The `--fs-*` values below are the
+ * scheme itself: pages and widgets (auth, agent workflow) read them directly.
  */
 
 html.theme-olive {
-  /* Surfaces: frosted glass instead of solid charcoal */
-  --color-Neutral-900: rgba(14, 20, 9, 0.32); /* inset areas: textarea zone, model pill */
-  --color-Neutral-800: rgba(255, 255, 255, 0.07); /* glass cards (Surface-Primary) */
-  --color-Neutral-700: rgba(255, 255, 255, 0.11); /* raised glass: action bar, tiles */
-  --color-Neutral-Line: rgba(255, 255, 255, 0.16); /* thin light card borders */
+  /* ── Scheme ─────────────────────────────────────────────────────────────── */
+  --fs-ink: #26301a; /* primary text, 13.1:1 on the panel */
+  --fs-muted: #4d5a36; /* muted text, 7.0:1 on the panel */
+  --fs-placeholder: #6b7458;
+  --fs-accent: #4a5a2a; /* buttons, links, selected options, chips */
+  --fs-on-accent: #f9f9f6; /* text on filled buttons */
+  --fs-done: #3f7a12;
+  --fs-error: #b3302f;
+  --fs-wire: #5e6b38; /* wires and connectors */
+  --fs-dot: radial-gradient(circle at 35% 35%, #fff6d6, #f5b73b 55%, #e08a00); /* traveling dot, spark */
+  --fs-dot-glow: rgba(224, 138, 0, 0.45);
+
+  --fs-panel: rgba(255, 255, 255, 0.62);
+  --fs-panel-border: rgba(74, 90, 42, 0.5);
+  --fs-panel-shadow: 0 18px 48px rgba(38, 48, 26, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --fs-card: rgba(255, 255, 255, 0.78);
+  --fs-card-border: rgba(74, 90, 42, 0.35);
+  --fs-paper: rgba(255, 255, 255, 0.72); /* writing area */
+  --fs-input: rgba(255, 255, 255, 0.92);
+  --fs-tile: rgba(74, 90, 42, 0.07); /* footer strip, inner tiles */
+  --fs-tile-border: rgba(74, 90, 42, 0.18);
+  --fs-option: rgba(255, 255, 255, 0.75);
+  --fs-option-border: rgba(38, 48, 26, 0.18);
+  --fs-option-selected: rgba(74, 90, 42, 0.12);
+
+  /* ── Design tokens ──────────────────────────────────────────────────────── */
+  /* Surfaces */
+  --color-Neutral-900: var(--fs-paper); /* inset areas: writing area, model pill */
+  --color-Neutral-800: var(--fs-panel); /* panels (Surface-Primary) */
+  --color-Neutral-700: var(--fs-tile); /* raised: action bar, tiles */
+  --color-Neutral-Line: var(--fs-panel-border);
 
   /* Text */
-  --color-Neutral-100: #f4f6ec; /* matches the mockup text base (244, 246, 236) */
-  --color-Neutral-400: #c5cab0; /* body / muted text, warmed for olive */
+  --color-Neutral-100: var(--fs-ink);
+  --color-Neutral-400: var(--fs-muted);
 
-  /* Accent: soft wheat replaces indigo; lime replaces green */
-  --color-Brand-500: #e6d3a3;
-  --color-Brand-300: #efe3c2;
-  --color-Success-500: #bfe36b;
+  /* Accent and status */
+  --color-Brand-500: var(--fs-accent);
+  --color-Brand-300: var(--fs-wire);
+  --color-Success-500: var(--fs-done);
 
-  /* Step palette, one shade lighter so it holds up on olive */
-  --color-Step-1: #fcd34d; /* amber */
-  --color-Step-2: #f9a8d4; /* pink */
-  --color-Step-3: #fdba74; /* orange */
-  --color-Step-4: #67e8f9; /* cyan */
-  --color-Step-5: #fca5a5; /* coral */
+  /* Step palette: deep tones so they read on the light panels */
+  --color-Step-1: #9a6b00; /* amber  */
+  --color-Step-2: #b0306e; /* rose   */
+  --color-Step-3: #b35a12; /* orange */
+  --color-Step-4: #1d6fa3; /* blue   */
+  --color-Step-5: #b3302f; /* red    */
+  --color-Step-6: #1f7a80; /* teal   */
+
+  /* Soft olive shadows instead of near-black ones */
+  --shadow-Shadow-Subtle: 0 1px 2px rgba(38, 48, 26, 0.12);
+  --shadow-Shadow-Elevated: 0 18px 48px rgba(38, 48, 26, 0.16);
 
   /* shadcn bridge values that need more than a token swap */
-  --popover: #2c3720; /* solid, so dropdown menus stay readable over glass */
-  --primary-foreground: #1a2313; /* dark olive icon on the wheat Send button */
+  --popover: #fbfaf6; /* solid, so dropdown menus stay readable over glass */
+  --popover-foreground: var(--fs-ink);
+  --primary-foreground: var(--fs-on-accent);
+  --destructive: var(--fs-error);
 
-  /* Composer zones: both lightly darkened over the glass; footer a touch darker */
-  --composer-input-bg: rgba(10, 16, 6, 0.16);
-  --composer-input-border: rgba(255, 255, 255, 0.08);
-  --composer-placeholder: rgba(244, 246, 236, 0.62);
-  --composer-footer-bg: rgba(10, 16, 6, 0.28);
-  --composer-footer-border: rgba(255, 255, 255, 0.1);
-  --composer-hint: rgba(244, 246, 236, 0.68);
-  --composer-kbd-border: rgba(255, 255, 255, 0.22);
-  --composer-kbd-bg: rgba(255, 255, 255, 0.07);
-  --composer-kbd-text: rgba(244, 246, 236, 0.85);
-  --composer-model-text: #e6d3a3; /* wheat model label */
+  /* Composer zones */
+  --composer-input-bg: var(--fs-paper);
+  --composer-input-border: var(--fs-tile-border);
+  --composer-placeholder: var(--fs-placeholder);
+  --composer-footer-bg: var(--fs-tile);
+  --composer-footer-border: var(--fs-tile-border);
+  --composer-hint: var(--fs-muted);
+  --composer-kbd-border: var(--fs-option-border);
+  --composer-kbd-bg: var(--fs-option);
+  --composer-kbd-text: var(--fs-muted);
+  --composer-model-text: var(--fs-ink);
 
-  /* Progress tracker: dark pill base (darker than the card), wheat label text and heading */
-  --tracker-pill-base: rgba(10, 16, 6, 0.4);
-  --tracker-label: #e6d3a3;
-  --tracker-heading: #e6d3a3;
-  --home-heading: #e6d3a3; /* "Start your Homescout" */
+  /* Progress tracker */
+  --tracker-pill-base: var(--fs-option);
+  --tracker-label: var(--fs-ink);
+  --tracker-heading: var(--fs-ink);
+  --home-heading: var(--fs-ink); /* "Start your Homescout" */
 
-  /* Moon logo in wheat shades (same light → shadow ramp as the white moon) */
-  --moon-glow: #e6d3a3;
-  --moon-halo: rgba(230, 211, 163, 0.25);
-  --moon-surface-1: #f6ecd2;
-  --moon-surface-2: #e6d3a3;
-  --moon-surface-3: #d2bd89;
-  --moon-surface-4: #b59d68;
-  --moon-crater-1: #c7b182;
-  --moon-crater-2: #ab9463;
-  --moon-maria: #b8a170;
-  --moon-terminator: rgba(230, 211, 163, 0.12);
+  /* Moon logo in deep olive (same light → shadow ramp as the white moon) */
+  --moon-glow: #5e6b38;
+  --moon-halo: rgba(74, 90, 42, 0.22);
+  --moon-surface-1: #8a9a5c;
+  --moon-surface-2: #6b7a42;
+  --moon-surface-3: #4a5a2a;
+  --moon-surface-4: #333f1d;
+  --moon-crater-1: #3f4d24;
+  --moon-crater-2: #2c3719;
+  --moon-maria: #36421f;
+  --moon-terminator: rgba(38, 48, 26, 0.18);
 
   --font-sans: Manrope, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial,
     sans-serif;
 }
 
-/* Page: dark olive (left) → light olive (right), soft glow in the top-right corner */
+/* Page: light 105° gradient with four soft glows on top */
 html.theme-olive body {
-  background-color: #1f2a16;
+  background-color: #ebebdf;
   background-image:
-    radial-gradient(circle at 100% 0%, rgba(242, 245, 223, 0.22), transparent 45%),
-    linear-gradient(90deg, #1f2a16 0%, #3e4b28 55%, #6b7a45 100%);
+    radial-gradient(ellipse 55% 50% at 100% 0%, rgba(255, 255, 255, 1), transparent 70%),
+    radial-gradient(ellipse 60% 55% at 0% 100%, rgba(160, 180, 90, 0.55), transparent 70%),
+    radial-gradient(ellipse 40% 50% at 100% 50%, rgba(230, 205, 150, 0.6), transparent 70%),
+    radial-gradient(ellipse 45% 45% at 50% 50%, rgba(190, 204, 130, 0.24), transparent 75%),
+    linear-gradient(105deg, #fbfaf6 0%, #ebebdf 45%, #d9e0c8 100%);
   background-attachment: fixed;
+  color: var(--fs-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Browser surfaces take the scheme too */
+html.theme-olive ::selection {
+  background: rgba(74, 90, 42, 0.25);
+  color: var(--fs-ink);
+}
+
+html.theme-olive {
+  accent-color: var(--fs-accent);
+  caret-color: var(--fs-accent);
+}
+
+/* Disabled controls drop to 45% */
+html.theme-olive :is(button, input, textarea, select, [role='combobox']):disabled,
+html.theme-olive [data-disabled] {
+  opacity: 0.45;
 }

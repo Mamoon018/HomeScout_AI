@@ -7,9 +7,10 @@ type MapPreviewProps = {
   className?: string
 }
 
-/** Map colours: red pin and blue radius, kept apart from the cyan of step 4. */
-const PIN_RED = '#EF4444'
-const RADIUS_BLUE = '#3B82F6'
+/** Map colours: red pin and blue radius, the scheme's Error red and Deep Search blue. */
+const PIN_RED = '#B3302F'
+const RADIUS_BLUE = '#1D6FA3'
+const LAND = '#EEEEE2'
 
 /** Centre of the 320×160 map, where the submitted address sits. */
 const CX = 160
@@ -17,7 +18,7 @@ const CY = 80
 const RADIUS = 56
 
 /**
- * T8 — dummy dark street map centred on the submitted address: blocks, parks,
+ * T8 — dummy light street map centred on the submitted address: blocks, parks,
  * a river and a street hierarchy, with no labels. Swap for a real static-map
  * image once geocoding exists.
  */
@@ -25,7 +26,7 @@ export function MapPreview({ radiusKm, scanning = false, className }: MapPreview
   return (
     <figure
       className={cn(
-        'h-40 w-full overflow-hidden rounded-xl border border-Border-Subtle bg-[#151920]',
+        'h-40 w-full overflow-hidden rounded-xl border border-(--fs-card-border) bg-[#EEEEE2]',
         className,
       )}
     >
@@ -37,17 +38,17 @@ export function MapPreview({ radiusKm, scanning = false, className }: MapPreview
         className="size-full"
       >
         {/* Land */}
-        <rect width="320" height="160" fill="#151920" />
+        <rect width="320" height="160" fill={LAND} />
 
         {/* City blocks */}
-        <g fill="#202630">
+        <g fill="#E1E3D2">
           {BLOCKS.map(([x, y, w, h]) => (
             <rect key={`${x}-${y}`} x={x} y={y} width={w} height={h} rx="2" />
           ))}
         </g>
 
         {/* Parks */}
-        <g fill="#1B3A2A">
+        <g fill="#CFDDB0">
           <rect x="214" y="12" width="52" height="34" rx="3" />
           <path d="M28 96 h40 v24 h-26 l-14 -10 Z" />
           <rect x="132" y="112" width="30" height="20" rx="3" />
@@ -57,13 +58,13 @@ export function MapPreview({ radiusKm, scanning = false, className }: MapPreview
         <path
           d="M-10 146 C 40 132, 80 150, 130 140 S 220 126, 260 136 S 310 150, 330 142"
           fill="none"
-          stroke="#173A5C"
+          stroke="#B9D4E6"
           strokeWidth="10"
           strokeLinecap="round"
         />
 
         {/* Minor streets */}
-        <g stroke="#2F3642" strokeWidth="1.5" fill="none">
+        <g stroke="#FFFFFF" strokeWidth="1.5" fill="none">
           <path d="M-10 30 H330" />
           <path d="M-10 64 H330" />
           <path d="M-10 100 H330" />
@@ -75,10 +76,10 @@ export function MapPreview({ radiusKm, scanning = false, className }: MapPreview
         </g>
 
         {/* Main roads */}
-        <g stroke="#414957" strokeWidth="4" strokeLinecap="round" fill="none">
+        <g stroke="#FFFFFF" strokeWidth="4.5" strokeLinecap="round" fill="none">
           <path d="M-10 82 C 80 78, 240 86, 330 80" />
           <path d="M150 -10 C 156 50, 166 110, 172 170" />
-          <path d="M-10 4 L 330 124" strokeWidth="3" stroke="#39404C" />
+          <path d="M-10 4 L 330 124" strokeWidth="3.5" stroke="#FFFFFF" />
         </g>
 
         {/* Search radius */}
@@ -113,10 +114,10 @@ export function MapPreview({ radiusKm, scanning = false, className }: MapPreview
           <path
             d="M9 0 C 4 0 0 4 0 9 C 0 15.5 9 24 9 24 C 9 24 18 15.5 18 9 C 18 4 14 0 9 0 Z"
             fill={PIN_RED}
-            stroke="#151920"
-            strokeWidth="1"
+            stroke="#FFFFFF"
+            strokeWidth="1.2"
           />
-          <circle cx="9" cy="9" r="3.2" fill="#151920" />
+          <circle cx="9" cy="9" r="3.2" fill="#FFFFFF" />
         </g>
       </svg>
     </figure>

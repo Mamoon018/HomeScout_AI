@@ -1,11 +1,4 @@
-import {
-  CircleHelpIcon,
-  DatabaseIcon,
-  LayersIcon,
-  MapIcon,
-  WrenchIcon,
-  type LucideIcon,
-} from 'lucide-react'
+import { CircleHelpIcon, LayersIcon, type LucideIcon } from 'lucide-react'
 
 export type SearchStep = {
   title: string
@@ -15,14 +8,8 @@ export type SearchStep = {
   color: string
 }
 
-/** The 5 fixed stages of a neighborhood evaluation, in run order. */
+/** The fixed stages shown while a request is interpreted, in run order. */
 export const SEARCH_STEPS: readonly SearchStep[] = [
-  {
-    title: 'Categorizing the request',
-    description: 'Breaking your needs into higher-level categories',
-    icon: LayersIcon,
-    color: 'var(--color-Step-1)',
-  },
   {
     title: 'Clarity check',
     description: 'Checking if anything needs clarification',
@@ -30,28 +17,16 @@ export const SEARCH_STEPS: readonly SearchStep[] = [
     color: 'var(--color-Step-2)',
   },
   {
-    title: 'Tool calls',
-    description: 'Calling tools one by one to gather more information',
-    icon: WrenchIcon,
-    color: 'var(--color-Step-3)',
-  },
-  {
-    title: 'Map exploration',
-    description: 'Exploring the area on the map',
-    icon: MapIcon,
-    color: 'var(--color-Step-4)',
-  },
-  {
-    title: 'Area data fetch',
-    description: 'Fetching the area details you asked for',
-    icon: DatabaseIcon,
-    color: 'var(--color-Step-5)',
+    title: 'Categorizing the request',
+    description: 'Breaking your needs into higher-level categories',
+    icon: LayersIcon,
+    color: 'var(--color-Step-1)',
   },
 ]
 
 export const STEP_COUNT = SEARCH_STEPS.length
-/** Index of the map-exploration step, which shows the map preview. */
-export const MAP_STEP_INDEX = 3
+/** Index of the clarity-check step, which hosts the clarification questions. */
+export const CLARITY_STEP_INDEX = 0
 
 export type StepStatus = 'pending' | 'active' | 'completed'
 
