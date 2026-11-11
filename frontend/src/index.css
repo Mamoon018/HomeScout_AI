@@ -4,6 +4,8 @@
 @import "./assets/design/linear-tokens.css";
 @import "./assets/design/linear-semantics.css";
 @import "./assets/design/linear-components.css";
+@import "./assets/design/theme-olive.css";
+@import "./assets/design/theme-olive-auth.css";
 
 @custom-variant dark (&:is(.dark *));
 

@@ -11,6 +11,10 @@ export type FeatureType = {
   /** Border color for the "see results" button; should match the icon color. */
   buttonBorderClassName?: string
   neonBorderClassName?: string
+  /** Accent colour (dark theme) — icon/badge/description/popover colour. */
+  accentDark?: string
+  /** Accent colour under the sign-in Olive Glass theme. */
+  accentOlive?: string
   secondaryContent?: React.ReactNode
 }
 
@@ -62,8 +66,18 @@ export function FeatureCard({
   }
 
   return (
-    <div className="relative overflow-visible">
+    <div
+      data-slot="feature-card-root"
+      className="feature-accent relative overflow-visible"
+      style={
+        {
+          '--accent-dark': feature.accentDark,
+          '--accent-olive': feature.accentOlive ?? feature.accentDark,
+        } as React.CSSProperties
+      }
+    >
       <div
+        data-slot="feature-card"
         className={cn(
           'feature-card animate-feature-card-enter relative flex h-[9.5rem] overflow-hidden rounded-xl border-border/60 bg-card p-8',
           className,
@@ -77,30 +91,35 @@ export function FeatureCard({
         {...props}
       >
         <div className="pointer-events-none absolute top-0 left-1/2 -mt-2 -ml-20 h-full w-full [mask-image:linear-gradient(white,transparent)]">
-          <div className="from-foreground/5 to-foreground/1 absolute inset-0 bg-gradient-to-r [mask-image:radial-gradient(farthest-side_at_top,white,transparent)] opacity-100">
+          <div data-slot="feature-grid-sheen" className="from-foreground/5 to-foreground/1 absolute inset-0 bg-gradient-to-r [mask-image:radial-gradient(farthest-side_at_top,white,transparent)] opacity-100">
             <GridPattern
               width={20}
               height={20}
               x="-12"
               y="4"
               squares={pattern}
+              data-slot="feature-grid"
               className="fill-foreground/5 stroke-foreground/25 absolute inset-0 h-full w-full mix-blend-overlay"
             />
           </div>
         </div>
-        <div className="relative z-20 flex flex-col gap-3">
+        <div className="relative z-20 flex w-full flex-col gap-3">
           <div className="flex items-start gap-4">
             <feature.icon
+              data-slot="feature-icon"
               className={cn('size-6 shrink-0', feature.iconClassName ?? 'text-foreground/75')}
               strokeWidth={1}
               aria-hidden
             />
             <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
-              <h3 className="text-lg leading-snug">{feature.title}</h3>
+              <h3 data-slot="feature-title" className="text-lg leading-snug">
+                {feature.title}
+              </h3>
               {feature.secondaryContent ? (
                 <span ref={seeResultsButtonRef} className="shrink-0">
                   <Button
                     type="button"
+                    data-slot="feature-badge"
                     variant="outline"
                     size="xs"
                     className={cn(
@@ -118,12 +137,16 @@ export function FeatureCard({
             </div>
           </div>
           <div
+            data-slot="feature-description"
             className={cn(
               'w-full rounded-md border px-4 py-3',
               feature.borderClassName ?? 'border-border/40',
             )}
           >
-            <p className="text-muted-foreground text-sm font-light leading-snug">
+            <p
+              data-slot="feature-description-text"
+              className="text-muted-foreground text-sm font-light leading-snug"
+            >
               {feature.description}
             </p>
           </div>
@@ -134,6 +157,7 @@ export function FeatureCard({
         <div
           ref={secondaryCardRef}
           id={secondaryPanelId}
+          data-slot="feature-panel"
           role="dialog"
           aria-label={`${feature.title} results`}
           className={cn(
@@ -151,19 +175,21 @@ export function FeatureCard({
             aria-hidden
           />
           <div
+            data-slot="feature-panel-surface"
             className={cn(
               'feature-card absolute inset-[2px] z-10 flex flex-col overflow-hidden rounded-[10px] bg-card p-8',
               '[box-shadow:var(--shadow-Shadow-Elevated)]',
             )}
           >
             <div className="pointer-events-none absolute top-0 left-1/2 -mt-2 -ml-20 h-full w-full [mask-image:linear-gradient(white,transparent)]">
-              <div className="from-foreground/5 to-foreground/1 absolute inset-0 bg-gradient-to-r [mask-image:radial-gradient(farthest-side_at_top,white,transparent)] opacity-100">
+              <div data-slot="feature-grid-sheen" className="from-foreground/5 to-foreground/1 absolute inset-0 bg-gradient-to-r [mask-image:radial-gradient(farthest-side_at_top,white,transparent)] opacity-100">
                 <GridPattern
                   width={20}
                   height={20}
                   x="-12"
                   y="4"
                   squares={pattern}
+                  data-slot="feature-grid"
                   className="fill-foreground/5 stroke-foreground/25 absolute inset-0 h-full w-full mix-blend-overlay"
                 />
               </div>

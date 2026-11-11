@@ -1,7 +1,7 @@
-import { AuthLayout } from '@/components/auth-layout'
-import { LoginForm } from '@/components/login-form'
+import { AuthLayout } from '@/features/auth/components/auth-layout'
+import { LoginForm } from '@/features/auth/components/login-form'
 
 /** Login page using the shared auth shell. */
 export function LoginPage() {
-  return <AuthLayout centerForm formContent={<LoginForm />} />
+  return <AuthLayout theme="olive" centerForm formContent={<LoginForm />} />
 }

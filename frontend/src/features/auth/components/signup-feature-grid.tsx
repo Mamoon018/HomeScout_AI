@@ -18,7 +18,7 @@ import {
   HomeWishlistResultsPanel,
   MatchingEngineResultsPanel,
   UserFeedbackResultsPanel,
-} from '@/components/signup-feature-secondary-content'
+} from '@/features/auth/components/signup-feature-secondary-content'
 
 const features: FeatureType[] = [
   {
@@ -28,6 +28,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-amber-400/50',
     buttonBorderClassName: 'border-amber-400 dark:border-amber-400',
     neonBorderClassName: 'secondary-neon-amber',
+    accentDark: '#FBBF24',
+    accentOlive: '#FCD34D',
     description: 'Tell us what matters to you!',
     secondaryContent: <HomeWishlistResultsPanel />,
   },
@@ -38,6 +40,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-sky-400/50',
     buttonBorderClassName: 'border-sky-400 dark:border-sky-400',
     neonBorderClassName: 'secondary-neon-sky',
+    accentDark: '#38BDF8',
+    accentOlive: '#7DD3FC',
     description:
       'Scan neighborhoods, filters, and listings across multiple sources at once.',
     secondaryContent: <DeepSearchResultsPanel />,
@@ -49,6 +53,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-emerald-400/50',
     buttonBorderClassName: 'border-emerald-400 dark:border-emerald-400',
     neonBorderClassName: 'secondary-neon-emerald',
+    accentDark: '#34D399',
+    accentOlive: '#A8D5C6',
     description:
       'Get composite scores on value, condition, location, marts, & critical city points.',
     secondaryContent: <AnalysisReportResultsPanel />,
@@ -60,6 +66,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-violet-400/50',
     buttonBorderClassName: 'border-violet-400 dark:border-violet-400',
     neonBorderClassName: 'secondary-neon-violet',
+    accentDark: '#A78BFA',
+    accentOlive: '#F9A8D4',
     description:
       'Weigh dozens of signals to surface homes that truly fit your priorities.',
     secondaryContent: <MatchingEngineResultsPanel />,
@@ -71,6 +79,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-orange-400/50',
     buttonBorderClassName: 'border-orange-400 dark:border-orange-400',
     neonBorderClassName: 'secondary-neon-orange',
+    accentDark: '#FB923C',
+    accentOlive: '#FDBA74',
     description:
       'Coordinate messages, inquiry requests, and follow-ups with owners in one thread.',
     secondaryContent: <CommunicationResultsPanel />,
@@ -82,6 +92,8 @@ const features: FeatureType[] = [
     borderClassName: 'border-fuchsia-400/50',
     buttonBorderClassName: 'border-fuchsia-400 dark:border-fuchsia-400',
     neonBorderClassName: 'secondary-neon-fuchsia',
+    accentDark: '#E879F9',
+    accentOlive: '#FCA5A5',
     description:
       'Keeps you in loop on search updates and critical communication stages.',
     secondaryContent: <UserFeedbackResultsPanel />,

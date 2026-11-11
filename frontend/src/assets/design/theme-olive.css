@@ -1,0 +1,77 @@
+/**
+ * Olive Glass theme — Home page.
+ *
+ * Applied as `theme-olive` on <html> while the Home page is mounted (see
+ * HomePage.tsx), so dropdowns portaled to <body> pick it up too. It only
+ * re-points tokens; components keep using the same token classes.
+ */
+
+html.theme-olive {
+  /* Surfaces: frosted glass instead of solid charcoal */
+  --color-Neutral-900: rgba(14, 20, 9, 0.32); /* inset areas: textarea zone, model pill */
+  --color-Neutral-800: rgba(255, 255, 255, 0.07); /* glass cards (Surface-Primary) */
+  --color-Neutral-700: rgba(255, 255, 255, 0.11); /* raised glass: action bar, tiles */
+  --color-Neutral-Line: rgba(255, 255, 255, 0.16); /* thin light card borders */
+
+  /* Text */
+  --color-Neutral-100: #f4f6ec; /* matches the mockup text base (244, 246, 236) */
+  --color-Neutral-400: #c5cab0; /* body / muted text, warmed for olive */
+
+  /* Accent: soft wheat replaces indigo; lime replaces green */
+  --color-Brand-500: #e6d3a3;
+  --color-Brand-300: #efe3c2;
+  --color-Success-500: #bfe36b;
+
+  /* Step palette, one shade lighter so it holds up on olive */
+  --color-Step-1: #fcd34d; /* amber */
+  --color-Step-2: #f9a8d4; /* pink */
+  --color-Step-3: #fdba74; /* orange */
+  --color-Step-4: #67e8f9; /* cyan */
+  --color-Step-5: #fca5a5; /* coral */
+
+  /* shadcn bridge values that need more than a token swap */
+  --popover: #2c3720; /* solid, so dropdown menus stay readable over glass */
+  --primary-foreground: #1a2313; /* dark olive icon on the wheat Send button */
+
+  /* Composer zones: both lightly darkened over the glass; footer a touch darker */
+  --composer-input-bg: rgba(10, 16, 6, 0.16);
+  --composer-input-border: rgba(255, 255, 255, 0.08);
+  --composer-placeholder: rgba(244, 246, 236, 0.62);
+  --composer-footer-bg: rgba(10, 16, 6, 0.28);
+  --composer-footer-border: rgba(255, 255, 255, 0.1);
+  --composer-hint: rgba(244, 246, 236, 0.68);
+  --composer-kbd-border: rgba(255, 255, 255, 0.22);
+  --composer-kbd-bg: rgba(255, 255, 255, 0.07);
+  --composer-kbd-text: rgba(244, 246, 236, 0.85);
+  --composer-model-text: #e6d3a3; /* wheat model label */
+
+  /* Progress tracker: dark pill base (darker than the card), wheat label text and heading */
+  --tracker-pill-base: rgba(10, 16, 6, 0.4);
+  --tracker-label: #e6d3a3;
+  --tracker-heading: #e6d3a3;
+  --home-heading: #e6d3a3; /* "Start your Homescout" */
+
+  /* Moon logo in wheat shades (same light → shadow ramp as the white moon) */
+  --moon-glow: #e6d3a3;
+  --moon-halo: rgba(230, 211, 163, 0.25);
+  --moon-surface-1: #f6ecd2;
+  --moon-surface-2: #e6d3a3;
+  --moon-surface-3: #d2bd89;
+  --moon-surface-4: #b59d68;
+  --moon-crater-1: #c7b182;
+  --moon-crater-2: #ab9463;
+  --moon-maria: #b8a170;
+  --moon-terminator: rgba(230, 211, 163, 0.12);
+
+  --font-sans: Manrope, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial,
+    sans-serif;
+}
+
+/* Page: dark olive (left) → light olive (right), soft glow in the top-right corner */
+html.theme-olive body {
+  background-color: #1f2a16;
+  background-image:
+    radial-gradient(circle at 100% 0%, rgba(242, 245, 223, 0.22), transparent 45%),
+    linear-gradient(90deg, #1f2a16 0%, #3e4b28 55%, #6b7a45 100%);
+  background-attachment: fixed;
+}

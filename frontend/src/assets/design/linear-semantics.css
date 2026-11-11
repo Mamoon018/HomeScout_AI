@@ -18,7 +18,40 @@
   --color-Text-Heading: var(--color-Neutral-100);
   --color-Text-Body: var(--color-Neutral-400);
   --color-Action-Primary: var(--color-Brand-500);
-  --color-Border-Subtle: rgba(255, 255, 255, 0.08);
+  --color-Status-Success: var(--color-Success-500);
+  --color-Border-Subtle: var(--color-Neutral-Line);
+}
+
+/* Composer zone tokens (dark defaults; theme-olive.css re-points them) */
+:root {
+  --composer-input-bg: var(--color-Neutral-900);
+  --composer-input-border: transparent;
+  --composer-placeholder: var(--color-Neutral-400);
+  --composer-footer-bg: var(--color-Neutral-700);
+  --composer-footer-border: var(--color-Neutral-Line);
+  --composer-hint: var(--color-Neutral-400);
+  --composer-kbd-border: var(--color-Neutral-Line);
+  --composer-kbd-bg: var(--color-Neutral-800);
+  --composer-kbd-text: var(--color-Neutral-400);
+  --composer-model-text: var(--color-Neutral-100);
+
+  /* Progress tracker: label pills and heading */
+  --tracker-pill-base: var(--color-Neutral-700);
+  --tracker-label: var(--color-Neutral-100);
+  --tracker-heading: var(--color-Neutral-100);
+  --home-heading: var(--color-Neutral-100);
+
+  /* Moon logo (original white/silver moon) */
+  --moon-glow: #ffffff;
+  --moon-halo: rgba(255, 255, 255, 0.25);
+  --moon-surface-1: #ffffff;
+  --moon-surface-2: #f4f4f8;
+  --moon-surface-3: #dcdce8;
+  --moon-surface-4: #b8b8c8;
+  --moon-crater-1: #c4c4d0;
+  --moon-crater-2: #a8a8b8;
+  --moon-maria: #b0b0be;
+  --moon-terminator: rgba(255, 255, 255, 0.12);
 }
 
 /* Noise texture tokens — asset placeholder until IMAGE_2 is added to the repo */

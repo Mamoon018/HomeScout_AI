@@ -32,7 +32,7 @@ import {
   COUNTRIES,
   getCitiesForCountry,
 } from '@/features/auth/utils/locationData'
-import { SignupCaptcha } from '@/components/signup-captcha'
+import { SignupCaptcha } from '@/features/auth/components/signup-captcha'
 import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
 export function SignupForm({

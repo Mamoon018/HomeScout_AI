@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { render, screen } from '@testing-library/react'
 import type { UserEvent } from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router-dom'
-import { LoginForm } from '@/components/login-form'
+import { LoginForm } from '@/features/auth/components/login-form'
 import { Toaster } from '@/components/ui/sonner'
 
 /** Records the current MemoryRouter pathname so tests can assert navigation. */

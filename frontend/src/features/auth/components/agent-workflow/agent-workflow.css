@@ -1,0 +1,732 @@
+/**
+ * Sign-in agent workflow (Olive Glass theme).
+ * Text inside cards is wheat; each feature's accent (--accent) is for signals only.
+ * Text colours are always solid: no opacity on text.
+ */
+
+.wf {
+  --wf-wheat: #e6d3a3;
+  /* Text is a touch brighter than the wires so small type reads clearly on glass. */
+  --wf-text: #eedcb0;
+  --wf-wheat-hi: #f6ebc8;
+  --wf-muted: #aeb3a0;
+  --wf-lime: #bfe36b;
+  --wf-ink: 16, 22, 10;
+  --wf-hairline: rgba(230, 211, 163, 0.12);
+  --wf-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  color: var(--wf-text);
+  font-family: var(--font-sans);
+  /* Labels and meta lines are tiny; the page's 1.5 leading would push the 200px cards over. */
+  line-height: 1.25;
+  /* Regular card text at 500: 400 read too thin on glass. Still a clear step below 600 titles and 700 labels. */
+  font-weight: 500;
+}
+
+:where(.wf) :where(p, h2, ol, dl, dd) {
+  margin: 0;
+}
+
+/* Hidden for the single frame before the first width measurement. */
+.wf[data-measuring] {
+  visibility: hidden;
+}
+
+/* ── Canvas ─────────────────────────────────────────────────────────────── */
+
+.wf-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  flex: none;
+  transform-origin: 0 0;
+}
+
+.wf-wires {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.wf-wire {
+  --wf-glow: 1.5px;
+  fill: none;
+  stroke: var(--wf-wheat);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.3;
+  filter: drop-shadow(0 0 var(--wf-glow) rgba(230, 211, 163, 0.75));
+  transition:
+    opacity 0.4s ease,
+    filter 0.4s ease;
+}
+
+.wf-wire[data-state='traveled'] {
+  --wf-glow: 3px;
+  opacity: 0.8;
+}
+
+.wf-wire[data-state='carrying'] {
+  --wf-glow: 7px;
+  opacity: 1;
+}
+
+.wf-arrow {
+  fill: var(--wf-wheat);
+}
+
+.wf-junction {
+  fill: var(--wf-wheat);
+  opacity: 0.85;
+}
+
+/* Traveling light: rides the current wire with CSS motion path. */
+.wf-light {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--wf-wheat-hi);
+  box-shadow:
+    0 0 10px 3px rgba(230, 211, 163, 0.85),
+    0 0 24px 8px rgba(230, 211, 163, 0.35);
+  offset-rotate: 0deg;
+  offset-distance: 0%;
+  pointer-events: none;
+}
+
+.wf-light-svg {
+  fill: var(--wf-wheat-hi);
+  filter: drop-shadow(0 0 6px rgba(230, 211, 163, 0.85));
+}
+
+@keyframes wf-travel {
+  from {
+    offset-distance: 0%;
+  }
+  to {
+    offset-distance: 100%;
+  }
+}
+
+/* ── Agent node (also the pause / play control) ─────────────────────────── */
+
+.wf-node {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(230, 211, 163, 0.6);
+  border-radius: 50%;
+  background: rgba(60, 74, 38, 0.85);
+  color: var(--wf-wheat);
+  box-shadow: 0 0 10px rgba(230, 211, 163, 0.25);
+  cursor: pointer;
+  transition:
+    box-shadow 0.4s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.wf-node-canvas {
+  position: absolute;
+  top: 86px;
+  left: 0;
+}
+
+.wf-node[data-lit] {
+  box-shadow:
+    0 0 0 4px rgba(230, 211, 163, 0.15),
+    0 0 18px rgba(230, 211, 163, 0.55);
+}
+
+.wf-node:hover {
+  border-color: var(--wf-wheat);
+  background: rgba(72, 88, 46, 0.95);
+}
+
+.wf-node:focus-visible {
+  outline: 2px solid var(--wf-wheat);
+  outline-offset: 3px;
+}
+
+.wf-node[data-paused] {
+  border-style: dashed;
+}
+
+.wf-node-icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+}
+
+/* While playing, hovering shows what a click will do: pause. */
+.wf-node-hover-icon,
+.wf-node:hover:not([data-paused]) .wf-node-icon:first-child {
+  display: none;
+}
+
+.wf-node:hover:not([data-paused]) .wf-node-hover-icon {
+  display: block;
+}
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+
+.wf-cards {
+  position: relative;
+  z-index: 1;
+}
+
+.wf-card {
+  --wf-card-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 14px 36px rgba(var(--wf-ink), 0.25);
+
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  box-sizing: border-box;
+  padding: 11px 12px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)),
+    rgba(var(--wf-ink), var(--wf-scrim, 0.56));
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--wf-card-shadow);
+  transition:
+    border-color 0.4s ease,
+    box-shadow 0.4s ease;
+}
+
+.wf[data-mode='canvas'] .wf-card {
+  position: absolute;
+  width: 220px;
+}
+
+.wf[data-mode='canvas'] .wf-card[data-lane='top'] {
+  height: 200px;
+  overflow: hidden;
+}
+
+/* Bottom lane shares one height (fits User Feedback, the tallest) so the three cards line up. */
+.wf[data-mode='canvas'] .wf-card[data-lane='bottom'] {
+  height: 256px;
+  overflow: hidden;
+}
+
+.wf-card[data-compact] {
+  gap: 8px;
+}
+
+.wf-card[data-state='running'] {
+  border-color: var(--wf-wheat);
+  box-shadow:
+    0 0 0 1px rgba(230, 211, 163, 0.35),
+    0 0 30px rgba(230, 211, 163, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.wf-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wf-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.wf-card-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+  color: var(--accent);
+}
+
+.wf-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--wf-text);
+  transition: color 0.4s ease;
+}
+
+.wf-card[data-state='running'] .wf-card-title {
+  color: var(--accent);
+}
+
+/* Status chip */
+.wf-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--wf-muted);
+}
+
+.wf-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(174, 179, 160, 0.55);
+}
+
+.wf-card[data-state='running'] .wf-chip {
+  color: var(--wf-text);
+}
+
+.wf-card[data-state='running'] .wf-chip-dot {
+  background: var(--accent);
+  animation: wf-pulse 1.4s ease-in-out infinite;
+}
+
+.wf-card[data-state='done'] .wf-chip {
+  color: var(--wf-lime);
+}
+
+.wf-card[data-state='done'] .wf-chip-dot {
+  background: var(--wf-lime);
+}
+
+@keyframes wf-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+/* ── Shared content styles ─────────────────────────────────────────────── */
+
+.wf-section-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--wf-muted);
+}
+
+.wf-primary {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--wf-text);
+}
+
+.wf-subline {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--wf-muted);
+}
+
+.wf-body {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--wf-text);
+}
+
+.wf-meta {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--wf-muted);
+}
+
+.wf-meta-accent {
+  color: var(--accent);
+}
+
+.wf-key {
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-box {
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border: 1px solid var(--wf-hairline);
+  border-radius: 8px;
+  background: rgba(var(--wf-ink), 0.35);
+}
+
+.wf-live-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: wf-pulse 1.4s ease-in-out infinite;
+}
+
+/* Progress bar. A card that starts running refills its bars: the agent producing the result. */
+.wf-bar {
+  flex: 1;
+  height: 3px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(230, 211, 163, 0.12);
+}
+
+.wf-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: 0 50%;
+}
+
+.wf-card[data-state='running'] .wf-bar-fill {
+  animation: wf-bar-fill 900ms var(--wf-ease) 120ms backwards;
+}
+
+.wf-bar-row:nth-of-type(2) .wf-bar-fill,
+.wf-score-row:nth-child(2) .wf-bar-fill {
+  animation-delay: 220ms;
+}
+
+.wf-bar-row:nth-of-type(3) .wf-bar-fill,
+.wf-score-row:nth-child(3) .wf-bar-fill {
+  animation-delay: 320ms;
+}
+
+.wf-bar-row:nth-of-type(4) .wf-bar-fill,
+.wf-score-row:nth-child(4) .wf-bar-fill {
+  animation-delay: 420ms;
+}
+
+@keyframes wf-bar-fill {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* Paused (by the visitor, hover, or off screen): freeze what is in motion. */
+.wf[data-paused] .wf-light,
+.wf[data-paused] .wf-bar-fill {
+  animation-play-state: paused;
+}
+
+/* ── Card 1 · Home Wishlist ─────────────────────────────────────────────── */
+
+.wf-question {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.wf-question-icon {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.wf-question-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ── Card 2 · Deep Search ───────────────────────────────────────────────── */
+
+.wf-scanning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.wf-stat {
+  padding: 0 6px;
+}
+
+.wf-stat:first-child {
+  padding-left: 0;
+}
+
+.wf-stat + .wf-stat {
+  border-left: 1px solid rgba(230, 211, 163, 0.14);
+}
+
+.wf-stat-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--wf-muted);
+}
+
+.wf-stat-value {
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--wf-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-stat-value[data-tight] {
+  letter-spacing: -0.01em;
+}
+
+/* The key stat stands out by weight; it stays wheat like every other value. */
+.wf-stat-value[data-strong] {
+  font-weight: 700;
+}
+
+.wf-bar-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-bar-label {
+  flex: none;
+  width: 104px;
+  font-size: 11px;
+  color: var(--wf-text);
+}
+
+/* ── Card 3 · Analysis Report ───────────────────────────────────────────── */
+
+.wf-score-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+}
+
+.wf-score {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-score-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+.wf-score-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-score-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.wf-score-label {
+  flex: none;
+  width: 112px;
+  color: var(--wf-text);
+}
+
+.wf-score-value {
+  flex: none;
+  width: 18px;
+  text-align: right;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Card 4 · Matching Engine ───────────────────────────────────────────── */
+
+.wf-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-match {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--wf-text);
+}
+
+.wf-footer {
+  font-size: 11px;
+  color: var(--wf-muted);
+}
+
+.wf-footer b {
+  font-weight: 700;
+  color: var(--wf-text);
+}
+
+/* ── Card 5 · Owners Outreach ───────────────────────────────────────────── */
+
+.wf-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wf-bubble {
+  box-sizing: border-box;
+  /* Full width allowed so each message stays on one line inside the 200px card;
+     bubbles still hug their text and keep their side. */
+  max-width: 100%;
+  padding: 4px 7px;
+}
+
+.wf-bubble[data-from='agent'] {
+  align-self: flex-end;
+  text-align: right;
+  border: 1px solid rgba(230, 211, 163, 0.16);
+  border-radius: 8px 8px 2px 8px;
+  background: rgba(230, 211, 163, 0.08);
+}
+
+.wf-bubble[data-from='owner'] {
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 8px 8px 8px 2px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.wf-bubble[data-from='owner'] .wf-meta {
+  color: var(--accent);
+}
+
+/* ── Card 6 · User Feedback ─────────────────────────────────────────────── */
+
+.wf-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.wf-alert .wf-live-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+}
+
+.wf-alert-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.wf-alert .wf-subline {
+  font-size: 10.5px;
+}
+
+.wf-prompt {
+  margin-top: 2px;
+}
+
+/* ── List mode (narrow screens): cards in order, no wires ───────────────── */
+
+.wf[data-mode='list'] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wf[data-mode='list'] .wf-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+
+.wf-list-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wf-list-caption {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--wf-muted);
+}
+
+/* ── Reduced motion: no traveling light, no pulse, no refill ───────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-light,
+  .wf-light-svg {
+    display: none;
+  }
+
+  .wf-live-dot,
+  .wf-card[data-state='running'] .wf-chip-dot,
+  .wf-card[data-state='running'] .wf-bar-fill {
+    animation: none;
+  }
+
+  .wf-wire,
+  .wf-card,
+  .wf-card-title,
+  .wf-node {
+    transition: none;
+  }
+}

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Loader2 } from 'lucide-react'
+import { ArrowBigUpDash, Loader2 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -29,7 +29,7 @@ import {
   loginSchema,
   type LoginFormData,
 } from '@/features/auth/utils/loginSchema'
-import { SignupCaptcha } from '@/components/signup-captcha'
+import { SignupCaptcha } from '@/features/auth/components/signup-captcha'
 import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
 export function LoginForm({
@@ -39,6 +39,10 @@ export function LoginForm({
   const captcha = useSignupCaptcha()
   const { isSubmitting, submitLogin } = useLogin(captcha)
   const [showPassword, setShowPassword] = useState(false)
+  // Caps Lock is a common, invisible cause of "wrong password" — warn before submit.
+  const [capsLockOn, setCapsLockOn] = useState(false)
+  const syncCapsLock = (event: React.KeyboardEvent<HTMLInputElement>) =>
+    setCapsLockOn(event.getModifierState('CapsLock'))
   const passwordInputType = showPassword ? 'text' : 'password'
 
   const {
@@ -56,7 +60,7 @@ export function LoginForm({
 
   return (
     <div className={cn('flex flex-col gap-6', className)} {...props}>
-      <Card className="border-border/60 bg-card">
+      <Card data-slot="auth-card" className="border-border/60 bg-card">
         <CardHeader className="text-center">
           <CardTitle className="text-xl">Welcome back</CardTitle>
           <CardDescription>
@@ -89,8 +93,22 @@ export function LoginForm({
                   autoComplete="current-password"
                   disabled={isSubmitting}
                   aria-invalid={!!errors.password}
+                  aria-describedby={capsLockOn ? 'caps-lock-hint' : undefined}
+                  onKeyDown={syncCapsLock}
+                  onKeyUp={syncCapsLock}
                   {...register('password')}
                 />
+                {capsLockOn ? (
+                  <p
+                    id="caps-lock-hint"
+                    data-slot="caps-lock-hint"
+                    role="status"
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                  >
+                    <ArrowBigUpDash aria-hidden="true" className="size-3.5" />
+                    Caps Lock is on
+                  </p>
+                ) : null}
                 <div className="flex items-center gap-2 pt-2">
                   <Checkbox
                     id="show-password"
@@ -102,6 +120,7 @@ export function LoginForm({
                   />
                   <Label
                     htmlFor="show-password"
+                    data-slot="auth-show-password"
                     className="text-sm font-normal text-muted-foreground"
                   >
                     Show password
@@ -119,6 +138,7 @@ export function LoginForm({
               <Field>
                 <Button
                   type="submit"
+                  data-slot="auth-submit"
                   className="w-full"
                   disabled={isSubmitting || (isCaptchaEnabled() && !captcha.hasCaptchaToken)}
                 >
