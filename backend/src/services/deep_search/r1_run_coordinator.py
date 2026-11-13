@@ -438,7 +438,10 @@ class R1RunCoordinator:
                 category_ids=[q.category_id for q in state.clarification_questions],
             )
             return R1RunView(
-                run_id=run_id, status="needs_answers", questions=list(state.clarification_questions)
+                run_id=run_id,
+                status="needs_answers",
+                user_requirements_structured=state.extracted,
+                questions=list(state.clarification_questions),
             )
         self._log(
             logging.INFO,
@@ -448,7 +451,12 @@ class R1RunCoordinator:
             plan_count=len(state.category_metric_plans),
             path=path,
         )
-        return R1RunView(run_id=run_id, status="finished", result=list(state.category_metric_plans))
+        return R1RunView(
+            run_id=run_id,
+            status="finished",
+            user_requirements_structured=state.extracted,
+            result=list(state.category_metric_plans),
+        )
 
     async def _fail(
         self,
@@ -531,12 +539,19 @@ class R1RunCoordinator:
         """What the page shows for a stored run, by status."""
         if record.status == "running":
             return R1RunView(run_id=record.run_id, status="running")
+        # The saved extraction output, or None when that step never completed.
+        extracted = record.completed.get("extraction")
         if record.status == "needs_answers":
             questions = record.completed.get("clarification_questions")
             if questions is None:
                 return self._degraded(record, step_id="clarification_questions")
+            if extracted is None:
+                return self._degraded(record, step_id="extraction")
             return R1RunView(
-                run_id=record.run_id, status="needs_answers", questions=list(questions.questions)
+                run_id=record.run_id,
+                status="needs_answers",
+                user_requirements_structured=extracted,
+                questions=list(questions.questions),
             )
         if record.status == "finished":
             checkpoints = R1StepCheckpoints(completed=dict(record.completed), allow_calls=False)
@@ -548,13 +563,19 @@ class R1RunCoordinator:
             return R1RunView(
                 run_id=record.run_id,
                 status="finished",
+                user_requirements_structured=outcome.state.extracted,
                 result=list(outcome.state.category_metric_plans),
             )
         failed = record.failed_step
         retryable = (
             failed is not None and bool(failed.retryable) and record.attempts < MAX_RETRY_ATTEMPTS
         )
-        return R1RunView(run_id=record.run_id, status="failed", retryable=retryable)
+        return R1RunView(
+            run_id=record.run_id,
+            status="failed",
+            user_requirements_structured=extracted,
+            retryable=retryable,
+        )
 
     # ---- helpers -----------------------------------------------------------------------------
 

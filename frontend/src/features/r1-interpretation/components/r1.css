@@ -1,0 +1,255 @@
+/*
+ * R1 interpretation stage: motion. One authored moment per stage:
+ *  - extraction: rows are pulled out of the brief one after another
+ *  - result: sheets settle in, then each depth ladder fills rung by rung
+ * Every delay comes from the row's --d, so nothing here needs JavaScript.
+ */
+
+@keyframes r1-pull {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes r1-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes r1-pip {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes r1-sheen {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -20% 0;
+  }
+}
+
+@keyframes r1-ping {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--r1-accent) 45%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--r1-accent) 0%, transparent);
+  }
+}
+
+/* Backwards fill: the element is fully visible without the animation, and the blur
+   of glass parents is never held on an animation's last frame. */
+.r1-pull {
+  animation: r1-pull 420ms cubic-bezier(0, 0, 0.2, 1) backwards;
+  animation-delay: var(--d, 0ms);
+}
+
+.r1-panel {
+  animation: r1-panel-in 480ms cubic-bezier(0, 0, 0.2, 1) backwards;
+  animation-delay: var(--d, 0ms);
+}
+
+.r1-pip {
+  transform-origin: left center;
+  animation: r1-pip 420ms cubic-bezier(0, 0, 0.2, 1) backwards;
+  animation-delay: var(--d, 0ms);
+}
+
+/* Placeholder sheet while R1 decides what to look for. */
+.r1-sheen {
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in srgb, var(--fs-accent) 10%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  animation: r1-sheen 1600ms linear infinite;
+}
+
+.r1-ping {
+  animation: r1-ping 1500ms ease-out infinite;
+}
+
+/* ── "What you asked for": place cards ───────────────────────────────────────────────
+   Shape follows the number of features (none / compact / expanded) on a six-column grid.
+   Family colours name the kind of place; pink is reserved for a status. Cards are not
+   interactive, so there is no hover lift: motion is the entrance, the chip pop and the pulse. */
+
+.place-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.place-grid > li {
+  display: grid;
+  grid-column: span var(--span, 6);
+  min-width: 0;
+}
+
+.place {
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --edge: #e0e3d7;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border-radius: 16px;
+  border: 1px solid var(--edge);
+  background: linear-gradient(135deg, var(--tint) 0%, #fff 70%);
+  transition: box-shadow 280ms var(--ease), border-color 280ms var(--ease);
+  animation: r1-card-rise 600ms var(--ease) backwards;
+  animation-delay: var(--delay, 0ms);
+}
+
+.place[data-family='home'],
+.cat-tile[data-family='home'] { --tile: #d9e6f0; --icon: #2a6593; --tint: #eaf1f7; --badge: #2a6593; }
+.place[data-family='go'],
+.cat-tile[data-family='go'] { --tile: #d2ebe4; --icon: #1d7466; --tint: #e6f3ef; --badge: #17665a; }
+.place[data-family='daily'],
+.cat-tile[data-family='daily'] { --tile: #f6e4c6; --icon: #9a5a0e; --tint: #fbf1df; --badge: #85500b; }
+.place[data-family='calm'],
+.cat-tile[data-family='calm'] { --tile: #e0ebc8; --icon: #55761f; --tint: #eef4e0; --badge: #4a6a1a; }
+.place[data-status] { --tile: #f3d9e0; --icon: #b0306a; --tint: #f3dde3; --badge: #a12b60; --edge: #e4c2cc; }
+.place[data-linked] { box-shadow: 0 0 0 2px var(--icon), 0 8px 18px rgba(43, 47, 38, 0.12); }
+
+/* The icon tile of a plan sheet, tinted by the family of its taxonomy node. */
+.cat-tile { background: var(--tile); color: var(--icon); }
+
+.place--none { min-height: 92px; padding: 11px 12px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; }
+.place--compact { min-height: 92px; padding: 12px 14px; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+.place--expanded { padding: 14px 16px; display: flex; flex-direction: column; gap: 11px; }
+
+.place__row { display: flex; align-items: center; gap: 11px; }
+.place__row--split { justify-content: space-between; gap: 8px; }
+
+.place__tile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  background: var(--tile);
+}
+.place__tile svg { width: 19px; height: 19px; stroke: var(--icon); stroke-width: 1.7; }
+
+.place__heading { min-width: 0; }
+.place--expanded .place__heading { flex: 1; }
+.place__title { margin: 0; color: #2b2f26; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.place__title::first-letter { text-transform: uppercase; }
+.place--none .place__title { font-size: 14px; line-height: 18px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.place--compact .place__title { font-size: 15px; line-height: 20px; }
+.place--expanded .place__title { font-size: 16px; line-height: 21px; }
+.place__note { margin: 1px 0 0; font-size: 12px; line-height: 16px; color: #646a5b; }
+
+.place__count {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--badge);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.place--expanded .chips { padding: 9px; border-radius: 12px; background: rgba(255, 255, 255, 0.72); border: 1px solid #e3e6da; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--fs-tile-border);
+  background: var(--fs-tile);
+  color: var(--fs-muted);
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+  animation: r1-chip-pop 450ms var(--ease) backwards;
+  animation-delay: calc(var(--delay, 0ms) + 260ms + var(--i, 0) * 70ms);
+}
+.chip--status {
+  border-color: #d4739f;
+  background: #fbeff3;
+  color: #b0306a;
+  font-size: 11.5px;
+  font-weight: 600;
+  animation: r1-status-pulse 2400ms ease-out 1400ms infinite;
+}
+.chip--more { cursor: pointer; font: inherit; font-size: 12px; line-height: 16px; animation: none; }
+.chip--more:hover { background: var(--fs-option-selected); }
+.chip--more:focus-visible { outline: 2px solid var(--icon); outline-offset: 2px; }
+
+@keyframes r1-card-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes r1-chip-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  70% { transform: scale(1.07); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes r1-badge-pop {
+  from { opacity: 0; transform: scale(0.5); }
+  70% { transform: scale(1.12); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes r1-status-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(176, 48, 106, 0.38); }
+  70%, 100% { box-shadow: 0 0 0 9px rgba(176, 48, 106, 0); }
+}
+
+.r1-badge-pop { animation: r1-badge-pop 500ms cubic-bezier(0.2, 0.8, 0.2, 1) 900ms backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .r1-pull,
+  .r1-panel,
+  .r1-pip,
+  .r1-sheen,
+  .r1-ping,
+  .r1-badge-pop,
+  .place,
+  .chip,
+  .chip--status {
+    animation: none;
+  }
+
+  .place {
+    transition: none;
+  }
+}
+
+/* In a narrow no-features cell the status wraps; a soft-cornered pill reads better than a stadium. */
+.place--none .chip--status {
+  border-radius: 12px;
+  text-align: center;
+  line-height: 15px;
+}

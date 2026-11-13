@@ -1,0 +1,57 @@
+/* Clarification preview: the answered-row entrance and the light that travels each wire once. */
+
+@keyframes cl-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cl-spark {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
+.cl-row {
+  animation: cl-row-in 300ms cubic-bezier(0, 0, 0.2, 1) backwards;
+}
+
+.cl-spark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--fs-dot);
+  box-shadow: 0 0 6px 2px var(--fs-dot-glow);
+  offset-path: path('M1 0 V7 Q1 11 5 11 H12');
+  offset-rotate: 0deg;
+  opacity: 0;
+  animation: cl-spark 900ms cubic-bezier(0.45, 0, 0.55, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-row {
+    animation: none;
+  }
+  .cl-spark {
+    display: none;
+  }
+}

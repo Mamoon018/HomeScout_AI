@@ -1,0 +1,134 @@
+/**
+ * Frosted Sage theme: Home, sign-in and sign-up.
+ *
+ * Applied as `theme-olive` on <html> while one of those pages is mounted, so
+ * dropdowns portaled to <body> pick it up too. It re-points the design tokens;
+ * components keep using the same token classes. The `--fs-*` values below are the
+ * scheme itself: pages and widgets (auth, agent workflow) read them directly.
+ */
+
+html.theme-olive {
+  /* ── Scheme ─────────────────────────────────────────────────────────────── */
+  --fs-ink: #26301a; /* primary text, 13.1:1 on the panel */
+  --fs-muted: #4d5a36; /* muted text, 7.0:1 on the panel */
+  --fs-placeholder: #6b7458;
+  --fs-accent: #4a5a2a; /* buttons, links, selected options, chips */
+  --fs-on-accent: #f9f9f6; /* text on filled buttons */
+  --fs-done: #3f7a12;
+  --fs-error: #b3302f;
+  --fs-wire: #5e6b38; /* wires and connectors */
+  --fs-dot: radial-gradient(circle at 35% 35%, #fff6d6, #f5b73b 55%, #e08a00); /* traveling dot, spark */
+  --fs-dot-glow: rgba(224, 138, 0, 0.45);
+
+  --fs-panel: rgba(255, 255, 255, 0.62);
+  --fs-panel-border: rgba(74, 90, 42, 0.5);
+  --fs-panel-shadow: 0 18px 48px rgba(38, 48, 26, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --fs-card: rgba(255, 255, 255, 0.78);
+  --fs-card-border: rgba(74, 90, 42, 0.35);
+  --fs-paper: rgba(255, 255, 255, 0.72); /* writing area */
+  --fs-input: rgba(255, 255, 255, 0.92);
+  --fs-tile: rgba(74, 90, 42, 0.07); /* footer strip, inner tiles */
+  --fs-tile-border: rgba(74, 90, 42, 0.18);
+  --fs-option: rgba(255, 255, 255, 0.75);
+  --fs-option-border: rgba(38, 48, 26, 0.18);
+  --fs-option-selected: rgba(74, 90, 42, 0.12);
+
+  /* ── Design tokens ──────────────────────────────────────────────────────── */
+  /* Surfaces */
+  --color-Neutral-900: var(--fs-paper); /* inset areas: writing area, model pill */
+  --color-Neutral-800: var(--fs-panel); /* panels (Surface-Primary) */
+  --color-Neutral-700: var(--fs-tile); /* raised: action bar, tiles */
+  --color-Neutral-Line: var(--fs-panel-border);
+
+  /* Text */
+  --color-Neutral-100: var(--fs-ink);
+  --color-Neutral-400: var(--fs-muted);
+
+  /* Accent and status */
+  --color-Brand-500: var(--fs-accent);
+  --color-Brand-300: var(--fs-wire);
+  --color-Success-500: var(--fs-done);
+
+  /* Step palette: deep tones so they read on the light panels */
+  --color-Step-1: #9a6b00; /* amber  */
+  --color-Step-2: #b0306e; /* rose   */
+  --color-Step-3: #b35a12; /* orange */
+  --color-Step-4: #1d6fa3; /* blue   */
+  --color-Step-5: #b3302f; /* red    */
+  --color-Step-6: #1f7a80; /* teal   */
+
+  /* Soft olive shadows instead of near-black ones */
+  --shadow-Shadow-Subtle: 0 1px 2px rgba(38, 48, 26, 0.12);
+  --shadow-Shadow-Elevated: 0 18px 48px rgba(38, 48, 26, 0.16);
+
+  /* shadcn bridge values that need more than a token swap */
+  --popover: #fbfaf6; /* solid, so dropdown menus stay readable over glass */
+  --popover-foreground: var(--fs-ink);
+  --primary-foreground: var(--fs-on-accent);
+  --destructive: var(--fs-error);
+
+  /* Composer zones */
+  --composer-input-bg: var(--fs-paper);
+  --composer-input-border: var(--fs-tile-border);
+  --composer-placeholder: var(--fs-placeholder);
+  --composer-footer-bg: var(--fs-tile);
+  --composer-footer-border: var(--fs-tile-border);
+  --composer-hint: var(--fs-muted);
+  --composer-kbd-border: var(--fs-option-border);
+  --composer-kbd-bg: var(--fs-option);
+  --composer-kbd-text: var(--fs-muted);
+  --composer-model-text: var(--fs-ink);
+
+  /* Progress tracker */
+  --tracker-pill-base: var(--fs-option);
+  --tracker-label: var(--fs-ink);
+  --tracker-heading: var(--fs-ink);
+  --home-heading: var(--fs-ink); /* "Start your Homescout" */
+
+  /* Moon logo in deep olive (same light → shadow ramp as the white moon) */
+  --moon-glow: #5e6b38;
+  --moon-halo: rgba(74, 90, 42, 0.22);
+  --moon-surface-1: #8a9a5c;
+  --moon-surface-2: #6b7a42;
+  --moon-surface-3: #4a5a2a;
+  --moon-surface-4: #333f1d;
+  --moon-crater-1: #3f4d24;
+  --moon-crater-2: #2c3719;
+  --moon-maria: #36421f;
+  --moon-terminator: rgba(38, 48, 26, 0.18);
+
+  --font-sans: Manrope, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial,
+    sans-serif;
+}
+
+/* Page: light 105° gradient with four soft glows on top */
+html.theme-olive body {
+  background-color: #ebebdf;
+  background-image:
+    radial-gradient(ellipse 55% 50% at 100% 0%, rgba(255, 255, 255, 1), transparent 70%),
+    radial-gradient(ellipse 60% 55% at 0% 100%, rgba(160, 180, 90, 0.55), transparent 70%),
+    radial-gradient(ellipse 40% 50% at 100% 50%, rgba(230, 205, 150, 0.6), transparent 70%),
+    radial-gradient(ellipse 45% 45% at 50% 50%, rgba(190, 204, 130, 0.24), transparent 75%),
+    linear-gradient(105deg, #fbfaf6 0%, #ebebdf 45%, #d9e0c8 100%);
+  background-attachment: fixed;
+  color: var(--fs-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Browser surfaces take the scheme too */
+html.theme-olive ::selection {
+  background: rgba(74, 90, 42, 0.25);
+  color: var(--fs-ink);
+}
+
+html.theme-olive {
+  accent-color: var(--fs-accent);
+  caret-color: var(--fs-accent);
+}
+
+/* Disabled controls drop to 45% */
+html.theme-olive :is(button, input, textarea, select, [role='combobox']):disabled,
+html.theme-olive [data-disabled] {
+  opacity: 0.45;
+}

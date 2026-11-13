@@ -14,6 +14,8 @@ export type ApiResponse<T> = {
 }
 
 export type ApiFetchOptions = {
+  /** Overrides the default request timeout, for calls that run long server-side work. */
+  timeoutMs?: number
   skipRefresh?: boolean
   _retried?: boolean
   _staleCookieRetry?: boolean
@@ -32,9 +34,10 @@ function isTokenExpired401(data: ApiErrorBody | null, status: number): boolean {
 export async function fetchJson<T>(
   path: string,
   init: RequestInit,
+  timeoutMs: number = API_TIMEOUT_MS,
 ): Promise<ApiResponse<T>> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const response = await fetch(path, {
@@ -122,7 +125,7 @@ export async function apiFetch<T>(
     await commitSessionCookies()
   }
 
-  const result = await fetchJson<T & ApiErrorBody>(path, init)
+  const result = await fetchJson<T & ApiErrorBody>(path, init, options.timeoutMs)
 
   if (
     !options.skipRefresh &&

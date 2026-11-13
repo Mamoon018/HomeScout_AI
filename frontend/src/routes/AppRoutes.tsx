@@ -37,7 +37,7 @@ function HomeRoute() {
     }
   }, [onUnauthenticated])
 
-  return <HomePage message={message} />
+  return <HomePage message={message} onUnauthenticated={onUnauthenticated} />
 }
 
 /** Application route definitions. */

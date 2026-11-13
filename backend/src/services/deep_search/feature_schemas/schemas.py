@@ -1007,10 +1007,16 @@ class R1StepCheckpoints:
 
 @dataclass(frozen=True)
 class R1RunView:
-    """What the page needs for one run: questions while paused, the result once finished."""
+    """What the page needs for one run: questions while paused, the result once finished.
+
+    `user_requirements_structured` is the extraction step's output, set whenever that step is
+    saved (paused, finished, or failed after it). It is what extraction found, so its ambiguity
+    flags stay as extracted after the customer answers; the resolved categories are in `result`.
+    """
 
     run_id: str
     status: R1RunStatus
+    user_requirements_structured: ExtractedRequirements | None = None
     questions: list[ClarificationQuestion] | None = None
     result: list[CategoryMetricPlan] | None = None
     retryable: bool | None = None

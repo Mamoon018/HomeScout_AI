@@ -15,6 +15,16 @@
   --color-Neutral-100: #F7F8F8;
   --color-Neutral-400: #8A8F98;
   --color-Brand-500: #5E6AD2;
+  --color-Brand-300: #9AA2E6; /* lighter accent for text on accent tints */
+  --color-Success-500: #22C55E;
+  --color-Neutral-Line: rgba(255, 255, 255, 0.08); /* base for Border-Subtle, so themes can override it */
+
+  /* Search progress step palette (no green = completed, no indigo = active) */
+  --color-Step-1: #FBBF24; /* amber  — categorizing */
+  --color-Step-2: #F472B6; /* pink   — clarity check */
+  --color-Step-3: #FB923C; /* orange — tool calls */
+  --color-Step-4: #22D3EE; /* cyan   — map exploration (kept apart from the map's blue radius) */
+  --color-Step-5: #F87171; /* coral  — area data fetch */
 
   /* ── 1. Tokens — Spacing (4px grid) ───────────────────────────────────── */
   --spacing-Space-1: 4px;

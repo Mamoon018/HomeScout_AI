@@ -25,6 +25,13 @@ const config = {
         'Neutral-100': '#F7F8F8',
         'Neutral-400': '#8A8F98',
         'Brand-500': '#5E6AD2',
+        'Brand-300': '#9AA2E6',
+        'Success-500': '#22C55E',
+        'Step-1': '#FBBF24',
+        'Step-2': '#F472B6',
+        'Step-3': '#FB923C',
+        'Step-4': '#22D3EE',
+        'Step-5': '#F87171',
       },
 
       /* ── 1. Tokens — Spacing (4px grid) ───────────────────────────────── */

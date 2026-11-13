@@ -1,0 +1,158 @@
+/**
+ * Frosted Sage hero. Manrope lines, Fraunces italic keywords, and a "mini wire"
+ * under "the match." with a spark that travels it like the workflow's light.
+ * Text colours are solid: no opacity on text.
+ */
+
+.oh {
+  --oh-ink: var(--fs-ink);
+  --oh-accent: var(--fs-accent);
+
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-family: var(--font-sans);
+}
+
+.oh-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0;
+  color: var(--oh-ink);
+}
+
+/* ── Line group 1 ───────────────────────────────────────────────────────── */
+
+.oh-primary {
+  font-size: 52px;
+  font-weight: 500;
+  line-height: 1.06;
+  letter-spacing: -0.025em;
+}
+
+.oh-keyword {
+  font-family: Fraunces, Georgia, serif;
+  font-style: italic;
+  font-weight: 500;
+  /* Optical size follows the rendered size, so 57px gets the display cut. */
+  font-optical-sizing: auto;
+  font-size: 1.1em;
+  letter-spacing: -0.01em;
+  color: var(--oh-accent);
+}
+
+/* ── Line group 2 ───────────────────────────────────────────────────────── */
+
+.oh-secondary {
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.oh-match {
+  position: relative;
+  display: inline-block;
+  padding-bottom: 2px;
+}
+
+.oh-wire {
+  position: absolute;
+  right: 0;
+  bottom: -6px;
+  left: 0;
+  height: 1.6px;
+  border-radius: 1px;
+  background: var(--fs-wire);
+  opacity: 0.55;
+}
+
+/* Full-width track: the spark moves with transform (compositor only), and the
+   track's container width tells it how far to go. */
+.oh-track {
+  position: absolute;
+  right: 0;
+  bottom: -9.5px;
+  left: 0;
+  height: 8px;
+  container-type: inline-size;
+  pointer-events: none;
+}
+
+.oh-spark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fs-dot);
+  box-shadow: 0 0 8px 2px var(--fs-dot-glow);
+  opacity: 0;
+  animation: oh-spark-travel 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes oh-spark-travel {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  12%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(calc(100cqw - 8px));
+    opacity: 0;
+  }
+}
+
+/* ── Subtitle ───────────────────────────────────────────────────────────── */
+
+.oh-subtitle {
+  max-width: 640px;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--fs-muted);
+  text-wrap: balance;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 1099px) {
+  .oh-primary {
+    font-size: 44px;
+  }
+
+  .oh-secondary {
+    font-size: 26px;
+  }
+}
+
+@media (max-width: 599px) {
+  .oh-primary {
+    font-size: 34px;
+  }
+
+  .oh-secondary {
+    font-size: 22px;
+  }
+
+  .oh-break {
+    display: none;
+  }
+
+  .oh-subtitle {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oh-spark {
+    animation: none;
+    opacity: 0;
+  }
+}
