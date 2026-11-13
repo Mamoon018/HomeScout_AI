@@ -1,4 +1,5 @@
 import {
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -6,6 +7,8 @@ import {
   type KeyboardEvent,
 } from 'react'
 import {
+  CheckIcon,
+  CircleAlertIcon,
   CircleChevronDownIcon,
   GlobeIcon,
   HouseIcon,
@@ -31,6 +34,7 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Toggle } from '@/components/ui/toggle'
+import { MIN_BRIEF_WORDS, countWords } from '@/features/composer/utils/briefWords'
 import { cn } from '@/lib/utils'
 
 const MODEL_OPTIONS = ['Homescout 1.0', 'Homescout 1.5', 'Homescout 2.0'] as const
@@ -53,6 +57,10 @@ type NeighborhoodBriefComposerProps = {
   onStop?: () => void
   /** While a search runs: only the send button is disabled. */
   locked?: boolean
+  /** Why the server refused the last brief; shown under the card until the renter edits. */
+  error?: string | null
+  /** Called when the renter edits the brief, so a stale error can be cleared. */
+  onEdit?: () => void
   className?: string
 }
 
@@ -91,6 +99,8 @@ export function NeighborhoodBriefComposer({
   isSubmitting = false,
   onStop,
   locked = false,
+  error = null,
+  onEdit,
   className,
 }: NeighborhoodBriefComposerProps) {
   const [brief, setBrief] = useState('')
@@ -100,7 +110,11 @@ export function NeighborhoodBriefComposer({
   const [isApple] = useState(isApplePlatform)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const canSubmit = brief.trim().length > 0 && !isSubmitting && !locked
+  const words = countWords(brief)
+  const longEnough = words >= MIN_BRIEF_WORDS
+  const canSubmit = longEnough && !isSubmitting && !locked
+  const countId = useId()
+  const errorId = useId()
 
   // Auto-grow: fit the content, then CSS max-height takes over and it scrolls.
   useLayoutEffect(() => {
@@ -271,7 +285,12 @@ export function NeighborhoodBriefComposer({
           <InputGroupTextarea
             ref={textareaRef}
             value={brief}
-            onChange={(event) => setBrief(event.target.value)}
+            onChange={(event) => {
+              setBrief(event.target.value)
+              onEdit?.()
+            }}
+            aria-describedby={error ? `${countId} ${errorId}` : countId}
+            aria-invalid={error ? true : undefined}
             onKeyDown={handleKeyDown}
             aria-label={PLACEHOLDER_LABEL}
             rows={3}
@@ -282,9 +301,24 @@ export function NeighborhoodBriefComposer({
         {/* Zone C — footer action bar */}
         <InputGroupAddon
           align="block-end"
-          // Send is the only item now, so keep it on the right.
-          className="cursor-default justify-end border-t border-(--composer-footer-border) bg-(--composer-footer-bg) px-3 py-2 font-normal"
+          // The word count sits on the left, the send button on the right.
+          className="cursor-default justify-between border-t border-(--composer-footer-border) bg-(--composer-footer-bg) px-3 py-2 font-normal"
         >
+          {/* The backend needs a real brief: say how far along it is instead of a dead button. */}
+          <span
+            id={countId}
+            className={cn(
+              'inline-flex items-center gap-1.5 text-xs leading-5 font-medium tabular-nums',
+              longEnough ? 'text-Status-Success' : 'text-muted-foreground',
+            )}
+          >
+            {longEnough ? (
+              <CheckIcon aria-hidden="true" className="size-3.5" strokeWidth={3} />
+            ) : null}
+            {longEnough
+              ? `${words} words`
+              : `${words} of ${MIN_BRIEF_WORDS} words. A fuller brief gives a better read.`}
+          </span>
           {/* F2 — send button (primary action). Ctrl/⌘+Enter still submits; the hint is no longer shown. */}
           <span className={cn('flex', locked && 'cursor-not-allowed')}>
           <InputGroupButton
@@ -308,6 +342,16 @@ export function NeighborhoodBriefComposer({
           </span>
         </InputGroupAddon>
       </InputGroup>
+      {error ? (
+        <p
+          id={errorId}
+          role="alert"
+          className="m-0 mt-2 flex items-start gap-2 px-2 text-sm leading-6 text-(--fs-error)"
+        >
+          <CircleAlertIcon aria-hidden="true" className="mt-1 size-4 shrink-0" />
+          {error}
+        </p>
+      ) : null}
     </form>
   )
 }

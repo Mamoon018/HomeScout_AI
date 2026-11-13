@@ -3,11 +3,14 @@ import { CheckIcon, Loader2Icon } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
+  AnswersRejectedError,
   OTHER_MAX_LENGTH,
   type ClarificationAnswer,
   type ClarificationQuestion,
 } from '@/features/search-progress/types/clarification'
 import { cn } from '@/lib/utils'
+
+const FAILED_COPY = "Couldn't send your answers. Check your connection and try again."
 
 type ClarificationCardProps = {
   questions: ClarificationQuestion[]
@@ -26,7 +29,7 @@ export function ClarificationCard({ questions, onSubmit }: ClarificationCardProp
   const [picked, setPicked] = useState<Record<number, number>>({})
   const [otherText, setOtherText] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [failed, setFailed] = useState<string | false>(false)
   const panelRefs = useRef<(HTMLDivElement | null)[]>([])
   const otherRef = useRef<HTMLInputElement>(null)
 
@@ -89,8 +92,9 @@ export function ClarificationCard({ questions, onSubmit }: ClarificationCardProp
     setFailed(false)
     try {
       await onSubmit(buildAnswers())
-    } catch {
-      setFailed(true)
+    } catch (error) {
+      // Only a refusal of the answers carries its own sentence; any other failure is a connection problem.
+      setFailed(error instanceof AnswersRejectedError ? error.message : FAILED_COPY)
       setSubmitting(false)
     }
   }
@@ -211,7 +215,7 @@ export function ClarificationCard({ questions, onSubmit }: ClarificationCardProp
 
       {failed ? (
         <p role="alert" className="mt-3 mb-0 text-sm text-red-400">
-          Couldn&apos;t send your answers. Check your connection and try again.
+          {failed}
         </p>
       ) : null}
 

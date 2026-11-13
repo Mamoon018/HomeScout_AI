@@ -2,7 +2,7 @@
 export type AmbiguityFlag = {
   /** The renter's own words that R1 could not pin down. */
   phrase: string
-  target: 'category' | 'characteristic'
+  target: 'category' | 'characteristic' | 'persona'
   category: string | null
   category_id: number | null
   characteristic: string | null
@@ -33,8 +33,10 @@ export type SpecificMetric = {
   unit: string | null
   label: string
   question: string
-  value_type: 'enum' | 'number' | 'boolean' | 'text' | string
-  enum_values: string[] | null
+  /** `number_with_unit`, `boolean`, `enum` or `date_time` today; kept open so a new one still renders. */
+  value_type: string
+  /** The fixed answers of an `enum` check; empty for every other type. */
+  enum_values: string[]
   null_policy: string
   verification: string
   evidence_class: 'factual' | 'experiential'

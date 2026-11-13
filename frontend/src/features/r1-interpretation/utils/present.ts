@@ -106,3 +106,15 @@ function addressRenter(text: string): string {
 export const NULL_POLICY_COPY: Record<string, string> = {
   unknown: 'If it cannot be found it stays marked unknown, never guessed.',
 }
+
+const VALUE_TYPE_COPY: Record<string, string> = {
+  number_with_unit: 'a number',
+  boolean: 'yes or no',
+  enum: 'one of a fixed set',
+  date_time: 'a date or time',
+}
+
+/** What kind of answer a check will give, in words; a type this page does not know shows as sent. */
+export function valueTypeLabel(valueType: string): string {
+  return VALUE_TYPE_COPY[valueType] ?? `a ${valueType.replaceAll('_', ' ')}`
+}

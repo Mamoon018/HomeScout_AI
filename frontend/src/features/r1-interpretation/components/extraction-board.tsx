@@ -23,6 +23,8 @@ type ExtractionBoardProps = {
   data: ExtractionOutput
   phase: R1Phase
   questions: ClarificationQuestion[]
+  /** Changes each time the run asks, so a card that stuck on "sending" starts fresh. */
+  asked: number
   answers: ClarificationAnswer[]
   onSubmitAnswers: (answers: ClarificationAnswer[]) => Promise<void> | void
 }
@@ -42,6 +44,7 @@ export function ExtractionBoard({
   data,
   phase,
   questions,
+  asked,
   answers,
   onSubmitAnswers,
 }: ExtractionBoardProps) {
@@ -93,7 +96,7 @@ export function ExtractionBoard({
             <ul className="m-0 flex list-none flex-col gap-3 p-0">
               {data.ambiguity_flags.map((flag, i) => (
                 <FlagRow
-                  key={`${flag.category_id}-${flag.phrase}`}
+                  key={`${i}-${flag.category_id}-${flag.phrase}`}
                   flag={flag}
                   meaning={answerFor(flag.category_id)?.description}
                   asking={asking}
@@ -107,6 +110,7 @@ export function ExtractionBoard({
 
         {questions.length > 0 && (phase === 'asking' || phase === 'planning' || phase === 'done') ? (
           <QuestionSection
+            key={asked}
             open={asking}
             questions={questions}
             onSubmit={onSubmitAnswers}
@@ -127,6 +131,7 @@ export function ExtractionBoard({
         popCount
       >
         <PlaceGrid
+          emptyText="I didn't find a place or feature in your brief."
           places={data.explicit_categories.map((category) => {
             const meaning = answerFor(category.category_id)?.description
             const flagged = data.ambiguity_flags.some((f) => f.category_id === category.category_id)
@@ -153,12 +158,12 @@ export function ExtractionBoard({
   )
 }
 
-type PanelProps = {
+export type PanelProps = {
   icon: LucideIcon
   color: string
   title: string
   hint: string
-  count: number
+  count: number | string
   delay: number
   /** Waiting on the renter: the border and a soft ping take the identity colour. */
   live?: boolean
@@ -167,7 +172,7 @@ type PanelProps = {
   children: ReactNode
 }
 
-function Panel({ icon: Icon, color, title, hint, count, delay, live = false, popCount = false, children }: PanelProps) {
+export function Panel({ icon: Icon, color, title, hint, count, delay, live = false, popCount = false, children }: PanelProps) {
   return (
     <section
       aria-label={title}
@@ -218,7 +223,9 @@ function FlagRow({ flag, meaning, asking, delay, onLink }: FlagRowProps) {
   const why =
     flag.target === 'characteristic' && flag.category
       ? `Unclear what this means for ${flag.category}.`
-      : 'This could point to several kinds of places.'
+      : flag.target === 'persona'
+        ? 'This could mean different things about your situation.'
+        : 'This could point to several kinds of places.'
   return (
     <li
       className="r1-pull"

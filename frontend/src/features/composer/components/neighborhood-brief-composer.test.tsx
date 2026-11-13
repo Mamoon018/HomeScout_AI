@@ -4,6 +4,8 @@ import { NeighborhoodBriefComposer } from '@/features/composer/components/neighb
 
 const TEXTAREA_NAME =
   'Describe your ideal neighborhood and paste the address you want evaluated…'
+/** Long enough for the composer to accept: the backend wants at least 100 words. */
+const LONG_BRIEF = Array.from({ length: 100 }, (_, i) => `word${i}`).join(' ')
 
 describe('NeighborhoodBriefComposer', () => {
   it('renders every toolbar, input and footer element', () => {
@@ -23,7 +25,7 @@ describe('NeighborhoodBriefComposer', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toHaveAttribute('type', 'submit')
   })
 
-  it('keeps Send disabled until there is text, and hides the placeholder once typing starts', async () => {
+  it('keeps Send disabled until the brief has 100 words, and hides the placeholder once typing starts', async () => {
     const user = userEvent.setup()
     render(<NeighborhoodBriefComposer />)
     const send = screen.getByRole('button', { name: 'Send' })
@@ -35,8 +37,16 @@ describe('NeighborhoodBriefComposer', () => {
 
     await user.type(textarea, 'Quiet street')
 
-    expect(send).toBeEnabled()
+    expect(send).toBeDisabled()
+    expect(screen.getByText(/2 of 100 words/)).toBeInTheDocument()
     expect(placeholder()).toBeNull()
+
+    await user.clear(textarea)
+    await user.click(textarea)
+    await user.paste(LONG_BRIEF)
+
+    expect(send).toBeEnabled()
+    expect(screen.getByText('100 words')).toBeInTheDocument()
   })
 
   it('toggles search on and off', async () => {
@@ -51,18 +61,35 @@ describe('NeighborhoodBriefComposer', () => {
     expect(search).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('submits on Ctrl+Enter but not on plain Enter', async () => {
+  it('shows the reason for a refused brief under the card until the renter edits', async () => {
+    const user = userEvent.setup()
+    const onEdit = vi.fn()
+    render(<NeighborhoodBriefComposer error="Please write yours in English." onEdit={onEdit} />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Please write yours in English.')
+    await user.type(screen.getByRole('textbox', { name: TEXTAREA_NAME }), 'a')
+    expect(onEdit).toHaveBeenCalled()
+  })
+
+  it('submits on Ctrl+Enter but not on plain Enter, and not before 100 words', async () => {
     const user = userEvent.setup()
     const onSubmit = vi.fn()
     render(<NeighborhoodBriefComposer onSubmit={onSubmit} />)
     const textarea = screen.getByRole('textbox', { name: TEXTAREA_NAME })
 
-    await user.type(textarea, '  Walkable to a park{Enter}')
+    await user.type(textarea, 'Walkable to a park{Enter}')
+    await user.keyboard('{Control>}{Enter}{/Control}')
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    await user.clear(textarea)
+    await user.click(textarea)
+    await user.paste(`  ${LONG_BRIEF}`)
+    await user.keyboard('{Enter}')
     expect(onSubmit).not.toHaveBeenCalled()
 
     await user.keyboard('{Control>}{Enter}{/Control}')
     expect(onSubmit).toHaveBeenCalledWith({
-      brief: 'Walkable to a park',
+      brief: LONG_BRIEF,
       model: 'Homescout 1.0',
       reasoning: 'Deep',
       searchEnabled: false,

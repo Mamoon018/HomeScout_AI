@@ -55,7 +55,7 @@ const PREDEFINED_METRICS: PredefinedMetric[] = [
  * Sample finished R1 output (the `result` of a finished run), trimmed to two categories.
  * Replace with the real run view once the endpoint is wired.
  */
-export const DUMMY_PLAN: CategoryMetricPlan[] = [
+export const PLAN: CategoryMetricPlan[] = [
   {
     depth: 'operating_details',
     category_id: 2,

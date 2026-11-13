@@ -125,12 +125,19 @@
   animation-delay: var(--delay, 0ms);
 }
 
-.place[data-family='home'] { --tile: #d9e6f0; --icon: #2a6593; --tint: #eaf1f7; --badge: #2a6593; }
-.place[data-family='go'] { --tile: #d2ebe4; --icon: #1d7466; --tint: #e6f3ef; --badge: #17665a; }
-.place[data-family='daily'] { --tile: #f6e4c6; --icon: #9a5a0e; --tint: #fbf1df; --badge: #85500b; }
-.place[data-family='calm'] { --tile: #e0ebc8; --icon: #55761f; --tint: #eef4e0; --badge: #4a6a1a; }
+.place[data-family='home'],
+.cat-tile[data-family='home'] { --tile: #d9e6f0; --icon: #2a6593; --tint: #eaf1f7; --badge: #2a6593; }
+.place[data-family='go'],
+.cat-tile[data-family='go'] { --tile: #d2ebe4; --icon: #1d7466; --tint: #e6f3ef; --badge: #17665a; }
+.place[data-family='daily'],
+.cat-tile[data-family='daily'] { --tile: #f6e4c6; --icon: #9a5a0e; --tint: #fbf1df; --badge: #85500b; }
+.place[data-family='calm'],
+.cat-tile[data-family='calm'] { --tile: #e0ebc8; --icon: #55761f; --tint: #eef4e0; --badge: #4a6a1a; }
 .place[data-status] { --tile: #f3d9e0; --icon: #b0306a; --tint: #f3dde3; --badge: #a12b60; --edge: #e4c2cc; }
 .place[data-linked] { box-shadow: 0 0 0 2px var(--icon), 0 8px 18px rgba(43, 47, 38, 0.12); }
+
+/* The icon tile of a plan sheet, tinted by the family of its taxonomy node. */
+.cat-tile { background: var(--tile); color: var(--icon); }
 
 .place--none { min-height: 92px; padding: 11px 12px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; }
 .place--compact { min-height: 92px; padding: 12px 14px; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }

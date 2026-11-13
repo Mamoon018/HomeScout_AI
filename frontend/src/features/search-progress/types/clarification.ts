@@ -21,3 +21,6 @@ export type ClarificationPhase = 'none' | 'asking' | 'answered'
 
 /** Longest "other" description we accept. Placeholder until the backend states a limit. */
 export const OTHER_MAX_LENGTH = 200
+
+/** The server refused the answers; `message` is the sentence to show the renter. */
+export class AnswersRejectedError extends Error {}

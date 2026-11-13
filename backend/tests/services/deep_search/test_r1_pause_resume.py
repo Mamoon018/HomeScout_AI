@@ -560,6 +560,41 @@ async def test_status_read_rebuilds_the_finished_run_with_no_llm_call() -> None:
     assert paused_view.status == "needs_answers" and paused_view.questions == paused.questions
 
 
+async def test_every_view_after_extraction_carries_the_same_extraction_output() -> None:
+    coordinator, provider, store = _coordinator()
+    paused = await coordinator.start_run(USER_A, _REQUIREMENTS)
+    extracted = paused.user_requirements_structured
+    assert extracted is not None
+    assert [c.category_id for c in extracted.explicit_categories] == list(
+        range(len(extracted.explicit_categories))
+    )
+    assert (await coordinator.get_run(USER_A, paused.run_id)).user_requirements_structured == extracted
+
+    # Answers resolve the flags into `result`; the extraction output stays as extracted.
+    finished = await coordinator.submit_answers(USER_A, paused.run_id, _ANSWER)
+    assert finished.user_requirements_structured == extracted
+    assert (await coordinator.get_run(USER_A, paused.run_id)).user_requirements_structured == extracted
+
+    # A run that failed after extraction still shows it.
+    failing, failing_provider, _ = _coordinator(pause=False)
+    failing_provider.fail_once.add(INFERRED_CATEGORIES_SCHEMA_NAME)
+    with pytest.raises(R1RunFailedError) as caught:
+        await failing.start_run(USER_A, _REQUIREMENTS)
+    failed_view = await failing.get_run(USER_A, caught.value.run_id)
+    assert failed_view.status == "failed" and failed_view.user_requirements_structured is not None
+
+    # A run that failed at extraction, or is still running, has none.
+    failing, failing_provider, failing_store = _coordinator(pause=False)
+    failing_provider.fail_once.add(EXTRACTION_SCHEMA_NAME)
+    with pytest.raises(R1RunFailedError) as caught:
+        await failing.start_run(USER_A, _REQUIREMENTS)
+    run_id = caught.value.run_id
+    assert (await failing.get_run(USER_A, run_id)).user_requirements_structured is None
+    failing_store.runs[run_id]["status"] = "running"
+    failing_store.runs[run_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+    assert (await failing.get_run(USER_A, run_id)).user_requirements_structured is None
+
+
 async def test_start_failure_is_retryable_and_retry_calls_only_the_remaining_steps() -> None:
     coordinator, provider, store = _coordinator(pause=False)
     provider.fail_once.add(INFERRED_CATEGORIES_SCHEMA_NAME)
@@ -810,6 +845,9 @@ async def test_http_happy_path_and_status_codes(http_coordinator) -> None:
         assert started.status_code == 201
         body = started.json()
         assert body["status"] == "needs_answers" and body["questions"][0]["category_id"] == 1
+        assert set(body["user_requirements_structured"]) == {
+            "explicit_categories", "ambiguity_flags", "persona_facts"
+        }
         run_id = body["run_id"]
 
         status_view = await client.get(f"{_BASE}/{run_id}")
@@ -835,8 +873,14 @@ async def test_http_happy_path_and_status_codes(http_coordinator) -> None:
         assert result["status"] == "finished"
         assert {plan["category_id"] for plan in result["result"]} == {0, 1, 2}
 
+        assert result["user_requirements_structured"] == body["user_requirements_structured"]
+
         finished_view = await client.get(f"{_BASE}/{run_id}")
         assert finished_view.json()["result"] == result["result"]
+        assert (
+            finished_view.json()["user_requirements_structured"]
+            == body["user_requirements_structured"]
+        )
 
         again = await client.post(
             f"{_BASE}/{run_id}/clarification-answers",
@@ -867,6 +911,8 @@ async def test_http_failure_bodies_carry_retryable(http_coordinator) -> None:
             "retryable": True,
         }
         status_view = (await client.get(f"{_BASE}/{run_id}")).json()
+        extraction = status_view.pop("user_requirements_structured")
+        assert extraction["explicit_categories"]  # extraction was saved before the failure
         assert status_view == {"run_id": run_id, "status": "failed", "retryable": True}
 
         retried = await client.post(f"{_BASE}/{run_id}/retry")

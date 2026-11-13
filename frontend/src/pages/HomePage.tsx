@@ -5,12 +5,7 @@ import '@/features/auth/components/olive-hero.css'
 import { NeighborhoodBriefComposer } from '@/features/composer/components/neighborhood-brief-composer'
 import { R1Stage } from '@/features/r1-interpretation/components/r1-stage'
 import { useR1Run } from '@/features/r1-interpretation/hooks/useR1Run'
-import type { CategoryMetricPlan, ExtractionOutput } from '@/features/r1-interpretation/types/r1'
-import { DUMMY_EXTRACTION } from '@/features/r1-interpretation/utils/dummyExtraction'
-import { DUMMY_PLAN } from '@/features/r1-interpretation/utils/dummyPlan'
 import { R1_TIMING } from '@/features/r1-interpretation/utils/timing'
-import type { ClarificationQuestion } from '@/features/search-progress/types/clarification'
-import { DUMMY_CLARIFICATION_QUESTIONS } from '@/features/search-progress/utils/dummyClarification'
 import { cn } from '@/lib/utils'
 import { useDocumentClasses } from '@/lib/useDocumentClasses'
 
@@ -26,21 +21,13 @@ const ANNOUNCEMENTS = {
 
 type HomePageProps = {
   message: string | null
-  /** Questions R1 asks once the run reaches the clarity check. Empty = never pause. */
-  clarificationQuestions?: ClarificationQuestion[]
-  /** R1's extraction output and finished plan. Dummy data until the endpoints are wired. */
-  extraction?: ExtractionOutput
-  plan?: CategoryMetricPlan[]
+  /** Called when a run endpoint says the session is gone (401 that refreshing did not fix). */
+  onUnauthenticated?: () => void
 }
 
 /** Authenticated homepage. Greeting comes from the identity-scoped welcome API. */
-export function HomePage({
-  message,
-  clarificationQuestions = DUMMY_CLARIFICATION_QUESTIONS,
-  extraction = DUMMY_EXTRACTION,
-  plan = DUMMY_PLAN,
-}: HomePageProps) {
-  const run = useR1Run(clarificationQuestions.length > 0)
+export function HomePage({ message, onUnauthenticated }: HomePageProps) {
+  const run = useR1Run({ onUnauthenticated })
   const composerRef = useRef<HTMLDivElement>(null)
   const composerStartTop = useRef<number | null>(null)
 
@@ -115,6 +102,8 @@ export function HomePage({
             <NeighborhoodBriefComposer
               locked={run.locked}
               onSubmit={run.start}
+              error={run.composerError}
+              onEdit={run.clearComposerError}
               // The composer caps itself at 770px; lift that once R1 starts so it fills the wrapper.
               className={run.movedUp ? 'max-w-none' : undefined}
             />
@@ -123,11 +112,18 @@ export function HomePage({
 
         <R1Stage
           phase={run.phase}
-          extraction={extraction}
-          plan={plan}
-          questions={clarificationQuestions}
+          extraction={run.extraction}
+          plan={run.plan}
+          questions={run.questions}
+          asked={run.asked}
           answers={run.answers}
           onSubmitAnswers={run.submitAnswers}
+          notice={run.notice}
+          waiting={run.waiting}
+          hasBrief={run.brief !== ''}
+          onRetry={run.retry}
+          onStartAgain={run.startAgain}
+          onReload={run.reload}
           leaving={run.resetting}
         />
         <p aria-live="polite" className="sr-only">

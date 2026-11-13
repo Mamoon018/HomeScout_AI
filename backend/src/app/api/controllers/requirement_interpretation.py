@@ -87,6 +87,7 @@ def _run_response(view: R1RunView, status_code: int) -> JSONResponse:
     body = RunResponse(
         run_id=view.run_id,
         status=view.status,
+        user_requirements_structured=view.user_requirements_structured,
         questions=view.questions,
         result=view.result,
         retryable=view.retryable,

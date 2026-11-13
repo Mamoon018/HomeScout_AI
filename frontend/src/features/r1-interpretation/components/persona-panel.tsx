@@ -45,12 +45,20 @@ export function PersonaPanel({ facts, rowDelay, delay }: PersonaPanelProps) {
         </span>
       </header>
 
+      {facts.length === 0 ? (
+        <p
+          className="r1-pull m-0 text-sm leading-6 text-muted-foreground"
+          style={{ '--d': `${rowDelay(0)}ms` } as CSSProperties}
+        >
+          You didn&apos;t say anything about yourself, so I&apos;m not assuming anything.
+        </p>
+      ) : null}
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {facts.map((fact, i) => {
           const accent = pills.get(i)
           return (
             <li
-              key={fact}
+              key={`${i}-${fact}`}
               className="r1-pull flex items-start gap-3 rounded-lg px-1 py-1.5"
               style={{ '--d': `${rowDelay(i)}ms` } as CSSProperties}
             >

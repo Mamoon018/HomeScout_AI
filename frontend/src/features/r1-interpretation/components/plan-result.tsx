@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 
-import { PlaceIcon } from '@/features/r1-interpretation/components/glyphs'
+import { TaxonomyIcon } from '@/features/r1-interpretation/components/glyphs'
 import type {
   CategoryMetricPlan,
   ExtractionOutput,
@@ -34,7 +34,9 @@ import {
   NULL_POLICY_COPY,
   splitQuestion,
   taxonomyLabel,
+  valueTypeLabel,
 } from '@/features/r1-interpretation/utils/present'
+import { taxonomyStyle } from '@/features/r1-interpretation/utils/taxonomyStyle'
 import { cn } from '@/lib/utils'
 
 import './deep-check.css'
@@ -51,6 +53,14 @@ type PlanResultProps = {
  * they will go. It is a plan, not data: nothing here has been looked up yet.
  */
 export function PlanResult({ plan, extraction }: PlanResultProps) {
+  if (plan.length === 0) {
+    return (
+      <p className="m-0 rounded-[22px] border border-Border-Subtle bg-Surface-Primary p-5 text-sm leading-6 text-muted-foreground shadow-(--fs-panel-shadow) backdrop-blur-xl">
+        There are no places to look for yet. Describe what you want nearby, such as a gym or a
+        park, and send your brief again.
+      </p>
+    )
+  }
   return (
     <ol aria-label="Categories" className="m-0 flex list-none flex-col gap-3 p-0">
       {plan.map((entry, i) => (
@@ -94,9 +104,10 @@ function CategorySheet({ entry, asked, index, defaultOpen }: CategorySheetProps)
         >
           <span
             aria-hidden="true"
-            className="grid size-11 shrink-0 place-items-center rounded-xl bg-[color-mix(in_srgb,var(--color-Brand-500)_12%,var(--color-Surface-Secondary))] text-Brand-500"
+            data-family={taxonomyStyle(entry.taxonomy_node).family}
+            className="cat-tile grid size-11 shrink-0 place-items-center rounded-xl"
           >
-            <PlaceIcon text={entry.taxonomy_node} className="size-5" />
+            <TaxonomyIcon node={entry.taxonomy_node} className="size-5" />
           </span>
           <span className="min-w-0 flex-1">
             <span className="block text-base leading-6 font-semibold text-(--tracker-heading)">
@@ -151,7 +162,7 @@ function CategorySheet({ entry, asked, index, defaultOpen }: CategorySheetProps)
 /** Three rungs: how far past the essentials R1 will go for this kind of place. */
 function DepthLadder({ depth, delay }: { depth: MetricDepth; delay: number }) {
   const rung = depthRung(depth)
-  const level = DEPTH_LEVELS[rung - 1]
+  const level = DEPTH_LEVELS[Math.max(rung, 1) - 1]
   return (
     <span className="flex flex-col items-end gap-1" title={level.hint}>
       <span aria-hidden="true" className="flex gap-1">
@@ -324,7 +335,7 @@ function Sources({ sources }: { sources: SourceStep[] }) {
 
 /** What the renter will eventually read for this check: a fixed set of answers or a typed value. */
 function AnswerShape({ metric }: { metric: SpecificMetric }) {
-  if (metric.value_type === 'enum' && metric.enum_values) {
+  if (metric.value_type === 'enum' && metric.enum_values.length > 0) {
     return (
       <>
         <span className="text-xs font-medium text-muted-foreground">Answer is one of</span>
@@ -344,7 +355,7 @@ function AnswerShape({ metric }: { metric: SpecificMetric }) {
   const unit = metric.unit ? ` in ${metric.unit}` : ''
   return (
     <p className="m-0 text-xs leading-5 font-medium text-muted-foreground">
-      Answer is a {metric.value_type}
+      Answer is {valueTypeLabel(metric.value_type)}
       {unit}
     </p>
   )
