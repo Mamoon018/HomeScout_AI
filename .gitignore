@@ -4,6 +4,7 @@
 node_modules
 dist
 backend/certs/
+.playwright-mcp/
 
 # Python bytecode (regenerated automatically on import)
 __pycache__/

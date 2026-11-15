@@ -5,6 +5,7 @@ import { clearAuthUser } from '@/features/auth/utils/authUserStore'
 import { welcomeMessageFromResponse } from '@/features/auth/utils/welcomeMessage'
 import { HomePage } from '@/pages/HomePage'
 import { LoginPage } from '@/pages/LoginPage'
+import { ProximityPage } from '@/pages/ProximityPage'
 import { SignupPage } from '@/pages/SignupPage'
 
 function HomeRoute() {
@@ -40,6 +41,15 @@ function HomeRoute() {
   return <HomePage message={message} onUnauthenticated={onUnauthenticated} />
 }
 
+function ProximityRoute() {
+  const navigate = useNavigate()
+  const onUnauthenticated = useCallback(() => {
+    clearAuthUser()
+    navigate('/auth/login', { replace: true })
+  }, [navigate])
+  return <ProximityPage onUnauthenticated={onUnauthenticated} />
+}
+
 /** Application route definitions. */
 export function AppRoutes() {
   return (
@@ -49,6 +59,7 @@ export function AppRoutes() {
         <Route path="/auth/signup" element={<SignupPage />} />
         <Route path="/signup" element={<Navigate to="/auth/signup" replace />} />
         <Route path="/home" element={<HomeRoute />} />
+        <Route path="/proximity_info" element={<ProximityRoute />} />
         <Route path="/" element={<Navigate to="/auth/login" replace />} />
       </Routes>
     </BrowserRouter>

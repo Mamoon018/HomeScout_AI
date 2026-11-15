@@ -10,6 +10,15 @@
       ],
       "port": 5173,
       "url": "https://localhost:5173"
+    },
+    {
+      "name": "backend-dev",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd backend && .venv\\Scripts\\uvicorn.exe src.app.main:app --port 8000"
+      ],
+      "port": 8000
     }
   ]
 }

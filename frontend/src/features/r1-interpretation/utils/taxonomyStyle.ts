@@ -4,6 +4,7 @@ import {
   Building2Icon,
   BriefcaseIcon,
   CarIcon,
+  CoffeeIcon,
   ChurchIcon,
   DumbbellIcon,
   GraduationCapIcon,
@@ -68,6 +69,8 @@ const NODE_ICON: Record<string, LucideIcon> = {
   city_park: TreesIcon,
   playground: TreesIcon,
   swimming_pool: WavesIcon,
+  cafe: CoffeeIcon,
+  coffee_shop: CoffeeIcon,
 }
 
 const GROUP_OF_NODE: ReadonlyMap<string, TaxonomyGroup> = new Map(

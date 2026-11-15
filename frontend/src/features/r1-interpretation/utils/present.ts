@@ -47,7 +47,13 @@ export function pick(rules: IconRule[], text: string, fallback: LucideIcon): Luc
 }
 
 /** `transit_station` → `Transit station`. */
+/** Nodes whose plain-English name is not their snake_case id. */
+const NODE_LABELS: Record<string, string> = { cafe: 'Café', cat_cafe: 'Cat café', dog_cafe: 'Dog café' }
+
 export function taxonomyLabel(node: string): string {
+  if (NODE_LABELS[node]) {
+    return NODE_LABELS[node]
+  }
   const spaced = node.replaceAll('_', ' ').trim()
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
