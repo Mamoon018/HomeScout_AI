@@ -17,7 +17,7 @@ const RUNS_PATH = '/api/requirement-interpretation/runs'
  * Start, answers and retry each run several LLM steps inside one request, so they get far
  * longer than the client default. Reading a run is a plain database read and keeps the default.
  */
-export const R1_WORK_TIMEOUT_MS = 45_000
+export const R1_WORK_TIMEOUT_MS = 120_000
 
 /** The body of any non-2xx run response. FastAPI's own 422 uses `detail` instead of `error`. */
 type RunErrorBody = ApiErrorBody & {

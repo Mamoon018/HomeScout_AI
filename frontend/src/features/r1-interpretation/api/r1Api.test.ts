@@ -107,7 +107,7 @@ describe('run endpoints', () => {
     })
   })
 
-  it('give start 45 seconds and reading a run the 15 second default', async () => {
+  it('give start 120 seconds and reading a run the 15 second default', async () => {
     vi.useFakeTimers()
     try {
       const aborted: string[] = []
@@ -128,7 +128,7 @@ describe('run endpoints', () => {
       await vi.advanceTimersByTimeAsync(16_000)
       expect(aborted).toEqual([`/api/requirement-interpretation/runs/${RUN_ID}`])
       expect(await read).toEqual({ ok: false, error: { kind: 'timeout' } })
-      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.advanceTimersByTimeAsync(105_000)
       expect(aborted).toHaveLength(2)
       expect(await start).toEqual({ ok: false, error: { kind: 'timeout' } })
     } finally {
