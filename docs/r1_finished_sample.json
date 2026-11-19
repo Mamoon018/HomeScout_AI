@@ -1,0 +1,744 @@
+{
+  "run_id": "7c3e9a12-4b8f-4d21-9e6a-2f5b8c1d0a47",
+  "status": "finished",
+  "questions": null,
+  "result": [
+    {
+      "category_id": 0,
+      "taxonomy_node": "child_care_agency",
+      "depth": "specific_attributes",
+      "predefined_metrics": [
+        {
+          "label": "name",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.displayName"
+          }
+        },
+        {
+          "label": "category",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.primaryType"
+          }
+        },
+        {
+          "label": "address",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.formattedAddress"
+          }
+        },
+        {
+          "label": "website",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.websiteUri"
+          }
+        },
+        {
+          "label": "place_id",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.id"
+          }
+        },
+        {
+          "label": "coordinates",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.location"
+          }
+        },
+        {
+          "label": "travel distance per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "travel duration per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.duration via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "transit_details",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+          }
+        },
+        {
+          "label": "opening hours",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.regularOpeningHours"
+          }
+        },
+        {
+          "label": "contact phone",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.internationalPhoneNumber"
+          }
+        },
+        {
+          "label": "rating",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.rating"
+          }
+        },
+        {
+          "label": "review volume",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.userRatingCount"
+          }
+        },
+        {
+          "label": "price level",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.priceLevel"
+          }
+        }
+      ],
+      "specific_metrics": [
+        {
+          "label": "Has places for a four-year-old",
+          "question": "The customer needs a daycare for a four-year-old starting in the autumn: does it take children aged four?",
+          "value_type": "boolean",
+          "unit": null,
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "age range and eligible ages for enrolment at the daycare",
+            "scrape_target": "age range or enrolment page on the official site",
+            "review_target": null
+          },
+          "verification": "the age range on the official site includes four-year-olds",
+          "null_policy": "unknown",
+          "band": "specific_attributes"
+        },
+        {
+          "label": "Monthly fee",
+          "question": "The customer is comparing daycares: what is the monthly fee for a full-time place?",
+          "value_type": "number_with_unit",
+          "unit": "EUR per month",
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "current monthly fee for a full-time place",
+            "scrape_target": "fees or price list page on the official site",
+            "review_target": null
+          },
+          "verification": "a fee for a full-time place is stated on the official site",
+          "null_policy": "null",
+          "band": "operating_details"
+        },
+        {
+          "label": "Staff warmth with children",
+          "question": "The customer cares about a daycare they would be happy with: do parents describe the staff as warm and attentive?",
+          "value_type": "enum",
+          "unit": null,
+          "enum_values": [
+            "poor",
+            "mixed",
+            "good"
+          ],
+          "evidence_class": "experiential",
+          "resolution_source": {
+            "web_target": "how parents describe the staff's care and attentiveness",
+            "scrape_target": null,
+            "review_target": "mentions of staff, carers or teachers in parent reviews"
+          },
+          "verification": "dominant sentiment across at least 5 reviews mentioning staff",
+          "null_policy": "unknown",
+          "band": "specific_attributes"
+        }
+      ]
+    },
+    {
+      "category_id": 1,
+      "taxonomy_node": "park",
+      "depth": "operating_details",
+      "predefined_metrics": [
+        {
+          "label": "name",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.displayName"
+          }
+        },
+        {
+          "label": "category",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.primaryType"
+          }
+        },
+        {
+          "label": "address",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.formattedAddress"
+          }
+        },
+        {
+          "label": "website",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.websiteUri"
+          }
+        },
+        {
+          "label": "place_id",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.id"
+          }
+        },
+        {
+          "label": "coordinates",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.location"
+          }
+        },
+        {
+          "label": "travel distance per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "travel duration per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.duration via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "transit_details",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+          }
+        },
+        {
+          "label": "opening hours",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.regularOpeningHours"
+          }
+        },
+        {
+          "label": "contact phone",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.internationalPhoneNumber"
+          }
+        },
+        {
+          "label": "rating",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.rating"
+          }
+        },
+        {
+          "label": "review volume",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.userRatingCount"
+          }
+        },
+        {
+          "label": "price level",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.priceLevel"
+          }
+        }
+      ],
+      "specific_metrics": [
+        {
+          "label": "Length of the main loop",
+          "question": "The customer runs early in the morning and wants a loop: how long is the longest continuous loop path?",
+          "value_type": "number_with_unit",
+          "unit": "km",
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "length of the longest continuous loop path in the park",
+            "scrape_target": "park map or trail description on the official site",
+            "review_target": null
+          },
+          "verification": "a loop length is stated on the park's official page or map",
+          "null_policy": "null",
+          "band": "operating_details"
+        },
+        {
+          "label": "Open at dawn",
+          "question": "The customer runs early in the morning: is the park open to the public before 6:30am?",
+          "value_type": "boolean",
+          "unit": null,
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "opening and closing times of the park",
+            "scrape_target": "opening hours on the official site",
+            "review_target": null
+          },
+          "verification": "opening time is stated on the official site",
+          "null_policy": "unknown",
+          "band": "operating_details"
+        }
+      ]
+    },
+    {
+      "category_id": 2,
+      "taxonomy_node": "gym",
+      "depth": "specific_attributes",
+      "predefined_metrics": [
+        {
+          "label": "name",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.displayName"
+          }
+        },
+        {
+          "label": "category",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.primaryType"
+          }
+        },
+        {
+          "label": "address",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.formattedAddress"
+          }
+        },
+        {
+          "label": "website",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.websiteUri"
+          }
+        },
+        {
+          "label": "place_id",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.id"
+          }
+        },
+        {
+          "label": "coordinates",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.location"
+          }
+        },
+        {
+          "label": "travel distance per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "travel duration per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.duration via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "transit_details",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+          }
+        },
+        {
+          "label": "opening hours",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.regularOpeningHours"
+          }
+        },
+        {
+          "label": "contact phone",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.internationalPhoneNumber"
+          }
+        },
+        {
+          "label": "rating",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.rating"
+          }
+        },
+        {
+          "label": "review volume",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.userRatingCount"
+          }
+        },
+        {
+          "label": "price level",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.priceLevel"
+          }
+        }
+      ],
+      "specific_metrics": [
+        {
+          "label": "Opens before 7am",
+          "question": "The customer needs a gym open before seven: does it open before 7:00am on weekdays?",
+          "value_type": "boolean",
+          "unit": null,
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "weekday opening hours of the gym",
+            "scrape_target": "opening hours on the official site",
+            "review_target": null
+          },
+          "verification": "weekday opening time is stated on the official site",
+          "null_policy": "unknown",
+          "band": "operating_details"
+        },
+        {
+          "label": "Free weights area",
+          "question": "The customer clarified they want a gym with weights and cardio machines: does it have a free-weights area?",
+          "value_type": "boolean",
+          "unit": null,
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "free weights and equipment available at the gym",
+            "scrape_target": "equipment list on the official site",
+            "review_target": null
+          },
+          "verification": "a free-weights area is listed on the official site",
+          "null_policy": "unknown",
+          "band": "specific_attributes"
+        },
+        {
+          "label": "Crowding at peak hours",
+          "question": "The customer wants something decent without fuss: do members report it is crowded in the evening?",
+          "value_type": "enum",
+          "unit": null,
+          "enum_values": [
+            "rarely",
+            "sometimes",
+            "often"
+          ],
+          "evidence_class": "experiential",
+          "resolution_source": {
+            "web_target": "reports of crowding at peak times",
+            "scrape_target": null,
+            "review_target": "mentions of crowding or queues for equipment in reviews"
+          },
+          "verification": "dominant pattern across at least 5 reviews mentioning crowding",
+          "null_policy": "unknown",
+          "band": "specific_attributes"
+        }
+      ]
+    },
+    {
+      "category_id": 3,
+      "taxonomy_node": "primary_school",
+      "depth": "operating_details",
+      "predefined_metrics": [
+        {
+          "label": "name",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.displayName"
+          }
+        },
+        {
+          "label": "category",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.primaryType"
+          }
+        },
+        {
+          "label": "address",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.formattedAddress"
+          }
+        },
+        {
+          "label": "website",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.websiteUri"
+          }
+        },
+        {
+          "label": "place_id",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.id"
+          }
+        },
+        {
+          "label": "coordinates",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.location"
+          }
+        },
+        {
+          "label": "travel distance per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "travel duration per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.duration via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "transit_details",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+          }
+        },
+        {
+          "label": "opening hours",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.regularOpeningHours"
+          }
+        },
+        {
+          "label": "contact phone",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.internationalPhoneNumber"
+          }
+        },
+        {
+          "label": "rating",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.rating"
+          }
+        },
+        {
+          "label": "review volume",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.userRatingCount"
+          }
+        },
+        {
+          "label": "price level",
+          "band": "operating_details",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.priceLevel"
+          }
+        }
+      ],
+      "specific_metrics": [
+        {
+          "label": "Parent satisfaction",
+          "question": "The customer needs a primary school they would be happy with for a nine-year-old: how satisfied are parents with it?",
+          "value_type": "enum",
+          "unit": null,
+          "enum_values": [
+            "low",
+            "mixed",
+            "high"
+          ],
+          "evidence_class": "experiential",
+          "resolution_source": {
+            "web_target": "how parents describe their satisfaction with the school",
+            "scrape_target": null,
+            "review_target": "mentions of teaching, care and school life in parent reviews"
+          },
+          "verification": "dominant sentiment across at least 5 reviews",
+          "null_policy": "unknown",
+          "band": "operating_details"
+        },
+        {
+          "label": "After-school care offered",
+          "question": "The customer works hybrid and may need cover: does the school offer after-school care?",
+          "value_type": "boolean",
+          "unit": null,
+          "enum_values": [],
+          "evidence_class": "factual",
+          "resolution_source": {
+            "web_target": "after-school care or Hort provision at the school",
+            "scrape_target": "after-school care page on the official site",
+            "review_target": null
+          },
+          "verification": "after-school care is described on the official site",
+          "null_policy": "unknown",
+          "band": "operating_details"
+        }
+      ]
+    },
+    {
+      "category_id": 4,
+      "taxonomy_node": "cafe",
+      "depth": "basic_profile",
+      "predefined_metrics": [
+        {
+          "label": "name",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.displayName"
+          }
+        },
+        {
+          "label": "category",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.primaryType"
+          }
+        },
+        {
+          "label": "address",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.formattedAddress"
+          }
+        },
+        {
+          "label": "website",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.websiteUri"
+          }
+        },
+        {
+          "label": "place_id",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.id"
+          }
+        },
+        {
+          "label": "coordinates",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "places.location"
+          }
+        },
+        {
+          "label": "travel distance per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.distanceMeters via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "travel duration per mode (walk, drive, cycle)",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "routingSummaries.legs.duration via searchNearby for walk/drive/cycle (one call per mode)"
+          }
+        },
+        {
+          "label": "transit_details",
+          "band": "basic_profile",
+          "resolution_source": {
+            "tool": "google_maps",
+            "target": "Routes API, travelMode TRANSIT (bus, subway, train allowed in the same call)"
+          }
+        }
+      ],
+      "specific_metrics": []
+    }
+  ],
+  "retryable": null
+}

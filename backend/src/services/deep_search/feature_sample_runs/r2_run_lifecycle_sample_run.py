@@ -317,7 +317,7 @@ async def run_sample() -> bool:
             print(line)
 
         # Wait for the background execution, as the page would by polling.
-        tasks = [task for task, _ in coordinator.tasks.values()]
+        tasks = [live.task for live in coordinator.tasks.values()]
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
 

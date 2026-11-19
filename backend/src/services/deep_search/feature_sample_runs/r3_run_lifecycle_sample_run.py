@@ -517,6 +517,7 @@ async def run_sample() -> bool:
             value = entry["value"]
             rec = seeded.predefined_records[entry["category_id"]][entry["place_id"]]
             print(f"{rec.name!r}: outcome={value['outcome']} resolution_calls={value['resolution_calls']}")
+            print(f"  website: url={entry['website']['url']!r} origin={entry['website']['origin']}")
             for label, kept in value["kept"].items():
                 print(f"  kept {label}: final_value={kept['final_value']!r} basis={kept['basis']} "
                       f"verification_met={kept['verification_met']}")

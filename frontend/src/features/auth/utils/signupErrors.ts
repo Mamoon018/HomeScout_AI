@@ -51,6 +51,9 @@ const CONNECTION_CODES = new Set(['request_timeout'])
 
 const CONNECTION_HTTP_STATUSES = new Set([0, 502, 503, 504])
 
+/** Must match the Supabase project's minimum password length (and backend/supabase/config.toml). */
+export const MIN_PASSWORD_LENGTH = 10
+
 /** Parses age from form input into a positive integer for database int8 storage. */
 export function parseSignupAge(value: string): number | null {
   const trimmed = value.trim()
@@ -86,7 +89,7 @@ export function validateSignupForm(
     return 'validation'
   }
 
-  if (formData.password.length < 8) {
+  if (formData.password.length < MIN_PASSWORD_LENGTH) {
     return 'validation'
   }
 

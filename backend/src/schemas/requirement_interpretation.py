@@ -6,6 +6,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     CategoryMetricPlan,
     ClarificationAnswer,
     ClarificationQuestion,
+    ExtractedRequirements,
 )
 
 
@@ -25,10 +26,12 @@ class ClarificationAnswersRequest(BaseModel):
 
 class RunResponse(BaseModel):
     """The run as the page sees it. `questions` while paused, `result` once finished,
-    `retryable` when failed (Retry when true, Start again when false)."""
+    `retryable` when failed (Retry when true, Start again when false).
+    `user_requirements_structured` is the extraction output, present once that step is saved."""
 
     run_id: str
     status: Literal["running", "needs_answers", "finished", "failed"]
+    user_requirements_structured: ExtractedRequirements | None = None
     questions: list[ClarificationQuestion] | None = None
     result: list[CategoryMetricPlan] | None = None
     retryable: bool | None = None

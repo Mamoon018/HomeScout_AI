@@ -130,6 +130,21 @@ class _Execution:
     path: str  # "start" or "retry"
 
 
+@dataclass(frozen=True)
+class _LiveRun:
+    """One live task in this process: kept referenced until it ends, and read by status.
+
+    It carries the run's owner (checked before any database read) and the run's parent and search
+    area, so a live reply names them without a row read.
+    """
+
+    task: asyncio.Task
+    user_id: str
+    r1_run_id: str
+    origin: GeoPoint
+    radius_km: float
+
+
 class R2RunCoordinator:
     """Ties R2's step methods to the run tables: one background task per live execution."""
 
@@ -154,12 +169,12 @@ class R2RunCoordinator:
         self._global_places_semaphore = global_places_semaphore
         self._llm_caller = llm_caller
         self._stale_after = timedelta(seconds=stale_after_seconds)
-        # run_id -> (task, user_id). Keeps each task referenced until it ends, and lets the status
-        # read check ownership before any database read. Exposed as `app.state.r2_tasks`.
-        self._tasks: dict[str, tuple[asyncio.Task, str]] = {}
+        # run_id -> live run. Keeps each task referenced until it ends, and lets the status read
+        # check ownership before any database read. Exposed as `app.state.r2_tasks`.
+        self._tasks: dict[str, _LiveRun] = {}
 
     @property
-    def tasks(self) -> dict[str, tuple[asyncio.Task, str]]:
+    def tasks(self) -> dict[str, _LiveRun]:
         """The live task set (the same object the app keeps as `app.state.r2_tasks`)."""
         return self._tasks
 
@@ -206,8 +221,14 @@ class R2RunCoordinator:
                 schema_version=R2_STATE_SCHEMA_VERSION,
             )
             execution = _Execution(run_id, user_id, attempts=0, claimed_step=None, path="start")
-            self._schedule(execution, state, resume_after=None)
-            return R2RunView(run_id=run_id, status="running")
+            self._schedule(execution, state, resume_after=None, r1_run_id=r1_run_id)
+            return R2RunView(
+                run_id=run_id,
+                status="running",
+                r1_run_id=r1_run_id,
+                origin=origin,
+                radius_km=radius_km,
+            )
         finally:
             run_id_var.reset(token)
 
@@ -243,9 +264,19 @@ class R2RunCoordinator:
                 reclaimed_stale=reclaimed,
             )
             execution = _Execution(run_id, user_id, attempts, claimed_step, path="retry")
-            self._schedule(execution, record.state, resume_after=record.completed_step)
+            self._schedule(
+                execution,
+                record.state,
+                resume_after=record.completed_step,
+                r1_run_id=record.r1_run_id,
+            )
             return R2RunView(
-                run_id=run_id, status="running", completed_step=record.completed_step
+                run_id=run_id,
+                status="running",
+                completed_step=record.completed_step,
+                r1_run_id=record.r1_run_id,
+                origin=record.state.origin,
+                radius_km=record.state.radius_km,
             )
         finally:
             run_id_var.reset(token)
@@ -256,8 +287,14 @@ class R2RunCoordinator:
         try:
             entry = self._tasks.get(run_id)
             if entry is not None:
-                if entry[1] == user_id:
-                    return R2RunView(run_id=run_id, status="running")
+                if entry.user_id == user_id:
+                    return R2RunView(
+                        run_id=run_id,
+                        status="running",
+                        r1_run_id=entry.r1_run_id,
+                        origin=entry.origin,
+                        radius_km=entry.radius_km,
+                    )
                 # Same answer the row read would give: another user's run does not exist here.
                 self._log(logging.INFO, "r2_run.rejected", run_id, user_id, reason="not_found")
                 raise RunNotFoundError(run_id)
@@ -284,7 +321,7 @@ class R2RunCoordinator:
 
     async def shutdown(self, timeout_seconds: float = SHUTDOWN_TIMEOUT_SECONDS) -> None:
         """Cancel every live task and wait for each to save itself as failed."""
-        tasks = [task for task, _ in self._tasks.values()]
+        tasks = [live.task for live in self._tasks.values()]
         if not tasks:
             return
         for task in tasks:
@@ -297,7 +334,7 @@ class R2RunCoordinator:
                         "event": "r2_run.shutdown_timeout",
                         "timestamp": _now().isoformat(),
                         "pending_run_ids": [
-                            run_id for run_id, (task, _) in self._tasks.items() if task in pending
+                            run_id for run_id, live in self._tasks.items() if live.task in pending
                         ],
                         "timeout_seconds": timeout_seconds,
                     }
@@ -307,19 +344,27 @@ class R2RunCoordinator:
     # ---- background execution ----------------------------------------------------------------
 
     def _schedule(
-        self, execution: _Execution, state: AmenitySearchState, *, resume_after: str | None
+        self,
+        execution: _Execution,
+        state: AmenitySearchState,
+        *,
+        resume_after: str | None,
+        r1_run_id: str,
     ) -> None:
-        """Start the execution as a task. It copies `run_id_var`, so its log lines carry the run."""
+        """Start the execution as a task. It copies `run_id_var`, so its log lines carry the run.
+        The live entry keeps the R1 parent and the search area for status reads while it runs."""
         task = asyncio.create_task(
             self._execute(execution, state, resume_after), name=f"r2_run:{execution.run_id}"
         )
-        self._tasks[execution.run_id] = (task, execution.user_id)
+        self._tasks[execution.run_id] = _LiveRun(
+            task, execution.user_id, r1_run_id, state.origin, state.radius_km
+        )
         task.add_done_callback(functools.partial(self._on_task_done, execution))
 
     def _on_task_done(self, execution: _Execution, task: asyncio.Task) -> None:
         """Remove the finished task (only if it is still the current one for the run)."""
         current = self._tasks.get(execution.run_id)
-        if current is not None and current[0] is task:
+        if current is not None and current.task is task:
             del self._tasks[execution.run_id]
         if task.cancelled():
             return
@@ -685,7 +730,10 @@ class R2RunCoordinator:
         """What the page shows for a stored run, by status."""
         if record.status == "running":
             return R2RunView(
-                run_id=record.run_id, status="running", completed_step=record.completed_step
+                run_id=record.run_id,
+                status="running",
+                completed_step=record.completed_step,
+                **R2RunCoordinator._chain_fields(record),
             )
         if record.status == "finished":
             records = (
@@ -698,13 +746,24 @@ class R2RunCoordinator:
                 status="finished",
                 completed_step=record.completed_step,
                 result=records,
+                **R2RunCoordinator._chain_fields(record),
             )
         return R2RunView(
             run_id=record.run_id,
             status="failed",
             completed_step=record.completed_step,
             retryable=record.retryable,
+            **R2RunCoordinator._chain_fields(record),
         )
+
+    @staticmethod
+    def _chain_fields(record: R2RunRecord) -> dict[str, Any]:
+        """The parent and search area every stored view carries (from the row and its state)."""
+        return {
+            "r1_run_id": record.r1_run_id,
+            "origin": record.state.origin,
+            "radius_km": record.state.radius_km,
+        }
 
     def _conflict(
         self,
@@ -737,6 +796,7 @@ class R2RunCoordinator:
             "r2_run.loaded",
             record.run_id,
             record.user_id,
+            r1_run_id=record.r1_run_id,
             status=record.status,
             attempts=record.attempts,
             completed_step=record.completed_step,

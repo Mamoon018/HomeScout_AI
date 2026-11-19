@@ -12,7 +12,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.exceptions.deep_search import RunConflictError, RunNotFoundError, RunStoreError
-from src.schemas.amenity_search import AmenitySearchRunResponse, StartAmenitySearchRequest
+from src.schemas.amenity_search import (
+    AmenitySearchRunResponse,
+    OriginRequest,
+    StartAmenitySearchRequest,
+)
 from src.schemas.authenticated_user import AuthenticatedUser
 from src.schemas.requirement_interpretation import RunErrorResponse
 from src.services.deep_search.feature_schemas.schemas import GeoPoint, R2RunView
@@ -69,6 +73,13 @@ async def get_run(
 def _run_response(view: R2RunView, status_code: int) -> JSONResponse:
     body = AmenitySearchRunResponse(
         run_id=view.run_id,
+        r1_run_id=view.r1_run_id,
+        origin=(
+            OriginRequest(latitude=view.origin.latitude, longitude=view.origin.longitude)
+            if view.origin is not None
+            else None
+        ),
+        radius_km=view.radius_km,
         status=view.status,
         completed_step=view.completed_step,
         result=view.result,

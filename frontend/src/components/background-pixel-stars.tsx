@@ -1,21 +1,44 @@
 import { memo, useCallback, useEffect, useRef } from 'react'
 
-// 16-bit color palette (reduced color options)
-const STAR_COLORS = [
-  '#FFFFFF',
-  '#FFFFAA',
-  '#AAAAFF',
-  '#FFAAAA',
-  '#AAFFAA',
-  '#FFAAFF',
-  '#AAFFFF',
-] as const
+type StarTone = 'default' | 'olive'
+
+type StarPalette = {
+  colors: readonly string[]
+  /** Square sizes in px; each star picks one. */
+  sizes: readonly number[]
+  /** Base opacity range [min, max]. */
+  opacity: readonly [number, number]
+  /** Shooting star trail colour as "r, g, b". */
+  trailRgb: string
+  headColor: string
+}
+
+const PALETTES: Record<StarTone, StarPalette> = {
+  // 16-bit color palette (reduced color options)
+  default: {
+    colors: ['#FFFFFF', '#FFFFAA', '#AAAAFF', '#FFAAAA', '#AAFFAA', '#FFAAFF', '#AAFFFF'],
+    sizes: [5],
+    opacity: [0.5, 1],
+    trailRgb: '180, 242, 255',
+    headColor: '#ffffff',
+  },
+  // Frosted Sage: faint deep-olive and amber specks that read on the light page
+  olive: {
+    colors: ['#5E6B38', '#4A5A2A', '#9A6B00', '#8A9A5C', '#B35A12', '#6B7458'],
+    sizes: [3, 4],
+    opacity: [0.14, 0.4],
+    trailRgb: '94, 107, 56',
+    headColor: '#E08A00',
+  },
+}
+
+/** Grid the stars snap to (the largest default size). */
+const gridSize = 5
 
 const starDensity = 0.00004
 const twinkleProbability = 0.7
 const minTwinkleSpeed = 2
 const maxTwinkleSpeed = 4
-const pixelSize = 5
 const starRegenerationInterval = 5000
 const percentToRegenerate = 0.15
 const shootingStarPixelSize = 2
@@ -24,6 +47,7 @@ const targetFps = 16
 type BackgroundStar = {
   x: number
   y: number
+  size: number
   color: string
   baseOpacity: number
   currentOpacity: number
@@ -56,8 +80,34 @@ type StartPoint = {
   angle: number
 }
 
+function pick<T>(items: readonly T[]): T {
+  return items[Math.floor(Math.random() * items.length)]!
+}
+
+function makeStar(canvas: HTMLCanvasElement, palette: StarPalette): BackgroundStar {
+  const [minOpacity, maxOpacity] = palette.opacity
+  const baseOpacity = minOpacity + Math.random() * (maxOpacity - minOpacity)
+  return {
+    x: Math.floor(Math.random() * (canvas.width / gridSize)) * gridSize,
+    y: Math.floor(Math.random() * (canvas.height / gridSize)) * gridSize,
+    size: pick(palette.sizes),
+    color: pick(palette.colors),
+    baseOpacity,
+    currentOpacity: baseOpacity,
+    twinkle: Math.random() < twinkleProbability,
+    twinkleSpeed: minTwinkleSpeed + Math.random() * (maxTwinkleSpeed - minTwinkleSpeed),
+    twinkleDirection: -1,
+    twinkleTimer: 0,
+  }
+}
+
 /** Full-viewport retro pixel starfield canvas for decorative page backgrounds. */
-export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
+export const BackgroundPixelStars = memo(function BackgroundPixelStars({
+  tone = 'default',
+}: {
+  tone?: StarTone
+}) {
+  const palette = PALETTES[tone]
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const shootingStarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -98,25 +148,9 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
     const numStars = Math.floor(area * starDensity)
 
     for (let i = 0; i < numStars; i++) {
-      const shouldTwinkle = Math.random() < twinkleProbability
-      const gridX = Math.floor(Math.random() * (canvas.width / pixelSize)) * pixelSize
-      const gridY = Math.floor(Math.random() * (canvas.height / pixelSize)) * pixelSize
-      const colorIndex = Math.floor(Math.random() * STAR_COLORS.length)
-      const baseOpacity = Math.random() * 0.5 + 0.5
-
-      backgroundStarsRef.current.push({
-        x: gridX,
-        y: gridY,
-        color: STAR_COLORS[colorIndex]!,
-        baseOpacity,
-        currentOpacity: baseOpacity,
-        twinkle: shouldTwinkle,
-        twinkleSpeed: minTwinkleSpeed + Math.random() * (maxTwinkleSpeed - minTwinkleSpeed),
-        twinkleDirection: -1,
-        twinkleTimer: 0,
-      })
+      backgroundStarsRef.current.push(makeStar(canvas, palette))
     }
-  }, [])
+  }, [palette])
 
   const regenerateBackgroundStars = useCallback((): void => {
     if (!canvasRef.current || backgroundStarsRef.current.length === 0) return
@@ -129,25 +163,9 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
 
     for (let i = 0; i < numToRegenerate; i++) {
       const randomIndex = Math.floor(Math.random() * backgroundStarsRef.current.length)
-      const shouldTwinkle = Math.random() < twinkleProbability
-      const gridX = Math.floor(Math.random() * (canvas.width / pixelSize)) * pixelSize
-      const gridY = Math.floor(Math.random() * (canvas.height / pixelSize)) * pixelSize
-      const colorIndex = Math.floor(Math.random() * STAR_COLORS.length)
-      const baseOpacity = Math.random() * 0.5 + 0.5
-
-      backgroundStarsRef.current[randomIndex] = {
-        x: gridX,
-        y: gridY,
-        color: STAR_COLORS[colorIndex]!,
-        baseOpacity,
-        currentOpacity: baseOpacity,
-        twinkle: shouldTwinkle,
-        twinkleSpeed: minTwinkleSpeed + Math.random() * (maxTwinkleSpeed - minTwinkleSpeed),
-        twinkleDirection: -1,
-        twinkleTimer: 0,
-      }
+      backgroundStarsRef.current[randomIndex] = makeStar(canvas, palette)
     }
-  }, [])
+  }, [palette])
 
   const animateCanvas = useCallback(
     (timestamp: number): void => {
@@ -176,7 +194,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
       backgroundStarsRef.current.forEach((star) => {
         ctx.fillStyle = star.color
         ctx.globalAlpha = star.currentOpacity
-        ctx.fillRect(star.x, star.y, pixelSize, pixelSize)
+        ctx.fillRect(star.x, star.y, star.size, star.size)
 
         if (star.twinkle) {
           star.twinkleTimer += 1 / targetFps
@@ -240,7 +258,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
             ctx.rotate((star.angle * Math.PI) / 180)
             ctx.translate(-point.x, -point.y)
 
-            ctx.fillStyle = `rgba(180, 242, 255, ${point.opacity})`
+            ctx.fillStyle = `rgba(${palette.trailRgb}, ${point.opacity})`
             ctx.fillRect(point.x, point.y, shootingStarPixelSize, shootingStarPixelSize)
 
             ctx.restore()
@@ -254,7 +272,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
           ctx.rotate((star.angle * Math.PI) / 180)
           ctx.translate(-star.x, -star.y)
 
-          ctx.fillStyle = '#ffffff'
+          ctx.fillStyle = palette.headColor
           ctx.globalAlpha = 1.0
 
           for (let y = 0; y < starHeight; y++) {
@@ -276,7 +294,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
 
       animationFrameRef.current = requestAnimationFrame(animateCanvas)
     },
-    [frameInterval],
+    [frameInterval, palette],
   )
 
   useEffect(() => {
@@ -294,7 +312,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
         backgroundStarsRef.current.forEach((star) => {
           ctx.fillStyle = star.color
           ctx.globalAlpha = star.currentOpacity
-          ctx.fillRect(star.x, star.y, pixelSize, pixelSize)
+          ctx.fillRect(star.x, star.y, star.size, star.size)
         })
       }
     }
@@ -332,7 +350,7 @@ export const BackgroundPixelStars = memo(function BackgroundPixelStars() {
         backgroundStarsRef.current.forEach((star) => {
           ctx.fillStyle = star.color
           ctx.globalAlpha = star.currentOpacity
-          ctx.fillRect(star.x, star.y, pixelSize, pixelSize)
+          ctx.fillRect(star.x, star.y, star.size, star.size)
         })
       }
     }

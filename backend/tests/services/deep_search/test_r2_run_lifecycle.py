@@ -468,7 +468,7 @@ def _setup(
 async def _drain(coordinator: R2RunCoordinator) -> None:
     """Wait until every background task has ended and been removed from the task set."""
     for _ in range(100):
-        tasks = [task for task, _ in coordinator.tasks.values()]
+        tasks = [live.task for live in coordinator.tasks.values()]
         if not tasks:
             return
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -968,8 +968,11 @@ async def test_status_answers_from_memory_while_the_task_is_live() -> None:
     coordinator, _, _, store = _setup(places=places)
     view = await coordinator.start_run(USER_A, R1_RUN, ORIGIN, 2.0)
 
+    assert (view.r1_run_id, view.origin, view.radius_km) == (R1_RUN, ORIGIN, 2.0)
     polled = await coordinator.get_run(USER_A, view.run_id)
     assert polled.status == "running" and store.reads == 0
+    # The live reply names the parent and search area without a row read.
+    assert (polled.r1_run_id, polled.origin, polled.radius_km) == (R1_RUN, ORIGIN, 2.0)
 
     places.gate.set()
     await _drain(coordinator)
@@ -977,6 +980,7 @@ async def test_status_answers_from_memory_while_the_task_is_live() -> None:
     assert finished.status == "finished" and store.reads == 1
     assert set(finished.result) == {0, 1}
     assert finished.completed_step == "discovery"
+    assert (finished.r1_run_id, finished.origin, finished.radius_km) == (R1_RUN, ORIGIN, 2.0)
 
 
 async def test_places_calls_respect_the_run_limit_and_the_global_cap() -> None:
@@ -1064,12 +1068,20 @@ async def test_http_start_poll_finish_and_status_codes(http_setup) -> None:
         started = await client.post(_BASE, json=_start_body(radius_km=1.5))
         assert started.status_code == 202
         run_id = started.json()["run_id"]
-        assert started.json() == {"run_id": run_id, "status": "running"}
+        # Every body names the R1 run and the search area, so a page follows the chain by id.
+        assert started.json() == {
+            "run_id": run_id,
+            "status": "running",
+            "r1_run_id": R1_RUN,
+            "origin": {"latitude": 48.2082, "longitude": 16.3738},
+            "radius_km": 1.5,
+        }
 
         await _drain(coordinator)
         status_view = await client.get(f"{_BASE}/{run_id}")
         body = status_view.json()
         assert status_view.status_code == 200 and body["status"] == "finished"
+        assert (body["r1_run_id"], body["origin"], body["radius_km"]) == (R1_RUN, {"latitude": 48.2082, "longitude": 16.3738}, 1.5)
         assert body["completed_step"] == "discovery"
         assert set(body["result"]) == {"0", "1"}
         assert body["result"]["1"]["shared"]["routing"]["walk"]["duration_min"] == 10.0
@@ -1089,12 +1101,19 @@ async def test_http_failure_reads_as_failed_with_retryable_and_retry_is_202(http
         run_id = (await client.post(_BASE, json=_start_body())).json()["run_id"]
         await _drain(coordinator)
         failed = (await client.get(f"{_BASE}/{run_id}")).json()
+        chain = {"r1_run_id": R1_RUN, "origin": {"latitude": 48.2082, "longitude": 16.3738}, "radius_km": 2.0}
         assert failed == {
-            "run_id": run_id, "status": "failed", "completed_step": "discovery", "retryable": True
+            "run_id": run_id,
+            "status": "failed",
+            "completed_step": "discovery",
+            "retryable": True,
+            **chain,
         }
         retried = await client.post(f"{_BASE}/{run_id}/retry")
         assert retried.status_code == 202
-        assert retried.json() == {"run_id": run_id, "status": "running", "completed_step": "discovery"}
+        assert retried.json() == {
+            "run_id": run_id, "status": "running", "completed_step": "discovery", **chain
+        }
         await _drain(coordinator)
         assert (await client.get(f"{_BASE}/{run_id}")).json()["status"] == "finished"
 

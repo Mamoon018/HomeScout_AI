@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "fraunces",
+        "createdAt": "2026-11-10T23:38:08.319Z",
+        "reason": "User's sign-in hero spec explicitly pins Fraunces italic 500 for the heading keywords"
+      }
+    ]
+  }
+}

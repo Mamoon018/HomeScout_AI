@@ -29,11 +29,16 @@ class StartAmenitySearchRequest(BaseModel):
 
 
 class AmenitySearchRunResponse(BaseModel):
-    """An R2 run as the page sees it. `completed_step` shows how far it got; `result` (the
-    predefined records, keyed category_id then place_id) once finished; `retryable` when failed
-    (Retry when true, Start again when false)."""
+    """An R2 run as the page sees it. `r1_run_id` is the R1 run whose plan it searched for, and
+    `origin` / `radius_km` the search area (the page reads them by id, not from browser state);
+    `completed_step` shows how far it got; `result` (the predefined records, keyed category_id
+    then place_id) once finished; `retryable` when failed (Retry when true, Start again when
+    false)."""
 
     run_id: str
+    r1_run_id: str | None = None
+    origin: OriginRequest | None = None
+    radius_km: float | None = None
     status: Literal["running", "finished", "failed"]
     completed_step: Literal["discovery"] | None = None
     result: dict[int, dict[str, PredefinedMetricsRecord]] | None = None

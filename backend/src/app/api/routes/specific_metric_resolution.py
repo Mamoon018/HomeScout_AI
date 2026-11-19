@@ -120,8 +120,10 @@ async def retry_run_route(
     response_model=SpecificMetricResolutionRunResponse,
     description="Read-only. `running` while the run works (answered from memory while its task "
     "is live; `completed_step` becomes `discovery_batch` once the websites are found), "
-    "`finished` with `result` (one row per amenity), or `failed` with `retryable`. A run saved "
-    "by another version reads as `failed`, not retryable.",
+    "`finished` with `result` (one row per amenity: `category_id`, `place_id`, `website` and "
+    "`value`; `website` is the place's official site from STEP 3, with `url` null and `origin` "
+    "`none` when none was confirmed), or `failed` with `retryable`. A run saved by another version "
+    "reads as `failed`, not retryable.",
     responses={
         **_not_found("No run with this ID for the signed-in user.", "Run not found"),
         **_STORE_DOWN,

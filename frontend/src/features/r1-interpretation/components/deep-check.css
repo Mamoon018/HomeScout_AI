@@ -1,0 +1,225 @@
+/* "What I'll look for": one deep check.
+   Question, reason and answers first; the evidence path (Web, Page, Counts) follows as
+   steps on a connector line. Gaps are exact: 6 / 4 / 14 / 22 / 12. */
+
+.dc {
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dc + .dc {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #dcdfd3;
+}
+
+.dc-rise {
+  animation: dc-rise 550ms var(--ease) backwards;
+  animation-delay: var(--rd, 0ms);
+}
+
+.dc__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.dc__title {
+  margin: 0;
+  min-width: 0;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+  color: #2b2f26;
+}
+.dc__question {
+  margin: 6px 0 0;
+  font-size: 16px;
+  line-height: 22px;
+  color: #2b2f26;
+}
+.dc__because {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: #6b7062;
+}
+.dc__answers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.dc__sources {
+  margin-top: 22px;
+}
+.dc__sources-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+  color: #2b2f26;
+}
+.dc__sources-heading svg {
+  width: 15px;
+  height: 15px;
+  stroke: #4a4f43;
+  stroke-width: 1.6;
+}
+
+.dc__steps {
+  position: relative;
+  display: grid;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  grid-template-columns: 26px fit-content(96px) minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 12px;
+}
+.dc__steps--rail::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 12px;
+  top: 13px;
+  bottom: 13px;
+  width: 2px;
+  border-radius: 2px;
+  background: #cfd6c2;
+  transform-origin: top;
+  animation: dc-rail-draw 800ms 450ms var(--ease) backwards;
+}
+
+.dc-step {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  align-items: start;
+  animation: dc-rise 550ms var(--ease) backwards;
+  animation-delay: var(--rd, 0ms);
+}
+.dc-step__marker {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #edeee4;
+  border: 1.5px solid #bfc6b0;
+  color: #4a4f43;
+  animation: dc-marker-pop 450ms var(--ease) backwards;
+  animation-delay: var(--rd, 0ms);
+  transition: transform 250ms var(--ease);
+}
+.dc-step__marker svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.9;
+}
+.dc-step--outcome .dc-step__marker {
+  background: #e1ebc9;
+  border-color: #8fa65a;
+  color: #4a6a1a;
+}
+.dc-step__label {
+  font-size: 13px;
+  line-height: 26px;
+  font-weight: 600;
+  color: #5b6152;
+}
+.dc-step__value {
+  margin: 0;
+  padding-top: 3px;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 20px;
+  color: #3a3f33;
+  transition: color 200ms;
+}
+.dc-step:hover .dc-step__marker {
+  transform: scale(1.12);
+}
+.dc-step:hover .dc-step__value {
+  color: #1f231a;
+}
+
+.dc__more {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  color: #4a5a2a;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.dc__more:focus-visible {
+  outline: 2px solid #2a6593;
+  outline-offset: 2px;
+}
+
+@supports not (grid-template-columns: subgrid) {
+  .dc__steps {
+    display: flex;
+    flex-direction: column;
+  }
+  .dc-step {
+    grid-template-columns: 26px 52px minmax(0, 1fr);
+  }
+}
+
+@keyframes dc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes dc-rail-draw {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+@keyframes dc-marker-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  70% {
+    transform: scale(1.12);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dc-rise,
+  .dc-step,
+  .dc-step__marker,
+  .dc__steps--rail::before {
+    animation: none;
+  }
+  .dc-step__marker,
+  .dc-step__value {
+    transition: none;
+  }
+}
