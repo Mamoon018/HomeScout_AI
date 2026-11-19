@@ -68,12 +68,17 @@ def _run_response(view: R3RunView, status_code: int) -> JSONResponse:
     # response model as data, never re-encoded from R3's objects.
     body = SpecificMetricResolutionRunResponse(
         run_id=view.run_id,
+        r2_run_id=view.r2_run_id,
         status=view.status,
         completed_step=view.completed_step,
         result=view.result,
         retryable=view.retryable,
     )
-    content = body.model_dump(mode="json", exclude_none=True)
+    content = body.model_dump(mode="json", exclude_none=True, exclude={"result"})
+    if body.result is not None:
+        # Dumped without `exclude_none`: a row's `website.url` is null, not left out, when no
+        # official site was confirmed (`value` items were never dropped either).
+        content["result"] = body.model_dump(mode="json", include={"result"})["result"]
     # `retryable` is part of every failed body even when false.
     if view.status == "failed":
         content["retryable"] = bool(view.retryable)

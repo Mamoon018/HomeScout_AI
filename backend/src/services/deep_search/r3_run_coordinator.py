@@ -33,10 +33,12 @@ from src.exceptions.deep_search import (
 )
 from src.exceptions.mcp import McpConnectionError
 from src.services.deep_search.feature_schemas.schemas import (
+    R3ResultRow,
     R3RunRecord,
     R3RunView,
     R3StepId,
     SpecificMetricResolutionState,
+    WebsiteSearchResult,
 )
 from src.services.deep_search.r2_run_store import R2RunStore
 from src.services.deep_search.r3_run_store import (
@@ -129,11 +131,13 @@ class _LiveRun:
     """One live task in this process: kept referenced until it ends, and read by status.
 
     `completed_step` is set only after the checkpoint write matched, so the memory reply never
-    shows a step the row doesn't have.
+    shows a step the row doesn't have. `r2_run_id` is kept so a live reply names the run's parent
+    without a row read.
     """
 
     task: asyncio.Task
     user_id: str
+    r2_run_id: str
     completed_step: str | None = field(default=None)
 
 
@@ -207,8 +211,8 @@ class R3RunCoordinator:
                 schema_version=R3_STATE_SCHEMA_VERSION,
             )
             execution = _Execution(run_id, user_id, 0, frozenset(), path="start")
-            self._schedule(execution, state, resume_after=None)
-            return R3RunView(run_id=run_id, status="running")
+            self._schedule(execution, state, resume_after=None, r2_run_id=r2_run_id)
+            return R3RunView(run_id=run_id, status="running", r2_run_id=r2_run_id)
         finally:
             run_id_var.reset(token)
 
@@ -244,8 +248,18 @@ class R3RunCoordinator:
                 reclaimed_stale=reclaimed,
             )
             execution = _Execution(run_id, user_id, attempts, claimed_steps, path="retry")
-            self._schedule(execution, record.state, resume_after=record.completed_step)
-            return R3RunView(run_id=run_id, status="running", completed_step=record.completed_step)
+            self._schedule(
+                execution,
+                record.state,
+                resume_after=record.completed_step,
+                r2_run_id=record.r2_run_id,
+            )
+            return R3RunView(
+                run_id=run_id,
+                status="running",
+                completed_step=record.completed_step,
+                r2_run_id=record.r2_run_id,
+            )
         finally:
             run_id_var.reset(token)
 
@@ -257,7 +271,10 @@ class R3RunCoordinator:
             if live is not None:
                 if live.user_id == user_id:
                     return R3RunView(
-                        run_id=run_id, status="running", completed_step=live.completed_step
+                        run_id=run_id,
+                        status="running",
+                        completed_step=live.completed_step,
+                        r2_run_id=live.r2_run_id,
                     )
                 # Same answer the row read would give: another user's run does not exist here.
                 self._log(logging.INFO, "r3_run.rejected", run_id, user_id, reason="not_found")
@@ -313,12 +330,16 @@ class R3RunCoordinator:
         state: SpecificMetricResolutionState,
         *,
         resume_after: str | None,
+        r2_run_id: str,
     ) -> None:
-        """Start the execution as a task. It copies `run_id_var`, so its log lines carry the run."""
+        """Start the execution as a task. It copies `run_id_var`, so its log lines carry the run.
+        The live entry keeps the R2 parent, so a status read while it runs still names it."""
         task = asyncio.create_task(
             self._execute(execution, state, resume_after), name=f"r3_run:{execution.run_id}"
         )
-        self._tasks[execution.run_id] = _LiveRun(task, execution.user_id, resume_after)
+        self._tasks[execution.run_id] = _LiveRun(
+            task, execution.user_id, r2_run_id, completed_step=resume_after
+        )
         task.add_done_callback(functools.partial(self._on_task_done, execution))
 
     def _on_task_done(self, execution: _Execution, task: asyncio.Task) -> None:
@@ -428,20 +449,35 @@ class R3RunCoordinator:
     async def _save_finished(
         self, execution: _Execution, state: SpecificMetricResolutionState, progress: _Progress
     ) -> None:
-        """The finish write (state + output + `finished`), then the step rows."""
+        """The finish write (state + output rows with their websites + `finished`), then the step
+        rows."""
+        rows, missing = self._result_rows(state)
+        if missing:
+            # STEP 3 writes a verdict for every work item (RC8); a gap degrades the row to "none".
+            self._log(
+                logging.WARNING,
+                "r3_run.website_missing",
+                execution.run_id,
+                execution.user_id,
+                attempts=execution.attempts,
+                missing_count=len(missing),
+                keys=[list(key) for key in missing],
+            )
         saved = await self._store.save_finished(
             execution.run_id,
             execution.user_id,
             attempts=execution.attempts,
             state=state,
-            output=state.resolution_results,
+            output=rows,
         )
         if not saved:
             self._superseded(execution, "save_finished")
             return
         outcomes: dict[str, int] = {}
-        for record in state.resolution_results.values():
-            outcomes[record.outcome] = outcomes.get(record.outcome, 0) + 1
+        websites: dict[str, int] = {"google": 0, "discovered": 0, "none": 0}
+        for row in rows.values():
+            outcomes[row.record.outcome] = outcomes.get(row.record.outcome, 0) + 1
+            websites[row.website.website_origin] += 1
         self._log(
             logging.INFO,
             "r3_run.finished",
@@ -450,6 +486,7 @@ class R3RunCoordinator:
             attempts=execution.attempts,
             path=execution.path,
             outcome_counts=outcomes,
+            website_counts=websites,
             state_chars=state_chars(state),
         )
         # Recorded only now: a completed row never changes, and a STEP 5 raise after STEP 4 would
@@ -789,27 +826,55 @@ class R3RunCoordinator:
     # ---- views and logging -------------------------------------------------------------------
 
     @staticmethod
+    def _result_rows(
+        state: SpecificMetricResolutionState,
+    ) -> tuple[dict[tuple[int, str], R3ResultRow], list[tuple[int, str]]]:
+        """Pair each resolution record with its STEP 3 verdict, in the records' order.
+
+        A key with no verdict gets `WebsiteSearchResult(None, "none")` and is returned in the
+        second list so the caller can warn. A verdict with no record adds no row.
+        """
+        rows: dict[tuple[int, str], R3ResultRow] = {}
+        missing: list[tuple[int, str]] = []
+        for key, record in state.resolution_results.items():
+            website = state.website_search_results.get(key)
+            if website is None:
+                website = WebsiteSearchResult(None, "none")
+                missing.append(key)
+            rows[key] = R3ResultRow(website=website, record=record)
+        return rows, missing
+
+    @staticmethod
     def _view(record: R3RunRecord) -> R3RunView:
         """What the page shows for a stored run, by status."""
         if record.status == "running":
             return R3RunView(
-                run_id=record.run_id, status="running", completed_step=record.completed_step
+                run_id=record.run_id,
+                status="running",
+                completed_step=record.completed_step,
+                r2_run_id=record.r2_run_id,
             )
         if record.status == "finished":
-            results = (
-                record.output if record.output is not None else record.state.resolution_results
+            # The database requires an output on a finished row; the state pairing is the same one
+            # the finish write used, so the fallback cannot produce another shape.
+            rows = (
+                record.output
+                if record.output is not None
+                else R3RunCoordinator._result_rows(record.state)[0]
             )
             return R3RunView(
                 run_id=record.run_id,
                 status="finished",
                 completed_step=record.completed_step,
-                result=dump_resolution_entries(results),
+                result=dump_resolution_entries(rows),
+                r2_run_id=record.r2_run_id,
             )
         return R3RunView(
             run_id=record.run_id,
             status="failed",
             completed_step=record.completed_step,
             retryable=record.retryable,
+            r2_run_id=record.r2_run_id,
         )
 
     def _conflict(
@@ -843,6 +908,7 @@ class R3RunCoordinator:
             "r3_run.loaded",
             record.run_id,
             record.user_id,
+            r2_run_id=record.r2_run_id,
             status=record.status,
             attempts=record.attempts,
             completed_step=record.completed_step,

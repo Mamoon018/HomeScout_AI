@@ -5,6 +5,7 @@ import { clearAuthUser } from '@/features/auth/utils/authUserStore'
 import { welcomeMessageFromResponse } from '@/features/auth/utils/welcomeMessage'
 import { HomePage } from '@/pages/HomePage'
 import { LoginPage } from '@/pages/LoginPage'
+import { PlacesMetricsPage } from '@/pages/PlacesMetricsPage'
 import { ProximityPage } from '@/pages/ProximityPage'
 import { SignupPage } from '@/pages/SignupPage'
 
@@ -50,6 +51,15 @@ function ProximityRoute() {
   return <ProximityPage onUnauthenticated={onUnauthenticated} />
 }
 
+function PlacesMetricsRoute() {
+  const navigate = useNavigate()
+  const onUnauthenticated = useCallback(() => {
+    clearAuthUser()
+    navigate('/auth/login', { replace: true })
+  }, [navigate])
+  return <PlacesMetricsPage onUnauthenticated={onUnauthenticated} />
+}
+
 /** Application route definitions. */
 export function AppRoutes() {
   return (
@@ -60,6 +70,7 @@ export function AppRoutes() {
         <Route path="/signup" element={<Navigate to="/auth/signup" replace />} />
         <Route path="/home" element={<HomeRoute />} />
         <Route path="/proximity_info" element={<ProximityRoute />} />
+        <Route path="/places_metrics" element={<PlacesMetricsRoute />} />
         <Route path="/" element={<Navigate to="/auth/login" replace />} />
       </Routes>
     </BrowserRouter>

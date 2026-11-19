@@ -1698,13 +1698,22 @@ class R2RunRecord:
 
 @dataclass(frozen=True)
 class R2RunView:
-    """What the page needs for one R2 run: progress, the records once finished, or retryable."""
+    """What the page needs for one R2 run: progress, the records once finished, or retryable.
+
+    `r1_run_id`, `origin` and `radius_km` name the R1 run and the search area this run belongs
+    to, so a page can follow the chain by id instead of guessing from browser state. Every view
+    built from a row, a live task or a start/retry carries them; only the version-mismatch reply,
+    which has no readable row, leaves them None.
+    """
 
     run_id: str
     status: R2RunStatus
     completed_step: Literal["discovery"] | None = None
     result: dict[int, dict[str, PredefinedMetricsRecord]] | None = None
     retryable: bool | None = None
+    r1_run_id: str | None = None
+    origin: GeoPoint | None = None
+    radius_km: float | None = None
 
 
 # ---------------------------------------------------------------------------------
@@ -1740,6 +1749,19 @@ class R3StepRecord:
 
 
 @dataclass(frozen=True)
+class R3ResultRow:
+    """One entry of R3's finished output: the amenity's STEP 3 website verdict beside its record.
+
+    Built once at finish by pairing `resolution_results` with `website_search_results` on the same
+    `(category_id, place_id)` key. `website` is `WebsiteSearchResult(None, "none")` when no verdict
+    was found for the key. Stored as `{category_id, place_id, website: {url, origin}, value}`.
+    """
+
+    website: WebsiteSearchResult
+    record: AmenityResolutionRecord
+
+
+@dataclass(frozen=True)
 class R3RunRecord:
     """One `r3_runs` row with its step rows, decoded. `output` is set only when finished."""
 
@@ -1752,7 +1774,7 @@ class R3RunRecord:
     attempts: int
     retryable: bool
     updated_at: str
-    output: dict[tuple[int, str], AmenityResolutionRecord] | None = None
+    output: dict[tuple[int, str], R3ResultRow] | None = None
     failure_stage: str | None = None
     steps: dict[R3StepId, R3StepRecord] = field(default_factory=dict)
 
@@ -1761,8 +1783,12 @@ class R3RunRecord:
 class R3RunView:
     """What the page needs for one R3 run: progress, the result once finished, or retryable.
 
-    `result` is already JSON-ready: one `{category_id, place_id, value}` row per amenity, built
-    by the R3 store codec (the records hold tuple-keyed data FastAPI's encoder cannot write).
+    `result` is already JSON-ready: one `{category_id, place_id, website: {url, origin}, value}`
+    row per amenity, built by the R3 store codec (the records hold tuple-keyed data FastAPI's
+    encoder cannot write).
+
+    `r2_run_id` names the R2 run this run started from, so a page can follow the chain by id. It
+    is None only on the version-mismatch reply, which has no readable row.
     """
 
     run_id: str
@@ -1770,3 +1796,4 @@ class R3RunView:
     completed_step: R3CompletedStep | None = None
     result: list[dict] | None = None
     retryable: bool | None = None
+    r2_run_id: str | None = None

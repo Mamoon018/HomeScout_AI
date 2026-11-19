@@ -36,6 +36,11 @@ export type PlaceRecordWire = {
 
 export type R2RunWire = {
   run_id?: string
+  /** The R1 run whose plan this run searched for (the chain's next link). */
+  r1_run_id?: string
+  /** The search origin and radius this run used. */
+  origin?: { latitude?: number; longitude?: number }
+  radius_km?: number
   status?: string
   completed_step?: string
   /** Keyed category_id (a JSON string key) then place_id. */
@@ -84,6 +89,10 @@ export type R2RunView = {
   result: Map<number, CategoryResult> | null
   /** Set when `status` is `failed`: Retry when true, Start again when false. */
   retryable: boolean | null
+  /** The R1 run this run came from; null when the body did not name one. */
+  r1RunId: string | null
+  /** The search origin; null unless both coordinates arrived as finite numbers. */
+  origin: { latitude: number; longitude: number } | null
 }
 
 /** Why a call did not give a run, by what the page can do about it. */

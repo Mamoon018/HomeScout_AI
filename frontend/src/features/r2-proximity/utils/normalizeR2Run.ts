@@ -35,7 +35,18 @@ export function normalizeR2Run(wire: R2RunWire | null): R2RunView | null {
     completedStep: wire.completed_step === 'discovery' ? 'discovery' : null,
     result: status === 'finished' ? normalizeResult(wire.result ?? {}) : null,
     retryable: status === 'failed' ? wire.retryable === true : null,
+    // A missing parent never rejects the body: the run's status must still show.
+    r1RunId: typeof wire.r1_run_id === 'string' && wire.r1_run_id ? wire.r1_run_id : null,
+    origin: normalizeOrigin(wire.origin),
   }
+}
+
+function normalizeOrigin(o: R2RunWire['origin']): R2RunView['origin'] {
+  const lat = o?.latitude
+  const lng = o?.longitude
+  return typeof lat === 'number' && Number.isFinite(lat) && typeof lng === 'number' && Number.isFinite(lng)
+    ? { latitude: lat, longitude: lng }
+    : null
 }
 
 function normalizeResult(raw: Record<string, Record<string, PlaceRecordWire>>): Map<number, CategoryResult> {

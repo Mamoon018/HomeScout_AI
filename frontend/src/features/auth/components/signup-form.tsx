@@ -224,7 +224,7 @@ export function SignupForm({
                   </Label>
                 </div>
                 <FieldDescription>
-                  Must be at least 8 characters long.
+                  Must be at least 10 characters long.
                 </FieldDescription>
               </Field>
               <SignupCaptcha disabled={isSubmitting} captcha={captcha} />

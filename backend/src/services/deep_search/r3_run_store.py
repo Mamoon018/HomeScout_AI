@@ -11,6 +11,11 @@ R3's state holds four dicts keyed by `(category_id, place_id)` and, inside every
 record, an evidence store whose lookup table is keyed by a tuple too. JSON can't key by a tuple,
 so this module writes each tuple-keyed dict as a list of `{category_id, place_id, value}` entries
 in insertion order, and rebuilds the evidence lookup table from its items on load (R3-C4).
+
+The finished output is a list of `{category_id, place_id, website: {url, origin}, value}` rows: the
+same entries plus each amenity's STEP 3 website verdict. The verdict is renamed here, once, from
+`website_url` / `website_origin` to the HTTP names `url` / `origin`, so the status body is the
+stored rows as they are. The output has its own version, apart from the state's.
 """
 
 import dataclasses
@@ -34,6 +39,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     DiscoverySearchRecord,
     OfficialGateRecord,
     PredefinedMetricsRecord,
+    R3ResultRow,
     R3RunRecord,
     R3StepId,
     R3StepRecord,
@@ -48,9 +54,16 @@ logger = logging.getLogger(DEEP_SEARCH_LOGGER_NAME)
 R3_RUNS_TABLE = "r3_runs"
 R3_RUN_STEPS_TABLE = "r3_run_steps"
 
-# Bump when `SpecificMetricResolutionState` or the output changes shape. A run saved under another
-# version is not resumed: it is failed, not retryable (R3-C4).
+# Bump when `SpecificMetricResolutionState` changes shape. A run saved under another version is
+# not resumed: it is failed, not retryable (R3-C4).
 R3_STATE_SCHEMA_VERSION = 1
+
+# Bump when the finished output changes shape. A finished run whose output has another version
+# reads as failed, not retryable ("start again"). 2: each row carries `website: {url, origin}`.
+R3_OUTPUT_SCHEMA_VERSION = 2
+
+# The website verdict inside one output row, read back into `WebsiteSearchResult`.
+_WEBSITE_ADAPTER = TypeAdapter(WebsiteSearchResult)
 
 # Bump when a step record's payload changes shape. Checked on every load.
 R3_STEP_SCHEMA_VERSION = 1
@@ -147,22 +160,46 @@ def load_state(data: dict) -> SpecificMetricResolutionState:
     return SpecificMetricResolutionState(**fields)
 
 
-def dump_resolution_entries(results: dict[tuple[int, str], AmenityResolutionRecord]) -> list[dict]:
-    """R3's result as plain JSON rows `{category_id, place_id, value}` (the status body)."""
-    return _encode_keyed(_RESOLUTION, results)
+def dump_resolution_entries(rows: dict[tuple[int, str], R3ResultRow]) -> list[dict]:
+    """R3's result as plain JSON rows `{category_id, place_id, website: {url, origin}, value}`.
+
+    The records go through the shared `_encode_keyed` unchanged (so the state and step payloads
+    keep their shape); the website is added beside each entry afterwards.
+    """
+    entries = _encode_keyed(_RESOLUTION, {key: row.record for key, row in rows.items()})
+    return [
+        {
+            "category_id": entry["category_id"],
+            "place_id": entry["place_id"],
+            "website": {"url": row.website.website_url, "origin": row.website.website_origin},
+            "value": entry["value"],
+        }
+        for entry, row in zip(entries, rows.values())
+    ]
 
 
-def dump_output(results: dict[tuple[int, str], AmenityResolutionRecord]) -> dict:
-    """R3's finished output (`resolution_results`) inside a version envelope."""
-    return {"version": R3_STATE_SCHEMA_VERSION, "output": dump_resolution_entries(results)}
+def dump_output(rows: dict[tuple[int, str], R3ResultRow]) -> dict:
+    """R3's finished output (one row per amenity, with its website) inside a version envelope."""
+    return {"version": R3_OUTPUT_SCHEMA_VERSION, "output": dump_resolution_entries(rows)}
 
 
-def load_output(data: dict) -> dict[tuple[int, str], AmenityResolutionRecord]:
-    """Rebuild the typed output after a version check."""
+def load_output(data: dict) -> dict[tuple[int, str], R3ResultRow]:
+    """Rebuild the typed output after a version check (an older output is not read)."""
     found = data.get("version") if isinstance(data, dict) else None
-    if found != R3_STATE_SCHEMA_VERSION:
-        raise StateVersionMismatchError(found, R3_STATE_SCHEMA_VERSION)
-    return _decode_keyed(_RESOLUTION, data["output"])
+    if found != R3_OUTPUT_SCHEMA_VERSION:
+        raise StateVersionMismatchError(found, R3_OUTPUT_SCHEMA_VERSION)
+    entries = data["output"]
+    records = _decode_keyed(_RESOLUTION, entries)
+    rows: dict[tuple[int, str], R3ResultRow] = {}
+    for entry, (key, record) in zip(entries, records.items()):
+        website = _WEBSITE_ADAPTER.validate_python(
+            {
+                "website_url": entry["website"]["url"],
+                "website_origin": entry["website"]["origin"],
+            }
+        )
+        rows[key] = R3ResultRow(website=website, record=record)
+    return rows
 
 
 def dump_step_output(step_id: R3StepId, state: SpecificMetricResolutionState) -> dict:
@@ -244,9 +281,10 @@ class R3RunStore:
         *,
         attempts: int,
         state: SpecificMetricResolutionState,
-        output: dict[tuple[int, str], AmenityResolutionRecord],
+        output: dict[tuple[int, str], R3ResultRow],
     ) -> bool:
-        """Write the final state and output and set `finished` in one fenced update."""
+        """Write the final state and output (rows with their websites) and set `finished`, in one
+        fenced update, so both come from the same execution."""
         rows = await self._execute(
             "save_finished",
             self._fenced(

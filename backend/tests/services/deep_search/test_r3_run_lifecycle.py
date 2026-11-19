@@ -50,6 +50,7 @@ from src.services.deep_search.feature_schemas.schemas import (
     OfficialGateRecord,
     Phase1Result,
     PredefinedMetricsRecord,
+    R3ResultRow,
     R3RunRecord,
     R3StepRecord,
     SpecificMetricResolutionState,
@@ -61,6 +62,7 @@ from src.services.deep_search.r3_run_coordinator import (
     is_config_error,
 )
 from src.services.deep_search.r3_run_store import (
+    R3_OUTPUT_SCHEMA_VERSION,
     R3_STATE_SCHEMA_VERSION,
     dump_output,
     dump_resolution_entries,
@@ -270,6 +272,7 @@ class Script:
         self.errors: list[BaseException | None] = []  # per execution, raised in STEP 4
         self.setup_errors: list[BaseException | None] = []  # per execution, raised before STEP 3
         self.executions: list[str | None] = []  # resume_after of each execution
+        self.skip_verdicts: set[tuple[int, str]] = set()  # keys STEP 3 writes no verdict for
         self.step3_runs = 0
         self.closed = 0
 
@@ -295,6 +298,8 @@ class ScriptedService:
             breaker_open = script.breaker_open[index] if index < len(script.breaker_open) else False
             for category_id, places in state.discovered_places.items():
                 for place_id in places:
+                    if (category_id, place_id) in script.skip_verdicts:
+                        continue
                     origin = "none" if breaker_open else "google"
                     url = None if breaker_open else state.predefined_records[category_id][place_id].website
                     state.website_search_results[(category_id, place_id)] = WebsiteSearchResult(url, origin)
@@ -813,10 +818,116 @@ def test_states_round_trip_with_comma_place_ids_and_rebuilt_evidence_index() -> 
     content = load_state(_j(dump_state(finished))).resolution_results[key].phase1.metrics_source_content
     assert content._index[("web", "https://a.example/x", "text one")] is content.items[0]
     assert content.items_for("evening_crowding") == (content.items[0],)
-    assert load_output(_j(dump_output(finished.resolution_results))) == finished.resolution_results
-    rows = dump_resolution_entries(finished.resolution_results)
+    output = {
+        key: R3ResultRow(WebsiteSearchResult("https://x.example", "google"), finished.resolution_results[key])
+    }
+    back_output = load_output(_j(dump_output(output)))
+    assert back_output == output
+    back_content = back_output[key].record.phase1.metrics_source_content
+    assert back_content._index[("web", "https://a.example/x", "text one")] is back_content.items[0]
+    rows = dump_resolution_entries(output)
+    assert list(rows[0]) == ["category_id", "place_id", "website", "value"]
     assert rows[0]["category_id"] == 1 and rows[0]["place_id"] == "pl,ace,1"
+    assert rows[0]["website"] == {"url": "https://x.example", "origin": "google"}
     assert rows[0]["value"]["phase1"]["metrics_source_content"]["_index"] == {}
+    # The output's website lives beside the entries; the state and step encodings are unchanged.
+    assert "website" not in _j(dump_state(finished))["state"]["resolution_results"][0]
+    assert "website" not in dump_step_output("pipelines", finished)["data"][0]
+
+
+def test_output_rows_follow_the_records_and_fall_back_to_none() -> None:
+    plans = _handoff().category_metric_plans
+    swim, gym = (1, "saltmarsh"), (2, "saltmarsh")  # one place under two categories
+    state = SpecificMetricResolutionState(
+        category_metric_plans=plans,
+        website_search_results={
+            gym: WebsiteSearchResult(None, "none"),
+            swim: WebsiteSearchResult("https://saltmarsh.example", "discovered"),
+            (1, "orphan"): WebsiteSearchResult("https://orphan.example", "google"),
+        },
+        resolution_results={
+            swim: _record_with_evidence("saltmarsh"),
+            gym: _record_with_evidence("saltmarsh"),
+            (1, "kestrel"): _record_with_evidence("kestrel"),
+        },
+    )
+    rows, missing = R3RunCoordinator._result_rows(state)
+    assert list(rows) == [swim, gym, (1, "kestrel")]  # the records' order; the orphan adds no row
+    assert rows[swim].website == WebsiteSearchResult("https://saltmarsh.example", "discovered")
+    assert rows[gym].website == WebsiteSearchResult(None, "none")  # two rows, two verdicts
+    assert rows[(1, "kestrel")].website == WebsiteSearchResult(None, "none")
+    assert missing == [(1, "kestrel")]
+    entries = dump_resolution_entries(rows)
+    assert [e["website"] for e in entries] == [
+        {"url": "https://saltmarsh.example", "origin": "discovered"},
+        {"url": None, "origin": "none"},
+        {"url": None, "origin": "none"},
+    ]
+
+
+def test_an_output_of_another_version_is_rejected_and_the_state_still_loads() -> None:
+    rows = {(1, "a"): R3ResultRow(WebsiteSearchResult(None, "none"), _record_with_evidence("a"))}
+    data = _j(dump_output(rows))
+    assert data["version"] == R3_OUTPUT_SCHEMA_VERSION == 2
+    data["version"] = 1  # an output written before rows carried a website
+    with pytest.raises(StateVersionMismatchError) as mismatch:
+        load_output(data)
+    assert (mismatch.value.found, mismatch.value.expected) == (1, 2)
+    state = SpecificMetricResolutionState(category_metric_plans=[])
+    assert load_state(_j(dump_state(state))) == state  # state version is still 1
+
+
+def test_an_output_row_with_an_unknown_origin_is_rejected() -> None:
+    rows = {(1, "a"): R3ResultRow(WebsiteSearchResult(None, "none"), _record_with_evidence("a"))}
+    data = _j(dump_output(rows))
+    data["output"][0]["website"]["origin"] = "listing"
+    with pytest.raises(Exception) as bad:
+        load_output(data)
+    assert not isinstance(bad.value, StateVersionMismatchError)
+
+
+async def test_a_missing_verdict_is_warned_and_the_row_still_carries_a_website(
+    deep_search_caplog,
+) -> None:
+    script = Script()
+    script.skip_verdicts = {(1, "quarry")}
+    coordinator, _, store, _ = _scripted_setup(script)
+    run_id = await _start(coordinator)
+    stored = {(r["category_id"], r["place_id"]): r["website"] for r in store.runs[run_id]["output"]["output"]}
+    assert stored == {
+        (1, "harbor"): {"url": "https://harborswimhall.com", "origin": "google"},
+        (1, "quarry"): {"url": None, "origin": "none"},
+    }
+    [missing] = _events(deep_search_caplog, "r3_run.website_missing")
+    assert (missing["missing_count"], missing["keys"]) == (1, [[1, "quarry"]])
+    [finished] = _events(deep_search_caplog, "r3_run.finished")
+    assert finished["website_counts"] == {"google": 1, "discovered": 0, "none": 1}
+
+
+async def test_a_clean_finish_logs_no_missing_website(deep_search_caplog) -> None:
+    coordinator, _, _, _ = _scripted_setup()
+    await _start(coordinator)
+    assert _events(deep_search_caplog, "r3_run.website_missing") == []
+    [finished] = _events(deep_search_caplog, "r3_run.finished")
+    assert finished["website_counts"] == {"google": 2, "discovered": 0, "none": 0}
+
+
+async def test_a_run_finished_before_websites_reads_as_failed_and_cannot_be_retried(
+    deep_search_caplog,
+) -> None:
+    coordinator, _, store, _ = _scripted_setup()
+    run_id = await _start(coordinator)
+    store.runs[run_id]["output"]["version"] = 1  # as saved before this change
+
+    view = await coordinator.get_run(USER_A, run_id)
+    assert (view.status, view.retryable, view.result) == ("failed", False, None)
+    [degraded] = _events(deep_search_caplog, "r3_run.status_degraded")
+    assert (degraded["found_version"], degraded["expected_version"]) == (1, 2)
+
+    with pytest.raises(RunConflictError) as conflict:
+        await coordinator.retry_run(USER_A, run_id)
+    assert conflict.value.retryable is False
+    assert store.runs[run_id]["status"] == "finished"  # the finished row is never rewritten
 
 
 def test_a_saved_state_of_another_version_is_rejected() -> None:
@@ -835,6 +946,7 @@ async def test_version_mismatch_closes_the_run_on_retry_and_reads_as_failed() ->
 
     status_view = await coordinator.get_run(USER_A, run_id)
     assert (status_view.status, status_view.retryable) == ("failed", False)
+    assert status_view.r2_run_id is None  # no readable row, so no parent to name
     assert store.runs[run_id]["retryable"] is True  # the status read writes nothing
 
     with pytest.raises(RunConflictError) as conflict:
@@ -1179,13 +1291,20 @@ async def test_http_start_poll_finish_and_status_codes(http_setup) -> None:
         started = await client.post(_BASE, json={"r2_run_id": R2_RUN})
         assert started.status_code == 202
         run_id = started.json()["run_id"]
-        assert started.json() == {"run_id": run_id, "status": "running"}
+        # Every body names the R2 run it started from, so a page follows the chain by id.
+        assert started.json() == {"run_id": run_id, "status": "running", "r2_run_id": R2_RUN}
 
         await _drain(coordinator)
         body = (await client.get(f"{_BASE}/{run_id}")).json()
         assert body["status"] == "finished" and body["completed_step"] == "discovery_batch"
+        assert body["r2_run_id"] == R2_RUN
         assert {(r["category_id"], r["place_id"]) for r in body["result"]} == {(1, "harbor"), (1, "quarry")}
         assert body["result"][0]["value"]["outcome"] == "completed"
+        assert {r["place_id"]: r["website"] for r in body["result"]} == {
+            "harbor": {"url": "https://harborswimhall.com", "origin": "google"},
+            "quarry": {"url": "https://quarryswimhall.com", "origin": "google"},
+        }
+        assert all(list(r) == ["category_id", "place_id", "website", "value"] for r in body["result"])
 
         again = await client.post(f"{_BASE}/{run_id}/retry")
         assert again.status_code == 409 and again.json()["status"] == "finished"
@@ -1193,6 +1312,19 @@ async def test_http_start_poll_finish_and_status_codes(http_setup) -> None:
     async with await _client(USER_B) as other:
         assert (await other.get(f"{_BASE}/{run_id}")).status_code == 404
         assert (await other.post(f"{_BASE}/{run_id}/retry")).status_code == 404
+
+
+async def test_http_rows_keep_url_null_when_no_site_was_confirmed(http_setup) -> None:
+    coordinator, script, _ = http_setup
+    script.breaker_open = [True]  # STEP 3 confirmed no site: every verdict is "none"
+    async with await _client() as client:
+        run_id = (await client.post(_BASE, json={"r2_run_id": R2_RUN})).json()["run_id"]
+        await _drain(coordinator)
+        response = await client.get(f"{_BASE}/{run_id}")
+    body = response.json()
+    assert body["status"] == "finished" and "completed_step" not in body  # top-level None dropped
+    assert [r["website"] for r in body["result"]] == [{"url": None, "origin": "none"}] * 2
+    assert response.text.count('"url":null') == 2  # sent as null, not left out
 
 
 async def test_http_failure_reads_as_failed_with_retryable_and_retry_is_202(http_setup) -> None:
@@ -1203,11 +1335,20 @@ async def test_http_failure_reads_as_failed_with_retryable_and_retry_is_202(http
         await _drain(coordinator)
         failed = (await client.get(f"{_BASE}/{run_id}")).json()
         assert failed == {
-            "run_id": run_id, "status": "failed", "completed_step": "discovery_batch", "retryable": True
+            "run_id": run_id,
+            "status": "failed",
+            "completed_step": "discovery_batch",
+            "retryable": True,
+            "r2_run_id": R2_RUN,
         }
         retried = await client.post(f"{_BASE}/{run_id}/retry")
         assert retried.status_code == 202
-        assert retried.json() == {"run_id": run_id, "status": "running", "completed_step": "discovery_batch"}
+        assert retried.json() == {
+            "run_id": run_id,
+            "status": "running",
+            "completed_step": "discovery_batch",
+            "r2_run_id": R2_RUN,
+        }
         await _drain(coordinator)
         assert (await client.get(f"{_BASE}/{run_id}")).json()["status"] == "finished"
         not_retryable = await client.post(f"{_BASE}/{run_id}/retry")
@@ -1234,3 +1375,44 @@ async def test_endpoints_answer_503_when_r3_is_not_configured() -> None:
         assert response.json() == {"error": "Specific metric resolution is not available"}
     finally:
         app.dependency_overrides.clear()
+
+
+# ---- run chain: every body names its R2 parent ------------------------------------------------
+
+
+async def test_every_r3_body_names_its_r2_run(deep_search_caplog) -> None:
+    script = Script()
+    script.errors = [MetricResolutionProviderError("down", stage="s", cause="availability")]
+    coordinator, _, _, _ = _scripted_setup(script)
+
+    started = await coordinator.start_run(USER_A, R2_RUN)
+    assert started.r2_run_id == R2_RUN
+    live = await coordinator.get_run(USER_A, started.run_id)  # answered from the live task
+    assert (live.status, live.r2_run_id) == ("running", R2_RUN)
+    with pytest.raises(RunNotFoundError):
+        await coordinator.get_run(USER_B, started.run_id)
+
+    await _drain(coordinator)
+    failed = await coordinator.get_run(USER_A, started.run_id)
+    assert (failed.status, failed.r2_run_id) == ("failed", R2_RUN)
+    retried = await coordinator.retry_run(USER_A, started.run_id)
+    assert (retried.status, retried.r2_run_id) == ("running", R2_RUN)
+
+    await _drain(coordinator)
+    finished = await coordinator.get_run(USER_A, started.run_id)
+    assert (finished.status, finished.r2_run_id) == ("finished", R2_RUN)
+    with pytest.raises(RunNotFoundError):
+        await coordinator.get_run(USER_B, started.run_id)  # the stored row stays user-scoped
+
+    loaded = _events(deep_search_caplog, "r3_run.loaded")
+    assert loaded and all(event["r2_run_id"] == R2_RUN for event in loaded)
+
+
+def test_the_r3_body_omits_r2_run_id_only_when_the_view_has_none() -> None:
+    from src.app.api.controllers.specific_metric_resolution import _run_response
+    from src.services.deep_search.feature_schemas.schemas import R3RunView
+
+    named = json.loads(_run_response(R3RunView("r", "running", r2_run_id=R2_RUN), 202).body)
+    assert named == {"run_id": "r", "r2_run_id": R2_RUN, "status": "running"}
+    unnamed = json.loads(_run_response(R3RunView("r", "failed", retryable=False), 200).body)
+    assert unnamed == {"run_id": "r", "status": "failed", "retryable": False}
