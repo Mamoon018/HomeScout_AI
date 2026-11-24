@@ -1,4 +1,5 @@
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/places-metrics/components/places-metrics.css'
 import { CategoryWorkspace } from '@/features/places-metrics/components/category-workspace'
 import { EmptyResult } from '@/features/places-metrics/components/empty-result'
@@ -16,10 +17,6 @@ import { useDocumentClasses } from '@/lib/useDocumentClasses'
 
 const THEME = ['theme-olive']
 
-type PlacesMetricsPageProps = {
-  onUnauthenticated?: () => void
-}
-
 /**
  * R3 results for one apartment: do the nearby places fit the renter's own questions, and on
  * what evidence.
@@ -28,8 +25,10 @@ type PlacesMetricsPageProps = {
  * with R1's plan and R2's places. Until then the page shows start, progress or failure; after,
  * the metric panel, rail and workspace.
  */
-export function PlacesMetricsPage({ onUnauthenticated }: PlacesMetricsPageProps) {
+export function PlacesMetricsPage() {
   useDocumentClasses(THEME)
+  // A 401 from the run endpoints (that refreshing did not fix) sends the renter to sign in.
+  const onUnauthenticated = useUnauthenticatedRedirect()
   const run = useR3Run({ onUnauthenticated })
   const ready = run.phase === 'finished' && run.result !== null
 

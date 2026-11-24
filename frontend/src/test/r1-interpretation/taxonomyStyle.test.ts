@@ -8,7 +8,7 @@ import { isTaxonomyNode, taxonomyStyle } from '@/features/r1-interpretation/util
 function backendNodes(): { group: string; node: string }[] {
   const file = path.resolve(
     import.meta.dirname,
-    '../../../../../backend/src/services/deep_search/feature_schemas/amenity_taxonomy.py',
+    '../../../../backend/src/services/deep_search/feature_schemas/amenity_taxonomy.py',
   )
   const source = fs.readFileSync(file, 'utf-8')
   const body = source.split('AMENITY_TAXONOMY_NODES: tuple[str, ...] = (')[1].split('\n)')[0]

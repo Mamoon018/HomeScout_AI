@@ -9,6 +9,12 @@ import { R1_RUN_ID, R2_BODY, R2_ERROR, R2_RUN_ID } from '@/test/fixtures/r2Bodie
 import { mockR2Api, type R2Call } from '@/test/r2Server'
 import type { Reply } from '@/test/r1Server'
 
+/** The page's lost-session handler, replaced so tests can see when it is called. */
+const redirect = vi.hoisted(() => vi.fn())
+vi.mock('@/features/auth/hooks/useUnauthenticatedRedirect', () => ({
+  useUnauthenticatedRedirect: () => redirect,
+}))
+
 /** Polling is real time (2 s); leave room for one tick. */
 const SLOW = { timeout: 6000 }
 const SAVED = { runId: R2_RUN_ID, r1RunId: R1_RUN_ID, latitude: 50.1109, longitude: 8.6821, radiusKm: 2 }
@@ -27,13 +33,14 @@ function api(routes: Routes) {
   )
 }
 
-function renderPage(url = '/proximity_info', onUnauthenticated = vi.fn()) {
+function renderPage(url = '/proximity_info') {
+  redirect.mockClear()
   render(
     <MemoryRouter initialEntries={[url]}>
-      <ProximityPage onUnauthenticated={onUnauthenticated} />
+      <ProximityPage />
     </MemoryRouter>,
   )
-  return onUnauthenticated
+  return redirect
 }
 
 function fillAndLook(lat = '50.1109', lng = '8.6821', radius = '2') {

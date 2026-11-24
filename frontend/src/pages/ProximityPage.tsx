@@ -2,6 +2,7 @@ import { useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { CheckIcon } from 'lucide-react'
 
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/r2-proximity/components/proximity.css'
 import { CategoryRail } from '@/features/r2-proximity/components/category-rail'
 import { CategoryWorkspace } from '@/features/r2-proximity/components/category-workspace'
@@ -16,13 +17,15 @@ import { useDocumentClasses } from '@/lib/useDocumentClasses'
 const THEME = ['theme-olive']
 const MODES_LINE = 'walk, cycle, drive and transit times'
 
-type ProximityPageProps = {
-  onUnauthenticated?: () => void
+type LiveProximityProps = {
+  onUnauthenticated: () => void
 }
 
 /** R2 results for one apartment: what's around it and how reachable each place is, by mode. */
-export function ProximityPage({ onUnauthenticated }: ProximityPageProps) {
+export function ProximityPage() {
   useDocumentClasses(THEME)
+  // A 401 from the run endpoints (that refreshing did not fix) sends the renter to sign in.
+  const onUnauthenticated = useUnauthenticatedRedirect()
 
   return (
     <div className="flex min-h-svh flex-col">
@@ -36,7 +39,7 @@ export function ProximityPage({ onUnauthenticated }: ProximityPageProps) {
   )
 }
 
-function LiveProximity({ onUnauthenticated }: ProximityPageProps) {
+function LiveProximity({ onUnauthenticated }: LiveProximityProps) {
   const run = useR2Run({ onUnauthenticated })
   const categories = useMemo(
     () =>

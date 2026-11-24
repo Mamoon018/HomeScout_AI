@@ -20,6 +20,12 @@ import {
 import type { Reply } from '@/test/r1Server'
 import { mockR3Api, type R3Call } from '@/test/r3Server'
 
+/** The page's lost-session handler, replaced so tests can see when it is called. */
+const redirect = vi.hoisted(() => vi.fn())
+vi.mock('@/features/auth/hooks/useUnauthenticatedRedirect', () => ({
+  useUnauthenticatedRedirect: () => redirect,
+}))
+
 /** One poll interval (4 s) plus room. */
 const POLL = { timeout: 8000 }
 const ok = (body: unknown, status = 200): Reply => ({ status, body })
@@ -43,14 +49,15 @@ function LocationProbe() {
   return <output data-testid="location">{useLocation().search}</output>
 }
 
-function renderPage(url = '/places_metrics', onUnauthenticated = vi.fn()) {
+function renderPage(url = '/places_metrics') {
+  redirect.mockClear()
   render(
     <MemoryRouter initialEntries={[url]}>
-      <PlacesMetricsPage onUnauthenticated={onUnauthenticated} />
+      <PlacesMetricsPage />
       <LocationProbe />
     </MemoryRouter>,
   )
-  return onUnauthenticated
+  return redirect
 }
 
 /** What a tab holds after it also ran brief B: every storage slot points at B. */
@@ -375,7 +382,7 @@ describe('the run chain', () => {
 function renderWithUnmount(url: string) {
   return render(
     <MemoryRouter initialEntries={[url]}>
-      <PlacesMetricsPage onUnauthenticated={vi.fn()} />
+      <PlacesMetricsPage />
     </MemoryRouter>,
   )
 }

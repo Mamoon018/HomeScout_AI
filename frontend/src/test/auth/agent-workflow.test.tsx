@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
-import { AgentWorkflow } from './agent-workflow'
-import { ALL_DONE_PHASE, cardState, isNodeLit, travelingWire, wireState } from './use-agent-loop'
+import { AgentWorkflow } from '@/features/auth/components/agent-workflow/agent-workflow'
+import { ALL_DONE_PHASE, cardState, isNodeLit, travelingWire, wireState } from '@/features/auth/components/agent-workflow/use-agent-loop'
 
 const ORDER = [
   'Home Wishlist',
