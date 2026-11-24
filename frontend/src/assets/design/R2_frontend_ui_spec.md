@@ -99,7 +99,7 @@ One authored moment per surface, as in R1. All delays come from a `--d` variable
 - **Strip:** segments grow from the left using `r1-pip` (420ms), 80ms apart.
 - **Ring (focal):** rings draw outward over 600ms (`cubic-bezier(.2,.8,.2,1)`), then markers pop with `r1-chip-pop` (450ms, 40ms stagger, capped at 600ms total), the apartment dot last.
 - **Category switch:** workspace content cross-fades; cards rise with `r1-card-rise` 60ms apart, capped so ten cards finish under 600ms. Ring and strip do not move.
-- **Loading:** `r1-sheen` skeletons in the panel and the rail; the status line says it is still working after 12 seconds (R1's slow wait).
+- **Loading:** `r1-sheen` skeletons in the panel and the rail; the status line says it is still working after 120 seconds (the same as R1's 120-second work timeout).
 - **Reduced motion:** every animation removed; shapes appear complete; transitions off (the R1 media block).
 - Wires and the traveling light are the product's "agents handing work along" motif and do not belong on a results page. Do not use them here, apart from the single apartment dot.
 

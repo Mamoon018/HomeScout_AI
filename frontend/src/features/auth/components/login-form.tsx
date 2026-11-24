@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { ArrowBigUpDash, Loader2 } from 'lucide-react'
@@ -16,7 +16,6 @@ import { Checkbox } from '@/components/ui/checkbox'
 import {
   Field,
   FieldDescription,
-  FieldError,
   FieldGroup,
   FieldLabel,
 } from '@/components/ui/field'
@@ -24,14 +23,23 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useLogin } from '@/features/auth/hooks/useLogin'
 import { useSignupCaptcha } from '@/features/auth/hooks/useSignupCaptcha'
-import {
-  INVALID_INPUT_MESSAGE,
-  loginSchema,
-  type LoginFormData,
-} from '@/features/auth/utils/loginSchema'
+import { loginSchema, type LoginFormData } from '@/features/auth/utils/loginSchema'
+import { FieldRulePopover } from '@/features/auth/components/field-rule-popover'
 import { SignupCaptcha } from '@/features/auth/components/signup-captcha'
+import { SubmitHint } from '@/features/auth/components/submit-hint'
 import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 
+const EMAIL_RULE_ID = 'login-email-rule'
+const PASSWORD_RULE_ID = 'login-password-rule'
+const SUBMIT_HINT_ID = 'login-submit-hint'
+
+/**
+ * Sign-in card. react-hook-form checks each field against loginSchema (shared rules) once the
+ * user leaves it, then live while typing; useLogin submits.
+ *
+ * Data path: input → LoginForm → loginSchema (authFieldRules) → popovers / submit button
+ *   → submit → useLogin → authApi.login → FastAPI → useLogin (toasts, redirect)
+ */
 export function LoginForm({
   className,
   ...props
@@ -48,15 +56,26 @@ export function LoginForm({
   const {
     register,
     handleSubmit,
-    formState: { errors },
+    formState: { errors, isValid },
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
-    mode: 'onSubmit',
+    // Check a field when the user leaves it, then on every change after that.
+    mode: 'onTouched',
     defaultValues: {
       email: '',
       password: '',
     },
   })
+
+  // Popovers point at the inputs, so keep our own element refs beside react-hook-form's.
+  const emailAnchor = useRef<HTMLInputElement>(null)
+  const passwordAnchor = useRef<HTMLInputElement>(null)
+  const emailField = register('email')
+  const passwordField = register('password')
+  const passwordDescribedBy =
+    [errors.password ? PASSWORD_RULE_ID : null, capsLockOn ? 'caps-lock-hint' : null]
+      .filter(Boolean)
+      .join(' ') || undefined
 
   return (
     <div className={cn('flex flex-col gap-6', className)} {...props}>
@@ -79,11 +98,19 @@ export function LoginForm({
                   autoComplete="email"
                   disabled={isSubmitting}
                   aria-invalid={!!errors.email}
-                  {...register('email')}
+                  aria-describedby={errors.email ? EMAIL_RULE_ID : undefined}
+                  {...emailField}
+                  ref={(element) => {
+                    emailField.ref(element)
+                    emailAnchor.current = element
+                  }}
                 />
-                <FieldError>
-                  {errors.email ? INVALID_INPUT_MESSAGE : null}
-                </FieldError>
+                <FieldRulePopover
+                  id={EMAIL_RULE_ID}
+                  open={!!errors.email}
+                  anchor={emailAnchor}
+                  message={errors.email?.message ?? ''}
+                />
               </Field>
               <Field data-invalid={!!errors.password}>
                 <FieldLabel htmlFor="login-password">Password</FieldLabel>
@@ -93,10 +120,20 @@ export function LoginForm({
                   autoComplete="current-password"
                   disabled={isSubmitting}
                   aria-invalid={!!errors.password}
-                  aria-describedby={capsLockOn ? 'caps-lock-hint' : undefined}
+                  aria-describedby={passwordDescribedBy}
                   onKeyDown={syncCapsLock}
                   onKeyUp={syncCapsLock}
-                  {...register('password')}
+                  {...passwordField}
+                  ref={(element) => {
+                    passwordField.ref(element)
+                    passwordAnchor.current = element
+                  }}
+                />
+                <FieldRulePopover
+                  id={PASSWORD_RULE_ID}
+                  open={!!errors.password}
+                  anchor={passwordAnchor}
+                  message={errors.password?.message ?? ''}
                 />
                 {capsLockOn ? (
                   <p
@@ -126,9 +163,6 @@ export function LoginForm({
                     Show password
                   </Label>
                 </div>
-                <FieldError>
-                  {errors.password ? INVALID_INPUT_MESSAGE : null}
-                </FieldError>
               </Field>
               <SignupCaptcha
                 disabled={isSubmitting}
@@ -140,7 +174,10 @@ export function LoginForm({
                   type="submit"
                   data-slot="auth-submit"
                   className="w-full"
-                  disabled={isSubmitting || (isCaptchaEnabled() && !captcha.hasCaptchaToken)}
+                  disabled={
+                    isSubmitting || !isValid || (isCaptchaEnabled() && !captcha.hasCaptchaToken)
+                  }
+                  aria-describedby={isValid ? undefined : SUBMIT_HINT_ID}
                 >
                   {isSubmitting ? (
                     <>
@@ -151,6 +188,7 @@ export function LoginForm({
                     'Sign In'
                   )}
                 </Button>
+                <SubmitHint id={SUBMIT_HINT_ID} visible={!isValid} />
                 <FieldDescription className="text-center">
                   Don&apos;t have an account?{' '}
                   <Link to="/auth/signup">Create account</Link>

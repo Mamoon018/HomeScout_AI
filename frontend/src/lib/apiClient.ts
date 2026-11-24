@@ -1,4 +1,5 @@
 /** Shared same-origin fetch with reactive refresh-and-retry on token expiry. */
+import { warnIfMockIdInLive } from '@/lib/mockMode'
 
 export type ApiErrorBody = {
   error?: string
@@ -120,6 +121,8 @@ export async function apiFetch<T>(
   init: RequestInit,
   options: ApiFetchOptions = {},
 ): Promise<ApiResponse<T>> {
+  warnIfMockIdInLive(path)
+
   if (refreshInFlight && !options.skipRefresh) {
     await refreshInFlight
     await commitSessionCookies()

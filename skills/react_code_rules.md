@@ -58,6 +58,12 @@
   
     **Goal:** Centralize shared technical functionality instead of duplicating it across features.
 
+* **Development mock backend and stored backend responses → `mocks/`**
+  
+  ***Definition:*** Contains everything that stands in for the backend during development: `fixtures/` (stored backend responses, exactly as the endpoints send them) and the dev-only mock that serves them in the browser (the `fetch` interceptor, its route table, scenarios and run store). The fixtures are shared: the dev mock reads them, and so do the tests and the fake servers in `test/`. Code in `mocks/` is loaded only when mock mode is on in a development build, never statically imported by features, pages or `lib/`, and never part of a production bundle. The small switch that decides the mode (and resets tab storage when it changes) is configuration, so it lives in `lib/`, not here.
+  
+    **Goal:** Keep one copy of the backend's response shapes that both UI development and tests use, and keep fake-backend code out of the code that ships.
+
 * **Pages/final composition → `pages/`**
   
   ***Definition:*** Contains the actual pages/screens that bring together components, hooks, and feature functionality to produce a complete webpage.
@@ -85,7 +91,7 @@
 
 * **Tests → `test/`**
   
-  ***Definition:*** Contains every test file plus the shared test infrastructure: `setup.ts`, `fixtures/` (stored backend responses), `mocks/` (mocked third-party modules), fake servers (e.g. `r1Server.ts`), and shared test utils. Tests are not kept next to the source file they test.
+  ***Definition:*** Contains every test file plus the shared test infrastructure: `setup.ts`, `mocks/` (mocked third-party modules, e.g. `turnstile.tsx`; not the same as the top-level `mocks/`), fake servers (e.g. `r1Server.ts`), and shared test utils. Stored backend responses are not kept here: tests import them from the top-level `mocks/fixtures/` (`@/mocks/fixtures/...`) so tests and the dev mock share one copy. Tests are not kept next to the source file they test.
   
     **Goal:** Keep test code out of the source folders while keeping it as easy to navigate as the source.
   
@@ -93,6 +99,7 @@
   - `test/<feature>/` — tests for `features/<feature>/` (e.g. `test/auth/login-form.test.tsx`, `test/r1-interpretation/normalizeRun.test.ts`)
   - `test/pages/` — tests for `pages/`
   - `test/lib/` — tests for `lib/`
+  - `test/mock-backend/` — tests for the top-level `mocks/` (the dev mock and the fixture-contract test); named so it does not collide with `test/mocks/`
   
   Name a test after the file it tests: `<file>.test.ts(x)`, or `<file>.<scenario>.test.ts(x)` when one file has several test files (e.g. `authApi.login.test.ts`, `HomePage.run.test.tsx` for the live-run flow). Import the code under test with the `@/` alias, not relative paths.
 
@@ -118,6 +125,7 @@
 14. **Data-flow rule** — Explicitly define where data originates, where it is transformed, and which component ultimately consumes it. Data path — Document the flow explicitly: For example, User input → login-form.tsx → useLogin.ts → authApi.ts → Backend → authApi.ts → useLogin.ts → login-form.tsx
 15. **Final-composition rule** — The page should make the overall feature flow easy to understand by reading it, without needing to inspect every implementation detail.
 16. **Validation rule** — After implementation, verify that no API calls, business logic, helper functions, or state-management logic have been placed in the wrong layer.
+17. **Mock-isolation rule** — Features, pages and `lib/` never import from `mocks/`. The only way in is the DEV-only dynamic import in `main.tsx`, and the production build must fail if mock code reaches `dist/`. A stored backend response is added to `mocks/fixtures/` once and reused by tests and the dev mock, never copied.
 
 
 ### Key Instructions to Manage Code effectively in Vite Folder

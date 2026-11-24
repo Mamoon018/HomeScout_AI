@@ -16,7 +16,7 @@ import {
   R3_ERROR,
   R3_RUN_ID,
   R3_RUN_ID_B,
-} from '@/test/fixtures/r3Bodies'
+} from '@/mocks/fixtures/r3Bodies'
 import type { Reply } from '@/test/r1Server'
 import { mockR3Api, type R3Call } from '@/test/r3Server'
 

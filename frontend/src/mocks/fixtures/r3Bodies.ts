@@ -4,7 +4,7 @@
  * down to the cases the page must handle: a full fit, a "No", a mixed opinion, every unresolved
  * reason, a currency value, a missing walk route, and a category with no questions.
  */
-import { record } from '@/test/fixtures/r2Bodies'
+import { record } from '@/mocks/fixtures/r2Bodies'
 
 export const R3_RUN_ID = '5b1e7c3d-0000-4000-8000-000000000000'
 export const R2_RUN_ID = '7c4d9e2a-0000-4000-8000-000000000000'
@@ -98,7 +98,7 @@ export const R2_FINISHED = {
 const CHECKED = '2026-11-14T10:20:00+00:00'
 
 /** Phase-1 evidence items: what the search found per label (source counts, the check date). */
-function phase1(items: { url: string | null; kind?: string; labels: string[] }[], outcomes: Record<string, string> = {}) {
+export function phase1(items: { url: string | null; kind?: string; labels: string[] }[], outcomes: Record<string, string> = {}) {
   return {
     messages: [],
     metrics_source_content: {
@@ -129,7 +129,7 @@ type Kept = {
   evidence?: { source: string; url: string | null; quote: string }[]
 }
 
-function kept(label: string, k: Kept) {
+export function kept(label: string, k: Kept) {
   return {
     metric_label: label,
     web_value: k.web ?? null,
@@ -144,7 +144,7 @@ function kept(label: string, k: Kept) {
   }
 }
 
-function row(categoryId: number, placeId: string, website: string | null, value: Record<string, unknown>) {
+export function row(categoryId: number, placeId: string, website: string | null, value: Record<string, unknown>) {
   return {
     category_id: categoryId,
     place_id: placeId,

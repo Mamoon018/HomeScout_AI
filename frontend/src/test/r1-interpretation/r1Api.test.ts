@@ -5,8 +5,8 @@ import {
   submitAnswers,
   toWireAnswers,
 } from '@/features/r1-interpretation/api/r1Api'
-import { BODY, RUN_FAILED_BODY, RUN_ID } from '@/test/fixtures/r1Bodies'
-import { QUESTIONS } from '@/test/fixtures/r1Questions'
+import { BODY, RUN_FAILED_BODY, RUN_ID } from '@/mocks/fixtures/r1Bodies'
+import { QUESTIONS } from '@/mocks/fixtures/r1Questions'
 import { mockRunApi, type Reply } from '@/test/r1Server'
 
 afterEach(() => {

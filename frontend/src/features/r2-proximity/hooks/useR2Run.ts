@@ -18,7 +18,7 @@ export const POLL_MS = 2_000
 /** Backoff ceiling while the status call keeps failing. */
 const POLL_MAX_MS = 10_000
 /** After this long the waiting line says it is still going, so it never looks frozen. */
-export const SLOW_AFTER_MS = 12_000
+export const SLOW_AFTER_MS = 120_000
 /** Consecutive failed reads before the page says the connection is the problem. */
 const FAILS_BEFORE_NOTICE = 3
 

@@ -1,4 +1,4 @@
-import { RUN_ID as R1_RUN_ID } from '@/test/fixtures/r1Bodies'
+import { RUN_ID as R1_RUN_ID } from '@/mocks/fixtures/r1Bodies'
 
 export { R1_RUN_ID }
 export const R2_RUN_ID = '7c4d9e2a-0000-4000-8000-000000000000'

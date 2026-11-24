@@ -95,8 +95,8 @@ function OliveAuthBody({
         <div
           className={cn(
             'w-full max-w-[400px] [grid-area:form]',
-            // 137px = where "Our agent finds the match." starts below the top of the hero.
-            besideTagline ? 'xl:mt-[137px] xl:self-start' : 'xl:self-center',
+            // 49px below the headline top, so the legal line ends just above the workflow's bottom cards.
+            besideTagline ? 'xl:mt-[49px] xl:self-start' : 'xl:self-center',
           )}
         >
           {formContent}

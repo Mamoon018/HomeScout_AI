@@ -14,6 +14,8 @@ COPY tsconfig.json tsconfig.app.json tsconfig.node.json ./
 COPY vite.config.ts tailwind.config.ts index.html ./
 COPY public ./public
 COPY src ./src
+# The build script ends with the production-leak gate (scripts/checkNoMock.mjs)
+COPY scripts ./scripts
 
 # Vite inlines env at build time (see vite.config.ts envPrefix: VITE_, SUPABASE_, SITE_KEY_)
 # Pass via: docker build --build-arg SUPABASE_PROJECT_URL=... etc.

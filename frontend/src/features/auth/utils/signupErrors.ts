@@ -1,4 +1,11 @@
 import { isAuthApiError, type AuthResponse } from '@supabase/supabase-js'
+import {
+  validateAge,
+  validateConfirmPassword,
+  validateEmail,
+  validateNewPassword,
+  validateRequired,
+} from '@/features/auth/utils/authFieldRules'
 
 export type SignUpFormData = {
   fullName: string
@@ -51,53 +58,41 @@ const CONNECTION_CODES = new Set(['request_timeout'])
 
 const CONNECTION_HTTP_STATUSES = new Set([0, 502, 503, 504])
 
-/** Must match the Supabase project's minimum password length (and backend/supabase/config.toml). */
-export const MIN_PASSWORD_LENGTH = 10
+/** A sign-up field and the rule message it currently breaks. */
+export type SignupField = keyof SignUpFormData
+export type SignupFieldErrors = Partial<Record<SignupField, string>>
 
-/** Parses age from form input into a positive integer for database int8 storage. */
-export function parseSignupAge(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed === '' || !/^\d+$/.test(trimmed)) {
-    return null
+/** Checks every sign-up field against the shared rules; only broken fields appear. */
+export function validateSignupFields(formData: SignUpFormData): SignupFieldErrors {
+  const checks: Record<SignupField, string | null> = {
+    fullName: validateRequired(formData.fullName),
+    email: validateEmail(formData.email),
+    age: validateAge(formData.age),
+    country: validateRequired(formData.country),
+    city: validateRequired(formData.city),
+    zipCode: validateRequired(formData.zipCode),
+    password: validateNewPassword(formData.password),
+    confirmPassword: validateConfirmPassword(formData.confirmPassword, formData.password),
   }
 
-  const parsed = Number.parseInt(trimmed, 10)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    return null
+  const errors: SignupFieldErrors = {}
+  for (const field of Object.keys(checks) as SignupField[]) {
+    const message = checks[field]
+    if (message) {
+      errors[field] = message
+    }
   }
-
-  return parsed
+  return errors
 }
 
-/** Runs client-side checks before the signup API call. Returns a category when invalid. */
+/**
+ * Last check before the signup API call. The submit button already stays disabled while a
+ * field is invalid, so this only catches a bypassed button. Returns a category when invalid.
+ */
 export function validateSignupForm(
   formData: SignUpFormData,
 ): SignupErrorCategory | null {
-  const requiredFields = [
-    formData.fullName,
-    formData.email,
-    formData.country,
-    formData.city,
-    formData.zipCode,
-  ]
-
-  if (requiredFields.some((value) => value.trim() === '')) {
-    return 'validation'
-  }
-
-  if (parseSignupAge(formData.age) === null) {
-    return 'validation'
-  }
-
-  if (formData.password.length < MIN_PASSWORD_LENGTH) {
-    return 'validation'
-  }
-
-  if (formData.password !== formData.confirmPassword) {
-    return 'validation'
-  }
-
-  return null
+  return Object.keys(validateSignupFields(formData)).length > 0 ? 'validation' : null
 }
 
 function isNetworkError(error: unknown) {

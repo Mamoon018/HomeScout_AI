@@ -12,6 +12,16 @@
       "url": "https://localhost:5173"
     },
     {
+      "name": "frontend-mock",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd frontend && set VITE_USE_MOCK_API=true&& npx vite --port 5174 --strictPort"
+      ],
+      "port": 5174,
+      "url": "https://localhost:5174"
+    },
+    {
       "name": "backend-dev",
       "runtimeExecutable": "cmd",
       "runtimeArgs": [

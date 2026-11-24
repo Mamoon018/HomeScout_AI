@@ -48,6 +48,9 @@ export async function completeCaptcha(user: UserEvent) {
   )
 }
 
+/** Meets every Supabase password rule: 10+ characters, lower, upper, digit, symbol. */
+export const VALID_SIGNUP_PASSWORD = 'Password123!'
+
 function setInputValue(element: HTMLElement, value: string) {
   fireEvent.change(element, { target: { value } })
 }
@@ -64,13 +67,13 @@ export async function fillValidSignupForm(user: UserEvent) {
   await user.click(await screen.findByRole('option', { name: 'New York' }))
 
   setInputValue(screen.getByLabelText('Zip code'), '10001')
-  setInputValue(screen.getByLabelText('Password'), 'password123')
-  setInputValue(screen.getByLabelText('Confirm Password'), 'password123')
+  setInputValue(screen.getByLabelText('Password'), VALID_SIGNUP_PASSWORD)
+  setInputValue(screen.getByLabelText('Confirm Password'), VALID_SIGNUP_PASSWORD)
 }
 
 export async function fillSignupFormWithPasswordMismatch(user: UserEvent) {
   await fillValidSignupForm(user)
-  setInputValue(screen.getByLabelText('Confirm Password'), 'different-password')
+  setInputValue(screen.getByLabelText('Confirm Password'), 'Different123!')
 }
 
 export async function findToastMessage(message: string) {

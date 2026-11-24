@@ -1,5 +1,5 @@
 import { AuthApiError } from '@supabase/supabase-js'
-import { screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { signUp } from '@/features/auth/api/authApi'
 import {
@@ -79,10 +79,11 @@ describe('SignupForm captcha UX', () => {
       expectSubmitDisabled()
     })
 
-    it('completing captcha enables submit', async () => {
+    it('completing captcha enables submit once the fields are valid', async () => {
       const user = userEvent.setup()
       renderSignupForm()
 
+      await fillValidSignupForm(user)
       await completeCaptcha(user)
       expectSubmitEnabled()
     })
@@ -122,7 +123,10 @@ describe('SignupForm captcha UX', () => {
 
       await fillSignupFormWithPasswordMismatch(user)
       await completeCaptcha(user)
-      await user.click(getSubmitButton())
+      // The button stays disabled for an invalid form, so submit the form directly to reach
+      // the last-check guard in useSignup.
+      expectSubmitDisabled()
+      fireEvent.submit(getSubmitButton().closest('form')!)
 
       await findToastMessage(SIGNUP_USER_MESSAGES.validation)
       await expectCaptchaNotVerified()
@@ -165,6 +169,7 @@ describe('SignupForm captcha UX', () => {
       const user = userEvent.setup()
       renderSignupForm()
 
+      await fillValidSignupForm(user)
       await completeCaptcha(user)
       expectSubmitEnabled()
 
@@ -193,6 +198,7 @@ describe('SignupForm captcha UX', () => {
       const user = userEvent.setup()
       renderSignupForm()
 
+      await fillValidSignupForm(user)
       await completeCaptcha(user)
       await user.click(
         screen.getByRole('button', { name: 'Captcha connection error' }),

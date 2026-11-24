@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 import { HomePage } from '@/pages/HomePage'
-import { BODY, RUN_FAILED_BODY, RUN_ID, dropNulls } from '@/test/fixtures/r1Bodies'
-import { PLAN } from '@/test/fixtures/r1Plan'
+import { BODY, RUN_FAILED_BODY, RUN_ID, dropNulls } from '@/mocks/fixtures/r1Bodies'
+import { PLAN } from '@/mocks/fixtures/r1Plan'
 import { LONG_BRIEF, mockRunApi, type Call, type Reply } from '@/test/r1Server'
 
 /** The page's lost-session handler, replaced so tests can see when it is called. */

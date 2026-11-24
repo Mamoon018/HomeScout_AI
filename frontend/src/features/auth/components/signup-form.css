@@ -1,0 +1,31 @@
+/**
+ * Signup card spacing. Tighter than the shared auth card (theme-olive-auth.css) so the whole
+ * form fits a 900px-tall screen without scrolling. Scoped to data-form="signup", so the
+ * sign-in card is unchanged. Font sizes and the Create Account button keep their size.
+ */
+
+/* Inputs and dropdowns: 40px (shared card uses 42px). */
+html.auth-olive [data-slot='auth-card'][data-form='signup'] [data-slot='input'],
+html.auth-olive [data-slot='auth-card'][data-form='signup'] [data-slot='select-trigger'] {
+  height: 40px;
+}
+
+/* Title → subtitle: 6px. */
+html.auth-olive [data-slot='auth-card'][data-form='signup'] [data-slot='card-header'] {
+  row-gap: 6px;
+}
+
+/* Between fields: 12px. */
+html.auth-olive [data-slot='auth-card'][data-form='signup'] [data-slot='field-group'] {
+  gap: 12px;
+}
+
+/* Label → input: 6px (only fields that start with a label). */
+html.auth-olive [data-slot='auth-card'][data-form='signup'] [data-slot='field']:has(> [data-slot='field-label']) {
+  gap: 6px;
+}
+
+/* Two-column rows (Age/Zip, Country/City, Passwords): 12px both ways. */
+html.auth-olive [data-slot='auth-card'][data-form='signup'] .grid-cols-2 {
+  gap: 12px;
+}
