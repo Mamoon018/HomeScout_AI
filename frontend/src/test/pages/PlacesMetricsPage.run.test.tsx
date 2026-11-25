@@ -113,9 +113,12 @@ describe('before a run', () => {
     expect(calls[0]).toBe('r3 POST /')
     expect(bodies[0]).toEqual({ r2_run_id: R2_RUN_ID })
     expect(screen.getByText(/Finding each place’s own website/)).toHaveTextContent('(in progress)')
-    // The address bar is the run's only copy; nothing is written to tab storage.
+    // The address bar names the run, and the tab keeps it beside the R2 run it started from.
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`?run=${R3_RUN_ID}`))
-    expect(window.sessionStorage.getItem('homescout.r3.run')).toBeNull()
+    expect(JSON.parse(window.sessionStorage.getItem('homescout.r3.run')!)).toEqual({
+      runId: R3_RUN_ID,
+      r2RunId: R2_RUN_ID,
+    })
   })
 
   it('explains a start refused because the amenity search is not finished (404)', async () => {
@@ -265,7 +268,7 @@ describe('moving between pages', () => {
     expect(screen.queryByRole('link', { name: /Start over/ })).toBeNull()
   })
 
-  it('offers Start over once the result is final, and it forgets this tab’s R1 and R2 runs', async () => {
+  it('offers Start over once the result is final, and it forgets this tab’s R1, R2 and R3 runs', async () => {
     rememberAmenitySearch()
     window.sessionStorage.setItem('homescout.r1.runId', R1_RUN_ID)
     mockR3Api({ [`r3 GET /${R3_RUN_ID}`]: () => ok(R3_BODY.finished), ...CONTEXT })
@@ -275,6 +278,18 @@ describe('moving between pages', () => {
     fireEvent.click(startOver)
     expect(window.sessionStorage.getItem('homescout.r1.runId')).toBeNull()
     expect(window.sessionStorage.getItem('homescout.r2.run')).toBeNull()
+    expect(window.sessionStorage.getItem('homescout.r3.run')).toBeNull()
+  })
+
+  it('coming back for the same amenity search reopens the finished result without starting again', async () => {
+    rememberAmenitySearch()
+    window.sessionStorage.setItem('homescout.r3.run', JSON.stringify({ runId: R3_RUN_ID, r2RunId: R2_RUN_ID }))
+    const { calls } = mockR3Api({ [`r3 GET /${R3_RUN_ID}`]: () => ok(R3_BODY.finished), ...CONTEXT })
+    renderPage()
+    expect(await screen.findByRole('link', { name: 'Start over for another home?' })).toBeInTheDocument()
+    expect(calls).toContain(`r3 GET /${R3_RUN_ID}`)
+    expect(calls).not.toContain('r3 POST /')
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`?run=${R3_RUN_ID}`))
   })
 })
 
@@ -310,6 +325,7 @@ describe('failures', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Start again' }))
     expect(screen.getByRole('button', { name: 'Check my questions' })).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent(/^$/)
+    expect(window.sessionStorage.getItem('homescout.r3.run')).toBeNull()
   })
 
   it('a run that no longer exists resets to the start (404)', async () => {
@@ -391,13 +407,14 @@ describe('the run chain', () => {
     expect(calls).not.toContain(`r1 GET /${R1_RUN_ID}`)
   })
 
-  it('opening the page without ?run= starts clean, even with an old stored run', async () => {
+  it('opening the page without ?run= starts clean when the stored run belongs to another amenity search', async () => {
     rememberAmenitySearch()
-    window.sessionStorage.setItem('homescout.r3.run', JSON.stringify({ runId: R3_RUN_ID, r2RunId: R2_RUN_ID }))
+    window.sessionStorage.setItem('homescout.r3.run', JSON.stringify({ runId: R3_RUN_ID_B, r2RunId: R2_RUN_ID_B }))
     const { calls } = mockR3Api({})
     renderPage()
     expect(screen.getByRole('button', { name: 'Check my questions' })).toBeInTheDocument()
     expect(calls).toHaveLength(0)
+    expect(window.sessionStorage.getItem('homescout.r3.run')).toBeNull()
   })
 })
 

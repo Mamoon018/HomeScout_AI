@@ -4,6 +4,7 @@
  * The mock itself lives in `mocks/` and is never imported from here.
  */
 import { clearAuthUser } from '@/features/auth/utils/authUserStore'
+import { clearR3Run } from '@/features/places-metrics/utils/runStorage'
 import { clearRunId } from '@/features/r1-interpretation/utils/runStorage'
 import { clearR2Run } from '@/features/r2-proximity/utils/runStorage'
 
@@ -30,6 +31,7 @@ export function resetOnModeChange(mockOn: boolean): void {
   if ((previous ?? 'live') !== mode) {
     clearRunId()
     clearR2Run()
+    clearR3Run()
     try {
       clearAuthUser()
     } catch {
