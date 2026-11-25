@@ -12,12 +12,6 @@ HomeScout looks past raw listings and map results. It interprets your stated pri
 
 ---
 
-## Demo
-
-[![HomeScout demo](https://img.youtube.com/vi/L3r1MxU66Fw/hqdefault.jpg)](https://www.youtube.com/watch?v=L3r1MxU66Fw)
-
----
-
 ## The problem
 
 Choosing an apartment, and judging whether its neighborhood works for you, is tedious and manual:
