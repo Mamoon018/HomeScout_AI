@@ -6,6 +6,10 @@ HomeScout looks past raw listings and map results. It interprets your stated pri
 
 > **Project status:** rapid, active development. **Deep Search** is done: its neighborhood-quality pipeline (requirement interpretation → amenity search → specific attribute resolution) runs as three independent, resumable backend services. The current focus is the **[Apartment Search Agent with a persistent memory layer](#apartment-search-agent-with-persistent-memory-247-current-focus)**, which searches for apartments 24/7.
 
+## Demo
+
+[![HomeScout demo](https://img.youtube.com/vi/L3r1MxU66Fw/hqdefault.jpg)](https://www.youtube.com/watch?v=L3r1MxU66Fw)
+
 ---
 
 ## The problem
