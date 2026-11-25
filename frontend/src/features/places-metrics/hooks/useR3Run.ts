@@ -3,7 +3,9 @@
  * context its result is joined with.
  *
  * Showing a run follows the run's own chain by id (R3 body → its R2 run → that run's R1 run) and
- * never reads tab storage; "the last R2 run in this tab" is used only to start a new run.
+ * never reads tab storage for its context; "the last R2 run in this tab" starts a new run. The
+ * R3 run is also saved for the tab beside its R2 run, and reopened without ?run= only when that
+ * R2 run is still the tab's, so one search never shows another search's result.
  *
  * Every phase is entered by a real event (a request starting, a response, a status, a poll
  * result, a user action); nothing pretends to know progress the backend does not report.
@@ -16,14 +18,17 @@
  *   any       ─ Start again ───────▶ setup (?run= cleared)
  *   any       ─ 404 on read ───────▶ setup + "not found";  401 → onUnauthenticated
  *   mount     ─ ?run= ─────────────▶ running (read at once, then as its status says)
+ *   mount     ─ no ?run=, saved run of the tab's R2 run ─▶ the same, for the saved run
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { getRun as getR1Run } from '@/features/r1-interpretation/api/r1Api'
 import { getR2Run } from '@/features/r2-proximity/api/r2Api'
-import { loadR2Run } from '@/features/r2-proximity/utils/runStorage'
+import { clearRunId } from '@/features/r1-interpretation/utils/runStorage'
+import { clearR2Run, loadR2Run } from '@/features/r2-proximity/utils/runStorage'
 import { getR3Run, retryR3Run, startR3Run } from '@/features/places-metrics/api/r3Api'
+import { clearR3Run, loadR3Run, saveR3Run } from '@/features/places-metrics/utils/runStorage'
 import type { PlacesMetricsResult } from '@/features/places-metrics/types/placesMetrics'
 import type { R3Result, R3RunView } from '@/features/places-metrics/types/r3Run'
 import { buildPlacesMetrics, type PlacesMetricsContext } from '@/features/places-metrics/utils/buildPlacesMetrics'
@@ -63,7 +68,7 @@ type Options = { onUnauthenticated?: () => void }
 export function useR3Run({ onUnauthenticated }: Options = {}) {
   const [params, setParams] = useSearchParams()
   const [phase, setPhase] = useState<R3Phase>('setup')
-  /** The run on screen; the address bar (`?run=`) is its only other copy. */
+  /** The run on screen; also in the address bar (`?run=`) and, with its R2 run, in tab storage. */
   const [runId, setRunId] = useState<string | null>(null)
   const [view, setView] = useState<R3RunView | null>(null)
   const [result, setResult] = useState<PlacesMetricsResult | null>(null)
@@ -100,6 +105,8 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
       setPhase('setup')
       setNotice(next)
       setParams({}, { replace: true })
+      // Left on purpose or gone: coming back must not reopen it.
+      clearR3Run()
     },
     [setParams, stopTimers],
   )
@@ -154,6 +161,8 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
   const apply = useCallback(
     (v: R3RunView, my: number) => {
       setView(v)
+      // Remembered beside the R2 run its body names, so the same search can reopen it later.
+      if (v.r2RunId) saveR3Run({ runId: v.runId, r2RunId: v.r2RunId })
       if (v.status === 'running') {
         setPhase('running')
         return
@@ -236,10 +245,18 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
     [apply, poll, setParams, stopTimers, toSetup],
   )
 
-  // Restore on load: the address bar is the only source; the run's body names its own parents.
+  // Restore on load: the address bar first; else the tab's saved run, only if it was started from
+  // the tab's current R2 run (a newer amenity search starts fresh). The body names its own parents.
   useEffect(() => {
     const urlRun = params.get('run')
-    if (urlRun) follow(urlRun, null)
+    const stored = loadR3Run()
+    if (urlRun) {
+      follow(urlRun, null)
+    } else if (stored && stored.r2RunId === r2RunId) {
+      follow(stored.runId, null)
+    } else if (stored) {
+      clearR3Run()
+    }
     return () => {
       // The live ref on purpose: any response for a run started before unmount must be dropped.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -315,6 +332,13 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
 
   const startAgain = useCallback(() => toSetup(null), [toSetup])
 
+  /** Forgets this tab's saved R1, R2 and R3 runs so Home opens with an empty composer (nothing is deleted). */
+  const startOver = useCallback(() => {
+    clearRunId()
+    clearR2Run()
+    clearR3Run()
+  }, [])
+
   const step: R3Step = phase === 'finished' ? 'writing' : view?.completedStep === 'discovery_batch' ? 'research' : 'websites'
 
   return {
@@ -329,6 +353,7 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
     start,
     retry,
     startAgain,
+    startOver,
     reloadContext,
   }
 }

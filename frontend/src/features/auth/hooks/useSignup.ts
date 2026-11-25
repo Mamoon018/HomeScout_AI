@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { signUp } from '@/features/auth/api/authApi'
 import type { SignupCaptchaControls } from '@/features/auth/hooks/useSignupCaptcha'
+import { normalizeEmail, parseSignupAge } from '@/features/auth/utils/authFieldRules'
 import { isCaptchaEnabled } from '@/features/auth/utils/captchaConfig'
 import {
   classifySignupError,
   isDuplicateSignupResponse,
   logSignupError,
-  parseSignupAge,
   SIGNUP_USER_MESSAGES,
   validateSignupForm,
   type SignUpFormData,
@@ -62,7 +62,8 @@ export function useSignup(captcha: SignupCaptchaControls) {
 
     try {
       const { data, error } = await signUp({
-        email: formData.email,
+        // Sent as checked: surrounding spaces removed.
+        email: normalizeEmail(formData.email),
         password: formData.password,
         fullName: formData.fullName,
         age: parsedAge,

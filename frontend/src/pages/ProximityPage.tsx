@@ -2,6 +2,8 @@ import { useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { CheckIcon } from 'lucide-react'
 
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
+import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/r2-proximity/components/proximity.css'
 import { CategoryRail } from '@/features/r2-proximity/components/category-rail'
 import { CategoryWorkspace } from '@/features/r2-proximity/components/category-workspace'
@@ -9,20 +11,22 @@ import { RunNotice, StartPanel, WaitingPanel } from '@/features/r2-proximity/com
 import { SummaryPanel } from '@/features/r2-proximity/components/summary-panel'
 import { useR2Run } from '@/features/r2-proximity/hooks/useR2Run'
 import type { TravelMode } from '@/features/r2-proximity/types/r2'
-import { formatKm, pageCategories, type PageCategory } from '@/features/r2-proximity/utils/present'
+import { formatKm, pageCategories, planHref, type PageCategory } from '@/features/r2-proximity/utils/present'
 import type { Reach } from '@/features/r2-proximity/utils/summary'
 import { useDocumentClasses } from '@/lib/useDocumentClasses'
 
 const THEME = ['theme-olive']
 const MODES_LINE = 'walk, cycle, drive and transit times'
 
-type ProximityPageProps = {
-  onUnauthenticated?: () => void
+type LiveProximityProps = {
+  onUnauthenticated: () => void
 }
 
 /** R2 results for one apartment: what's around it and how reachable each place is, by mode. */
-export function ProximityPage({ onUnauthenticated }: ProximityPageProps) {
+export function ProximityPage() {
   useDocumentClasses(THEME)
+  // A 401 from the run endpoints (that refreshing did not fix) sends the renter to sign in.
+  const onUnauthenticated = useUnauthenticatedRedirect()
 
   return (
     <div className="flex min-h-svh flex-col">
@@ -36,7 +40,7 @@ export function ProximityPage({ onUnauthenticated }: ProximityPageProps) {
   )
 }
 
-function LiveProximity({ onUnauthenticated }: ProximityPageProps) {
+function LiveProximity({ onUnauthenticated }: LiveProximityProps) {
   const run = useR2Run({ onUnauthenticated })
   const categories = useMemo(
     () =>
@@ -45,7 +49,8 @@ function LiveProximity({ onUnauthenticated }: ProximityPageProps) {
         : [],
     [run.view, run.r1],
   )
-  const radiusKm = run.saved?.radiusKm ?? 2
+  // A run opened from a link knows its radius only after its first response.
+  const radiusKm = run.saved && Number.isFinite(run.saved.radiusKm) ? run.saved.radiusKm : 2
   const radiusLabel = formatKm(radiusKm)
   const origin =
     run.saved !== null && Number.isFinite(run.saved.latitude)
@@ -97,8 +102,20 @@ function LiveProximity({ onUnauthenticated }: ProximityPageProps) {
       ) : null}
 
       {run.phase === 'finished' && categories.length > 0 ? (
-        <Results categories={categories} radiusKm={radiusKm} />
+        <Results categories={categories} radiusKm={radiusKm} r1RunId={run.saved?.r1RunId || run.r1RunId} />
       ) : null}
+
+      {/* Back is always offered; forward only once the search has places to judge. */}
+      <nav aria-label="Next steps" className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+        <PageStepLink to={planHref(run.saved?.r1RunId || run.r1RunId)} direction="back">
+          Go back to Search Plan
+        </PageStepLink>
+        {run.phase === 'finished' && categories.length > 0 ? (
+          <PageStepLink to="/places_metrics" direction="forward">
+            Let&apos;s get Needs Fit Analysis
+          </PageStepLink>
+        ) : null}
+      </nav>
     </>
   )
 }
@@ -132,10 +149,12 @@ function FinishedMark(): ReactNode {
 type ResultsProps = {
   categories: PageCategory[]
   radiusKm: number
+  /** The R1 run behind this search, for the link back to its plan. */
+  r1RunId: string | null
 }
 
 /** Summary panel, then the category rail beside the selected category's workspace. */
-function Results({ categories, radiusKm }: ResultsProps) {
+function Results({ categories, radiusKm, r1RunId }: ResultsProps) {
   const [reach, setReach] = useState<Reach>(10)
   const [lens, setLens] = useState<TravelMode>('walk')
   const [picked, setPicked] = useState<number | null>(null)
@@ -157,7 +176,9 @@ function Results({ categories, radiusKm }: ResultsProps) {
       />
       <div className="flex flex-wrap items-start gap-5" style={{ '--d': '0ms' } as CSSProperties}>
         <CategoryRail categories={categories} selected={selectedId} onSelect={setPicked} />
-        {selected ? <CategoryWorkspace category={selected} radiusLabel={formatKm(radiusKm)} /> : null}
+        {selected ? (
+          <CategoryWorkspace category={selected} radiusLabel={formatKm(radiusKm)} r1RunId={r1RunId} />
+        ) : null}
       </div>
     </>
   )

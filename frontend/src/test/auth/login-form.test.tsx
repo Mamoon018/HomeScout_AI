@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { login } from '@/features/auth/api/authApi'
 import { LOGIN_USER_MESSAGES } from '@/features/auth/utils/loginErrors'
-import { INVALID_INPUT_MESSAGE } from '@/features/auth/utils/loginSchema'
+import { FIELD_MESSAGES } from '@/features/auth/utils/authFieldRules'
 import {
   completeLoginCaptcha,
   fillValidLoginForm,
@@ -45,15 +45,58 @@ beforeEach(() => {
 })
 
 describe('LoginForm', () => {
-  it('shows Invalid Input for empty submit', async () => {
+  it('keeps submit disabled with a hint while the fields are empty', async () => {
     const user = userEvent.setup()
     renderLoginForm()
 
     await completeLoginCaptcha(user)
-    await user.click(getSubmitButton())
 
-    expect(await screen.findAllByText(INVALID_INPUT_MESSAGE)).toHaveLength(2)
+    expect(getSubmitButton()).toBeDisabled()
+    expect(screen.getByText('Fill in all fields correctly to continue')).toBeVisible()
     expect(mockedLogin).not.toHaveBeenCalled()
+  })
+
+  it('shows the email rule after leaving the field, and clears it once fixed', async () => {
+    const user = userEvent.setup()
+    renderLoginForm()
+    const email = screen.getByLabelText('Email')
+
+    await user.type(email, 'demo@homescout')
+    expect(screen.queryByText(FIELD_MESSAGES.emailFormat)).not.toBeInTheDocument()
+
+    await user.tab()
+    expect(await screen.findByText(FIELD_MESSAGES.emailFormat)).toBeInTheDocument()
+    expect(email).toHaveAttribute('aria-invalid', 'true')
+    expect(email).toHaveAttribute('aria-describedby', 'login-email-rule')
+
+    await user.type(email, '.ai')
+    await waitFor(() =>
+      expect(screen.queryByText(FIELD_MESSAGES.emailFormat)).not.toBeInTheDocument(),
+    )
+    expect(email).toHaveAttribute('aria-invalid', 'false')
+  })
+
+  it('shows Required for a password left empty', async () => {
+    const user = userEvent.setup()
+    renderLoginForm()
+
+    await user.click(getPasswordInput())
+    await user.tab()
+
+    expect(await screen.findByText(FIELD_MESSAGES.required)).toBeInTheDocument()
+  })
+
+  it('accepts any non-empty password on sign-in (no strength rules)', async () => {
+    isCaptchaEnabledMock.mockReturnValue(false)
+    const user = userEvent.setup()
+    renderLoginForm()
+
+    await user.type(screen.getByLabelText('Email'), 'demo@homescout.ai')
+    await user.type(getPasswordInput(), 'short')
+    await user.tab()
+
+    await waitFor(() => expect(getSubmitButton()).not.toBeDisabled())
+    expect(screen.getByText('Fill in all fields correctly to continue')).not.toBeVisible()
   })
 
   it('toggles password visibility with checkbox', async () => {

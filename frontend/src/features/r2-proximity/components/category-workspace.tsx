@@ -5,15 +5,17 @@ import { Link } from 'react-router-dom'
 import { TaxonomyIcon } from '@/features/r1-interpretation/components/glyphs'
 import { TravelCells } from '@/features/r2-proximity/components/travel-cells'
 import { TRAVEL_MODES, type Leg, type Place, type TravelMode } from '@/features/r2-proximity/types/r2'
-import { modeNote, nearest, priceLabel, todayHours, type PageCategory } from '@/features/r2-proximity/utils/present'
+import { modeNote, nearest, planHref, priceLabel, todayHours, type PageCategory } from '@/features/r2-proximity/utils/present'
 
 type CategoryWorkspaceProps = {
   category: PageCategory
   radiusLabel: string
+  /** The R1 run this search was run from; the "why" link opens its plan on Home in any tab. */
+  r1RunId: string | null
 }
 
 /** One category: the closest place by each mode, then every place found, nearest walk first. */
-export function CategoryWorkspace({ category, radiusLabel }: CategoryWorkspaceProps) {
+export function CategoryWorkspace({ category, radiusLabel, r1RunId }: CategoryWorkspaceProps) {
   const n = category.places.length
   const closest = closestByMode(category)
   const anyEstimate = category.places.some((p) => p.travel.transit.estimated)
@@ -39,7 +41,7 @@ export function CategoryWorkspace({ category, radiusLabel }: CategoryWorkspacePr
         </div>
         <div className="flex flex-col items-end gap-1.5">
           <span className="r2-nearest">{n === 0 ? 'None found' : `${n} ${n === 1 ? 'place' : 'places'}`}</span>
-          <Link className="r2-why" to="/home" title="Opens the plan on Home that this search was run from">
+          <Link className="r2-why" to={planHref(r1RunId)} title="Opens the plan on Home that this search was run from">
             <ScrollTextIcon aria-hidden="true" className="size-3.5" />
             Why is this category included?
             <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />

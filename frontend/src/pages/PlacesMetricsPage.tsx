@@ -1,4 +1,6 @@
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
+import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/places-metrics/components/places-metrics.css'
 import { CategoryWorkspace } from '@/features/places-metrics/components/category-workspace'
 import { EmptyResult } from '@/features/places-metrics/components/empty-result'
@@ -16,10 +18,6 @@ import { useDocumentClasses } from '@/lib/useDocumentClasses'
 
 const THEME = ['theme-olive']
 
-type PlacesMetricsPageProps = {
-  onUnauthenticated?: () => void
-}
-
 /**
  * R3 results for one apartment: do the nearby places fit the renter's own questions, and on
  * what evidence.
@@ -28,8 +26,10 @@ type PlacesMetricsPageProps = {
  * with R1's plan and R2's places. Until then the page shows start, progress or failure; after,
  * the metric panel, rail and workspace.
  */
-export function PlacesMetricsPage({ onUnauthenticated }: PlacesMetricsPageProps) {
+export function PlacesMetricsPage() {
   useDocumentClasses(THEME)
+  // A 401 from the run endpoints (that refreshing did not fix) sends the renter to sign in.
+  const onUnauthenticated = useUnauthenticatedRedirect()
   const run = useR3Run({ onUnauthenticated })
   const ready = run.phase === 'finished' && run.result !== null
 
@@ -64,6 +64,18 @@ export function PlacesMetricsPage({ onUnauthenticated }: PlacesMetricsPageProps)
         {ready && run.result && run.result.categories.length === 0 ? <EmptyResult onStartAgain={run.startAgain} /> : null}
 
         {ready && run.result && run.result.categories.length > 0 ? <Results result={run.result} /> : null}
+
+        {/* Back is always offered; starting over only once the result is final. */}
+        <nav aria-label="Next steps" className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+          <PageStepLink to="/proximity_info" direction="back">
+            Go back to Proximity Analysis
+          </PageStepLink>
+          {ready ? (
+            <PageStepLink to="/home" direction="forward" onClick={run.startOver}>
+              Start over for another home?
+            </PageStepLink>
+          ) : null}
+        </nav>
       </main>
     </div>
   )

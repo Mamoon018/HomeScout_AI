@@ -1,8 +1,8 @@
 import { normalizeRun } from '@/features/r1-interpretation/utils/normalizeRun'
 import type { RunWire } from '@/features/r1-interpretation/types/run'
-import { BODY, RUN_ID } from '@/test/fixtures/r1Bodies'
-import { EXTRACTION } from '@/test/fixtures/r1Extraction'
-import { PLAN } from '@/test/fixtures/r1Plan'
+import { BODY, RUN_ID } from '@/mocks/fixtures/r1Bodies'
+import { EXTRACTION } from '@/mocks/fixtures/r1Extraction'
+import { PLAN } from '@/mocks/fixtures/r1Plan'
 
 const wire = (body: unknown) => body as RunWire
 

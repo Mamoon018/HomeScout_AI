@@ -6,6 +6,7 @@ import type { CategoryMetricPlan, ExtractionOutput } from '@/features/r1-interpr
 import { loadRunId as loadR1RunId } from '@/features/r1-interpretation/utils/runStorage'
 import { getR2Run, retryR2Run, startR2Run } from '@/features/r2-proximity/api/r2Api'
 import type { R2Result, R2RunView, StartInput } from '@/features/r2-proximity/types/r2'
+import { completeSavedRun } from '@/features/r2-proximity/utils/completeSavedRun'
 import {
   clearR2Run,
   loadR2Run,
@@ -18,7 +19,7 @@ export const POLL_MS = 2_000
 /** Backoff ceiling while the status call keeps failing. */
 const POLL_MAX_MS = 10_000
 /** After this long the waiting line says it is still going, so it never looks frozen. */
-export const SLOW_AFTER_MS = 12_000
+export const SLOW_AFTER_MS = 120_000
 /** Consecutive failed reads before the page says the connection is the problem. */
 const FAILS_BEFORE_NOTICE = 3
 
@@ -43,14 +44,21 @@ type Options = { onUnauthenticated?: () => void }
 export function useR2Run({ onUnauthenticated }: Options = {}) {
   const [params, setParams] = useSearchParams()
   const [phase, setPhase] = useState<R2Phase>('setup')
-  const [saved, setSaved] = useState<SavedR2Run | null>(null)
+  const [saved, setSavedState] = useState<SavedR2Run | null>(null)
+  /** The saved run as of now, for callbacks that must not change identity when it does. */
+  const savedRef = useRef<SavedR2Run | null>(null)
+  const setSaved = useCallback((run: SavedR2Run | null) => {
+    savedRef.current = run
+    setSavedState(run)
+  }, [])
   const [view, setView] = useState<R2RunView | null>(null)
   const [notice, setNotice] = useState<R2Notice | null>(null)
   const [rejected, setRejected] = useState<string | null>(null)
   const [slow, setSlow] = useState(false)
   const [busy, setBusy] = useState(false)
   const [r1, setR1] = useState<R1Context | null>(null)
-  const [r1RunId] = useState<string | null>(() => loadR1RunId())
+  /** The R1 run a new search starts from: Home's, or else the one this run's responses name. */
+  const [r1RunId, setR1RunId] = useState<string | null>(() => loadR1RunId())
 
   /** Bumped on every new start, retry or reset; responses for an older token are ignored. */
   const token = useRef(0)
@@ -80,12 +88,25 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
       setNotice(next)
       setParams({}, { replace: true })
     },
-    [setParams, stopTimers],
+    [setParams, setSaved, stopTimers],
   )
 
-  /** Applies a run view: the status alone decides the phase. */
+  /**
+   * Applies a run view: the status alone decides the phase. Every response also names the run's
+   * R1 run, origin and radius; a run opened from a link in another tab takes them from here.
+   */
   const apply = useCallback(
     (v: R2RunView) => {
+      const current = savedRef.current
+      if (current) {
+        const completed = completeSavedRun(current, v)
+        if (completed !== current) {
+          setSaved(completed)
+          saveR2Run(completed)
+        }
+      }
+      // Kept beyond this run, so "Start a new search" in a tab opened from a link has a plan.
+      if (v.r1RunId) setR1RunId((known) => known || v.r1RunId)
       setView(v)
       if (v.status === 'running') {
         setPhase('running')
@@ -101,7 +122,7 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
         setNotice({ kind: v.retryable ? 'failed_retryable' : 'failed_final' })
       }
     },
-    [stopTimers],
+    [setSaved, stopTimers],
   )
 
   const poll = useCallback(
@@ -166,7 +187,7 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
         })
       }
     },
-    [apply, poll, setParams, stopTimers, toSetup],
+    [apply, poll, setParams, setSaved, stopTimers, toSetup],
   )
 
   // Restore on load: the URL names the run; storage carries the R1 run, origin and radius.
@@ -177,10 +198,14 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
     if (urlRun && stored?.runId === urlRun) {
       follow(stored, null)
     } else if (urlRun) {
-      // Opened from a link in another tab: the run is readable, its context is not.
-      follow({ runId: urlRun, r1RunId: '', latitude: NaN, longitude: NaN, radiusKm: 2 }, null)
-    } else if (stored) {
+      // Opened from a link in another tab: nothing is known yet but the run. Its first response
+      // names the R1 run, origin and radius, and apply() fills them in (completeSavedRun).
+      follow({ runId: urlRun, r1RunId: '', latitude: NaN, longitude: NaN, radiusKm: NaN }, null)
+    } else if (stored && stored.r1RunId === loadR1RunId()) {
       follow(stored, null)
+    } else if (stored) {
+      // Saved for an older plan: Home has a new R1 run since, so this page starts fresh for it.
+      clearR2Run()
     }
     return () => {
       // Deliberately the live ref: a response for any run started before unmount must be dropped.
@@ -278,7 +303,7 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
     slow,
     busy,
     r1,
-    /** The R1 run a new search would start from (the last one on Home in this tab). */
+    /** The R1 run a new search would start from (Home's in this tab, else the run's own). */
     r1RunId: saved?.r1RunId || r1RunId,
     start,
     retry,

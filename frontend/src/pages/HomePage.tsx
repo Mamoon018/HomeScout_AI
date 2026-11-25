@@ -1,7 +1,10 @@
 import { useLayoutEffect, useRef } from 'react'
 
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
 import '@/features/auth/components/olive-hero.css'
+import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
+import { useWelcomeMessage } from '@/features/auth/hooks/useWelcomeMessage'
 import { NeighborhoodBriefComposer } from '@/features/composer/components/neighborhood-brief-composer'
 import { R1Stage } from '@/features/r1-interpretation/components/r1-stage'
 import { useR1Run } from '@/features/r1-interpretation/hooks/useR1Run'
@@ -19,14 +22,11 @@ const ANNOUNCEMENTS = {
   done: 'Done. The plan of what to look for is ready.',
 } as const
 
-type HomePageProps = {
-  message: string | null
-  /** Called when a run endpoint says the session is gone (401 that refreshing did not fix). */
-  onUnauthenticated?: () => void
-}
-
 /** Authenticated homepage. Greeting comes from the identity-scoped welcome API. */
-export function HomePage({ message, onUnauthenticated }: HomePageProps) {
+export function HomePage() {
+  // A 401 from the welcome or run endpoints (that refreshing did not fix) sends the renter to sign in.
+  const onUnauthenticated = useUnauthenticatedRedirect()
+  const message = useWelcomeMessage(onUnauthenticated)
   const run = useR1Run({ onUnauthenticated })
   const composerRef = useRef<HTMLDivElement>(null)
   const composerStartTop = useRef<number | null>(null)
@@ -126,6 +126,15 @@ export function HomePage({ message, onUnauthenticated }: HomePageProps) {
           onReload={run.reload}
           leaving={run.resetting}
         />
+
+        {/* Next step: shown only once the plan is final. */}
+        {run.phase === 'done' && !run.resetting ? (
+          <div className="flex w-full max-w-[1120px] justify-end">
+            <PageStepLink to="/proximity_info" direction="forward">
+              Let&apos;s get Proximity Analysis
+            </PageStepLink>
+          </div>
+        ) : null}
         <p aria-live="polite" className="sr-only">
           {announcement}
         </p>

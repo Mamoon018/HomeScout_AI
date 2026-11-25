@@ -13,9 +13,9 @@ import type { R2Notice } from '@/features/r2-proximity/hooks/useR2Run'
 import type { StartInput } from '@/features/r2-proximity/types/r2'
 
 /** Turns a street address into coordinates; there is no geocoding step of our own yet. */
-const LATLONG_URL = 'https://www.latlong.net/'
+const COORDINATES_URL = 'https://www.gps-coordinates.net/'
 
-/** "50.1109, 8.6821" (or space-separated) as latlong.net shows it → ['50.1109', '8.6821']. */
+/** "50.1109, 8.6821" (or space-separated) as a coordinates site shows it → ['50.1109', '8.6821']. */
 function splitPair(value: string): [string, string] | null {
   const m = /^\s*(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)\s*$/.exec(value)
   return m ? [m[1], m[2]] : null
@@ -96,10 +96,10 @@ export function StartPanel({ r1RunId, categoryCount, busy, rejected, initial, on
           <MapPinnedIcon className="size-[18px]" strokeWidth={1.8} />
         </span>
         <div className="flex min-w-0 flex-col gap-0.5">
-          <a className="r2-geo-link" href={LATLONG_URL} target="_blank" rel="noopener noreferrer">
+          <a className="r2-geo-link" href={COORDINATES_URL} target="_blank" rel="noopener noreferrer">
             Convert your address into lat-long
             <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />
-            <span className="sr-only"> (opens latlong.net in a new tab)</span>
+            <span className="sr-only"> (opens gps-coordinates.net in a new tab)</span>
           </a>
           <p className="m-0 text-[13px] leading-[19px] text-(--fs-muted)">
             Only street address without zip code. Paste both numbers into Latitude and we&apos;ll split them.

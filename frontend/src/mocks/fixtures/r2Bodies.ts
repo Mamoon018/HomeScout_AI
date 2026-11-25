@@ -1,4 +1,4 @@
-import { RUN_ID as R1_RUN_ID } from '@/test/fixtures/r1Bodies'
+import { RUN_ID as R1_RUN_ID } from '@/mocks/fixtures/r1Bodies'
 
 export { R1_RUN_ID }
 export const R2_RUN_ID = '7c4d9e2a-0000-4000-8000-000000000000'
@@ -28,12 +28,19 @@ const WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
   (d) => `${d}: 7:00 AM – 10:00 PM`,
 )
 
+/**
+ * What every R2 response names besides the run, whatever its status: the R1 run it searched for
+ * and the search area (`AmenitySearchRunResponse` in the backend).
+ */
+const CONTEXT = { r1_run_id: R1_RUN_ID, origin: { latitude: 50.1109, longitude: 8.6821 }, radius_km: 2 }
+
 /** Plan categories in `r1Plan`: 2 transit_station, 3 supermarket. */
 export const R2_BODY = {
-  running: { run_id: R2_RUN_ID, status: 'running' },
-  runningAfterDiscovery: { run_id: R2_RUN_ID, status: 'running', completed_step: 'discovery' },
+  running: { run_id: R2_RUN_ID, ...CONTEXT, status: 'running' },
+  runningAfterDiscovery: { run_id: R2_RUN_ID, ...CONTEXT, status: 'running', completed_step: 'discovery' },
   finished: {
     run_id: R2_RUN_ID,
+    ...CONTEXT,
     status: 'finished',
     result: {
       '2': {
@@ -53,15 +60,17 @@ export const R2_BODY = {
     },
   },
   /** Nothing found for any category. */
-  finishedEmpty: { run_id: R2_RUN_ID, status: 'finished', result: {} },
+  finishedEmpty: { run_id: R2_RUN_ID, ...CONTEXT, status: 'finished', result: {} },
   /** A sparse record: only what Google always returns, no routes, no name. */
   finishedSparse: {
     run_id: R2_RUN_ID,
+    ...CONTEXT,
     status: 'finished',
     result: { '3': { 'sm-9': { category_id: 3, taxonomy_node: 'supermarket', depth: 'basic_profile', place_id: 'sm-9', routing: {} } } },
   },
   failed: (retryable: boolean, completedStep?: 'discovery') => ({
     run_id: R2_RUN_ID,
+    ...CONTEXT,
     status: 'failed',
     ...(completedStep ? { completed_step: completedStep } : {}),
     retryable,

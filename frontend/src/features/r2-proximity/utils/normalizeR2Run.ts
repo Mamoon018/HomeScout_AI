@@ -38,7 +38,12 @@ export function normalizeR2Run(wire: R2RunWire | null): R2RunView | null {
     // A missing parent never rejects the body: the run's status must still show.
     r1RunId: typeof wire.r1_run_id === 'string' && wire.r1_run_id ? wire.r1_run_id : null,
     origin: normalizeOrigin(wire.origin),
+    radiusKm: normalizeRadius(wire.radius_km),
   }
+}
+
+function normalizeRadius(r: R2RunWire['radius_km']): R2RunView['radiusKm'] {
+  return typeof r === 'number' && Number.isFinite(r) && r > 0 ? r : null
 }
 
 function normalizeOrigin(o: R2RunWire['origin']): R2RunView['origin'] {

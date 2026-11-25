@@ -1,6 +1,6 @@
-import { EXTRACTION } from '@/test/fixtures/r1Extraction'
-import { PLAN } from '@/test/fixtures/r1Plan'
-import { QUESTIONS } from '@/test/fixtures/r1Questions'
+import { EXTRACTION } from '@/mocks/fixtures/r1Extraction'
+import { PLAN } from '@/mocks/fixtures/r1Plan'
+import { QUESTIONS } from '@/mocks/fixtures/r1Questions'
 
 /** Drops null values at every depth, the way the backend's run responses do. */
 export function dropNulls<T>(value: T): T {

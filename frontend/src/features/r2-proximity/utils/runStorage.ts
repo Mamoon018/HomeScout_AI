@@ -1,7 +1,8 @@
 /**
  * The R2 run on screen, kept for this tab so a refresh can pick it up through the status
- * endpoint. The status response does not echo the R1 run, origin or radius, so they are kept
- * beside the id. Storage can be blocked or full: every access is guarded.
+ * endpoint. The R1 run, origin and radius are kept beside the id so the page can show them
+ * before the first response; a tab without them takes them from that response
+ * (completeSavedRun). Storage can be blocked or full: every access is guarded.
  */
 const KEY = 'homescout.r2.run'
 

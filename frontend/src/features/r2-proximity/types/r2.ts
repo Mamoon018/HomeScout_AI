@@ -93,6 +93,8 @@ export type R2RunView = {
   r1RunId: string | null
   /** The search origin; null unless both coordinates arrived as finite numbers. */
   origin: { latitude: number; longitude: number } | null
+  /** The search radius in km; null unless it arrived as a finite number above 0. */
+  radiusKm: number | null
 }
 
 /** Why a call did not give a run, by what the page can do about it. */
