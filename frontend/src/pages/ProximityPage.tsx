@@ -48,7 +48,8 @@ function LiveProximity({ onUnauthenticated }: LiveProximityProps) {
         : [],
     [run.view, run.r1],
   )
-  const radiusKm = run.saved?.radiusKm ?? 2
+  // A run opened from a link knows its radius only after its first response.
+  const radiusKm = run.saved && Number.isFinite(run.saved.radiusKm) ? run.saved.radiusKm : 2
   const radiusLabel = formatKm(radiusKm)
   const origin =
     run.saved !== null && Number.isFinite(run.saved.latitude)
@@ -100,7 +101,7 @@ function LiveProximity({ onUnauthenticated }: LiveProximityProps) {
       ) : null}
 
       {run.phase === 'finished' && categories.length > 0 ? (
-        <Results categories={categories} radiusKm={radiusKm} />
+        <Results categories={categories} radiusKm={radiusKm} r1RunId={run.saved?.r1RunId || run.r1RunId} />
       ) : null}
     </>
   )
@@ -135,10 +136,12 @@ function FinishedMark(): ReactNode {
 type ResultsProps = {
   categories: PageCategory[]
   radiusKm: number
+  /** The R1 run behind this search, for the link back to its plan. */
+  r1RunId: string | null
 }
 
 /** Summary panel, then the category rail beside the selected category's workspace. */
-function Results({ categories, radiusKm }: ResultsProps) {
+function Results({ categories, radiusKm, r1RunId }: ResultsProps) {
   const [reach, setReach] = useState<Reach>(10)
   const [lens, setLens] = useState<TravelMode>('walk')
   const [picked, setPicked] = useState<number | null>(null)
@@ -160,7 +163,9 @@ function Results({ categories, radiusKm }: ResultsProps) {
       />
       <div className="flex flex-wrap items-start gap-5" style={{ '--d': '0ms' } as CSSProperties}>
         <CategoryRail categories={categories} selected={selectedId} onSelect={setPicked} />
-        {selected ? <CategoryWorkspace category={selected} radiusLabel={formatKm(radiusKm)} /> : null}
+        {selected ? (
+          <CategoryWorkspace category={selected} radiusLabel={formatKm(radiusKm)} r1RunId={r1RunId} />
+        ) : null}
       </div>
     </>
   )

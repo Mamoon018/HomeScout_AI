@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 
 import { HomePage } from '@/pages/HomePage'
 import { BODY, RUN_FAILED_BODY, RUN_ID, dropNulls } from '@/mocks/fixtures/r1Bodies'
@@ -46,6 +47,22 @@ function api(routes: Record<string, (call: Call) => Reply | Promise<Reply>>) {
 
 const ok = (body: unknown, status = 200): Reply => ({ status, body })
 
+/** Shows the router's current address, so a test can see what Home did to the URL. */
+function Where() {
+  const location = useLocation()
+  return <output data-testid="where">{location.pathname + location.search}</output>
+}
+
+/** Home reads `?run=`, so it renders inside a router. */
+function renderHome(url = '/home') {
+  return render(
+    <MemoryRouter initialEntries={[url]}>
+      <HomePage />
+      <Where />
+    </MemoryRouter>,
+  )
+}
+
 beforeEach(() => {
   window.sessionStorage.clear()
   redirect.mockClear()
@@ -59,7 +76,7 @@ afterEach(() => {
 describe('composer', () => {
   it('holds Send back until the brief has 100 words and says how far along it is', () => {
     api({})
-    render(<HomePage />)
+    renderHome()
 
     typeBrief('Quiet street near a park')
     expect(screen.getByText(/5 of 100 words/)).toBeInTheDocument()
@@ -75,7 +92,7 @@ describe('composer', () => {
       'POST /': () =>
         ok({ error: 'Instructions must be written in English' }, 422),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     expect(
@@ -101,7 +118,7 @@ describe('a run that asks a question', () => {
       'POST /': () => new Promise<Reply>((resolve) => (release = resolve)),
       [`POST ${ANSWERS_PATH}`]: () => ok(BODY.finished),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     // Nothing is known yet: the page says what it is waiting on and shows no data.
@@ -132,7 +149,7 @@ describe('a run that asks a question', () => {
       'POST /': () => ok(BODY.paused, 201),
       [`POST ${ANSWERS_PATH}`]: () => ok(BODY.finished),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     fireEvent.click(await screen.findByRole('radio', { name: 'Other' }, SLOW))
@@ -152,7 +169,7 @@ describe('a run that asks a question', () => {
       'POST /': () => ok(BODY.paused, 201),
       [`POST ${ANSWERS_PATH}`]: () => ok({ error: 'Answers must cover each question' }, 422),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
     await answerTheQuestion()
 
@@ -167,7 +184,7 @@ describe('a run that asks a question', () => {
 describe('a run that needs no question', () => {
   it('shows the breakdown and the plan from one response, and unlocks the composer', async () => {
     api({ 'POST /': () => ok(BODY.finished, 201) })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     expect(await screen.findByRole('list', { name: 'Categories' }, SLOW)).toBeInTheDocument()
@@ -192,7 +209,7 @@ describe('a run that needs no question', () => {
           201,
         ),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     expect(
@@ -212,7 +229,7 @@ describe('when a call does not give a run', () => {
       [`POST /${RUN_ID}/retry`]: () => ok(RUN_FAILED_BODY(false), 502),
       'GET /': () => ok({}, 404),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
     await answerTheQuestion()
 
@@ -240,7 +257,7 @@ describe('when a call does not give a run', () => {
       [`POST ${ANSWERS_PATH}`]: () => ok(RUN_FAILED_BODY(true), 503),
       [`POST /${RUN_ID}/retry`]: () => ok(BODY.finished),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
     await answerTheQuestion()
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }, SLOW))
@@ -255,7 +272,7 @@ describe('when a call does not give a run', () => {
       [`POST ${ANSWERS_PATH}`]: () => 'network-error',
       [`GET /${RUN_ID}`]: () => ok(BODY.finished),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
     await answerTheQuestion()
 
@@ -271,7 +288,7 @@ describe('when a call does not give a run', () => {
         ok({ error: 'The run is not waiting for answers', run_id: RUN_ID, status: 'finished' }, 409),
       [`GET /${RUN_ID}`]: () => ok(BODY.finished),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
     await answerTheQuestion()
 
@@ -284,7 +301,7 @@ describe('when a call does not give a run', () => {
     const { calls } = api({
       'POST /': () => (++attempts === 1 ? 'network-error' : ok(BODY.finished, 201)),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     const notice = await screen.findByRole('alert', {}, SLOW)
@@ -302,7 +319,7 @@ describe('when a call does not give a run', () => {
       'POST /': () => ok(RUN_FAILED_BODY(true), 503),
       [`GET /${RUN_ID}`]: () => ok(BODY.failed(true)),
     })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     expect(await screen.findByRole('region', { name: 'User Persona' }, SLOW)).toBeInTheDocument()
@@ -311,7 +328,7 @@ describe('when a call does not give a run', () => {
 
   it('sends the renter to sign in when the session is gone', async () => {
     api({ 'POST /': () => ok({ error: 'Not authenticated' }, 401) })
-    render(<HomePage />)
+    renderHome()
     sendBrief()
 
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1), SLOW)
@@ -325,7 +342,7 @@ describe('coming back to a run after a refresh', () => {
 
   it('shows a run that is waiting for answers, with its question', async () => {
     api({ [`GET /${RUN_ID}`]: () => ok(BODY.paused) })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findByRole('form', { name: 'Clarification questions' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'User Persona' })).toBeInTheDocument()
@@ -341,7 +358,7 @@ describe('coming back to a run after a refresh', () => {
           result: [...dropNulls(PLAN), { category_id: 7, taxonomy_node: 'balcony', depth: 'basic_profile' }],
         }),
     })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
     // No answers are held after a refresh, so the plan says what the flagged phrase became.
@@ -352,7 +369,7 @@ describe('coming back to a run after a refresh', () => {
 
   it('shows a stopped run with the ways on that its status allows', async () => {
     api({ [`GET /${RUN_ID}`]: () => ok(BODY.failed(false)) })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findByText("This run can't continue")).toBeInTheDocument()
     // The brief is not known after a refresh, so there is nothing to send again.
@@ -362,7 +379,7 @@ describe('coming back to a run after a refresh', () => {
   it('keeps reading a run that is still working until it settles', async () => {
     let reads = 0
     api({ [`GET /${RUN_ID}`]: () => (++reads < 2 ? ok(BODY.running) : ok(BODY.paused)) })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findAllByText('Picking up where you left off.')).not.toHaveLength(0)
     expect(
@@ -373,7 +390,7 @@ describe('coming back to a run after a refresh', () => {
 
   it('says the run is gone, and forgets it, when the server has no such run', async () => {
     api({ [`GET /${RUN_ID}`]: () => ok({ error: 'Run not found' }, 404) })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findByText('That run is no longer available')).toBeInTheDocument()
     expect(window.sessionStorage.getItem('homescout.r1.runId')).toBeNull()
@@ -386,7 +403,7 @@ describe('coming back to a run after a refresh', () => {
   it('offers Try again when the saved run cannot be reached, and loads it then', async () => {
     let up = false
     api({ [`GET /${RUN_ID}`]: () => (up ? ok(BODY.finished) : { status: 503, body: { error: 'Run storage is unavailable' } }) })
-    render(<HomePage />)
+    renderHome()
 
     expect(await screen.findByText("Couldn't reach HomeScout")).toBeInTheDocument()
     expect(screen.getByText(/Your run is saved/)).toBeInTheDocument()
@@ -394,5 +411,107 @@ describe('coming back to a run after a refresh', () => {
     up = true
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
+  })
+})
+
+describe('opening a run named in the URL (a link from another page or tab)', () => {
+  const OTHER = '3f2b8c1e-0000-4000-8000-0000000000aa'
+  const where = () => screen.getByTestId('where')
+
+  it('shows a finished run in a tab that never saw it, and keeps ?run= in the address', async () => {
+    const { calls } = api({ [`GET /${RUN_ID}`]: () => ok(BODY.finished) })
+    renderHome(`/home?run=${RUN_ID}`)
+
+    expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toContain(`GET /${RUN_ID}`)
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?run=${RUN_ID}`))
+    expect(window.sessionStorage.getItem('homescout.r1.runId')).toBe(RUN_ID)
+  })
+
+  it('shows a run waiting for answers with its question', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok(BODY.paused) })
+    renderHome(`/home?run=${RUN_ID}`)
+
+    expect(await screen.findByRole('form', { name: 'Clarification questions' })).toBeInTheDocument()
+  })
+
+  it('opens the run in the URL rather than a different one this tab saved', async () => {
+    window.sessionStorage.setItem('homescout.r1.runId', OTHER)
+    const { calls } = api({ [`GET /${RUN_ID}`]: () => ok(BODY.finished) })
+    renderHome(`/home?run=${RUN_ID}`)
+
+    expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
+    expect(calls.some((c) => c.path === `/${OTHER}`)).toBe(false)
+    expect(window.sessionStorage.getItem('homescout.r1.runId')).toBe(RUN_ID)
+  })
+
+  it('keeps other query parameters next to ?run=', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok(BODY.finished) })
+    renderHome(`/home?mock=happy&run=${RUN_ID}`)
+
+    expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?mock=happy&run=${RUN_ID}`))
+  })
+
+  it('says the run is gone, and drops ?run=, when the server does not have it', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok({ error: 'Run not found' }, 404) })
+    renderHome(`/home?run=${RUN_ID}`)
+
+    expect(await screen.findByText('That run is no longer available')).toBeInTheDocument()
+    expect(window.sessionStorage.getItem('homescout.r1.runId')).toBeNull()
+    await waitFor(() => expect(where()).toHaveTextContent(/^\/home$/))
+  })
+
+  it('drops ?run= when the session is gone', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok({ error: 'Not authenticated' }, 401) })
+    renderHome(`/home?run=${RUN_ID}`)
+
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(where()).toHaveTextContent(/^\/home$/))
+  })
+})
+
+describe('the address names the run on screen', () => {
+  const NEXT = '3f2b8c1e-0000-4000-8000-0000000000cc'
+  const where = () => screen.getByTestId('where')
+
+  it('writes ?run= for a run restored from this tab’s storage', async () => {
+    window.sessionStorage.setItem('homescout.r1.runId', RUN_ID)
+    api({ [`GET /${RUN_ID}`]: () => ok(BODY.finished) })
+    renderHome('/home')
+
+    expect(await screen.findByRole('list', { name: 'Categories' })).toBeInTheDocument()
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?run=${RUN_ID}`))
+  })
+
+  it('names a new brief’s run once it arrives, keeping other parameters', async () => {
+    api({ 'POST /': () => ok(BODY.finished, 201) })
+    renderHome('/home?mock=happy')
+    sendBrief()
+
+    expect(await screen.findByRole('list', { name: 'Categories' }, SLOW)).toBeInTheDocument()
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?mock=happy&run=${RUN_ID}`))
+  })
+
+  it('forgets the old run as soon as another brief is sent, then names the new one', async () => {
+    let release: (reply: Reply) => void = () => {}
+    let posts = 0
+    api({
+      'POST /': () =>
+        ++posts === 1
+          ? ok(BODY.finished, 201)
+          : new Promise<Reply>((resolve) => (release = resolve)),
+    })
+    renderHome('/home')
+    sendBrief()
+    expect(await screen.findByRole('list', { name: 'Categories' }, SLOW)).toBeInTheDocument()
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?run=${RUN_ID}`))
+
+    sendBrief(`${LONG_BRIEF} again`)
+    await waitFor(() => expect(where()).toHaveTextContent(/^\/home$/), SLOW)
+    expect(window.sessionStorage.getItem('homescout.r1.runId')).toBeNull()
+
+    release(ok({ ...BODY.finished, run_id: NEXT }, 201))
+    await waitFor(() => expect(where()).toHaveTextContent(`/home?run=${NEXT}`), SLOW)
   })
 })

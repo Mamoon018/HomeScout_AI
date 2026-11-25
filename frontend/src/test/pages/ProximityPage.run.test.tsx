@@ -156,11 +156,38 @@ describe('a refresh', () => {
     expect(calls.some((c) => c.method === 'POST')).toBe(false)
   })
 
-  it('opens a run named only in the URL, without its coordinates', async () => {
-    api({ [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.finished) })
-    renderPage(`/proximity_info?run=${R2_RUN_ID}`)
-    expect(await screen.findByText('Hauptbahnhof')).toBeInTheDocument()
-    expect(screen.getByText(/Places near the apartment/)).toBeInTheDocument()
+  describe('opened from a link in another tab (no saved run, only ?run=)', () => {
+    it.each([
+      ['finished', R2_BODY.finished],
+      ['still running', R2_BODY.running],
+    ])('takes the R1 run, origin and radius from the %s run response', async (_, body) => {
+      const { calls } = api({ [`GET /${R2_RUN_ID}`]: () => ok(body) })
+      renderPage(`/proximity_info?run=${R2_RUN_ID}`)
+      expect(await screen.findByText(/Within 2 km of 50.1109, 8.6821/)).toBeInTheDocument()
+      await waitFor(() => expect(calls.some((c) => c.path === `r1 /${R1_RUN_ID}`)).toBe(true))
+      expect(JSON.parse(window.sessionStorage.getItem('homescout.r2.run')!)).toEqual(SAVED)
+    })
+
+    it('shows the plan’s categories in the renter’s own words', async () => {
+      api({ [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.finished) })
+      renderPage(`/proximity_info?run=${R2_RUN_ID}`)
+      expect(await screen.findAllByText(/You asked for/)).not.toHaveLength(0)
+    })
+
+    it('links "Why is this category included?" to that R1 run’s plan on Home', async () => {
+      api({ [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.finished) })
+      renderPage(`/proximity_info?run=${R2_RUN_ID}`)
+      const link = await screen.findByRole('link', { name: /Why is this category included/ }, SLOW)
+      expect(link).toHaveAttribute('href', `/home?run=${R1_RUN_ID}`)
+    })
+
+    it('starts a new search from the recovered R1 run, not the "go to Home" state', async () => {
+      api({ [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.failed(false)) })
+      renderPage(`/proximity_info?run=${R2_RUN_ID}`)
+      fireEvent.click(await screen.findByRole('button', { name: 'Start a new search' }))
+      expect(await screen.findByRole('button', { name: 'Look around' })).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: 'Start from your plan' })).toBeNull()
+    })
   })
 
   it('resets to the start screen when the run no longer exists (404)', async () => {

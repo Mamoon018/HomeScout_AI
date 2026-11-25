@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import {
   getRun,
@@ -88,6 +89,14 @@ const MAX_POLLS = 70
 
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
+/** The query string with `?run=` naming a run, or without it; other parameters are kept. */
+function withRunParam(params: URLSearchParams, runId: string | null): URLSearchParams {
+  const next = new URLSearchParams(params)
+  if (runId) next.set('run', runId)
+  else next.delete('run')
+  return next
+}
+
 type Options = {
   /** Called when the session is gone (a 401 that refreshing did not fix). */
   onUnauthenticated?: () => void
@@ -102,6 +111,7 @@ type Options = {
  * dropped, so an old answer never overwrites the screen.
  */
 export function useR1Run({ onUnauthenticated }: Options = {}) {
+  const [params, setParams] = useSearchParams()
   const [state, setState] = useState<R1RunState>(INITIAL_STATE)
   const stateRef = useRef(state)
   const timersRef = useRef<number[]>([])
@@ -140,8 +150,46 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
 
   const stale = (seq: number) => seq !== seqRef.current || !aliveRef.current
 
-  const goIdle = useCallback(() => {
+  /**
+   * The run the address bar should name; undefined until Home records or forgets a run. The URL
+   * is written by the effect below with the router's current state, because these writes happen
+   * in async flows that began several renders earlier.
+   */
+  const [urlTarget, setUrlTarget] = useState<{ runId: string | null } | undefined>(undefined)
+
+  /** Asks for `?run=` to name a run, or to be dropped; a repeat of the same request is free. */
+  const writeUrlRun = useCallback((runId: string | null) => {
+    setUrlTarget((current) => (current?.runId === runId ? current : { runId }))
+  }, [])
+
+  // Brings `?run=` in line with the run on screen. Replaces the entry (no history per run, as
+  // on R2 and R3), keeps other parameters such as `?mock=`, and does nothing when it already
+  // matches, so polling a run never navigates.
+  useEffect(() => {
+    if (urlTarget === undefined || (params.get('run') ?? null) === urlTarget.runId) return
+    setParams(withRunParam(params, urlTarget.runId), { replace: true })
+  }, [params, setParams, urlTarget])
+
+  /**
+   * The one place Home records the run on screen: this tab's storage and the URL move together,
+   * so a refresh, a bookmark or a copied link reopens the same run (as on R2 and R3).
+   */
+  const rememberRun = useCallback(
+    (runId: string) => {
+      saveRunId(runId)
+      writeUrlRun(runId)
+    },
+    [writeUrlRun],
+  )
+
+  /** Forgets the run on screen in both places, so neither can bring it back. */
+  const forgetRun = useCallback(() => {
     clearRunId()
+    writeUrlRun(null)
+  }, [writeUrlRun])
+
+  const goIdle = useCallback(() => {
+    forgetRun()
     patch({
       phase: 'idle',
       locked: false,
@@ -153,11 +201,11 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
       notice: null,
       waiting: null,
     })
-  }, [patch])
+  }, [forgetRun, patch])
 
   /** Shows a run the way its status says. */
   function applyView(view: RunView, seq: number) {
-    saveRunId(view.runId)
+    rememberRun(view.runId)
     const extraction = view.extraction ?? stateRef.current.extraction
     const shared = { runId: view.runId, extraction, composerError: null, notice: null, waiting: null }
     switch (view.status) {
@@ -248,7 +296,7 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
         onUnauthenticatedRef.current?.()
         return
       case 'not_found':
-        clearRunId()
+        forgetRun()
         patch({ notice: { kind: 'gone' }, runId: null, waiting: null, locked: false })
         return
       case 'rejected':
@@ -274,7 +322,7 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
         return
       }
       case 'run_failed':
-        saveRunId(error.runId)
+        rememberRun(error.runId)
         patch({
           runId: error.runId,
           phase: stateRef.current.extraction ? 'planning' : 'extracting',
@@ -318,7 +366,7 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
       return
     }
     const seq = begin()
-    clearRunId()
+    forgetRun()
     const first = !current.movedUp
     const intro = first
       ? R1_TIMING.headingFade + R1_TIMING.composerMove
@@ -424,12 +472,19 @@ export function useR1Run({ onUnauthenticated }: Options = {}) {
     }
   }, [patch])
 
-  // A refresh while a run was on screen: pick it up again from the status endpoint.
+  // The run named in the URL (a refresh, a bookmark, or a link such as R2's "Why is this
+  // category included?"), else the one this tab saved: pick it up from the status endpoint.
+  // The URL names the run on screen from here on, so a run restored from storage gets it too.
+  // Data path: /home?run=<id> → saveRunId → getRun → GET /runs/<id> → applyView → HomePage.
   useEffect(() => {
-    const saved = loadRunId()
+    const urlRun = params.get('run')
+    const saved = urlRun || loadRunId()
     if (saved === null) {
       return
     }
+    // Recorded directly (not through rememberRun): the URL is already right, or is set here once.
+    saveRunId(saved)
+    if (!urlRun) setParams(withRunParam(params, saved), { replace: true })
     const seq = begin()
     patch({
       headingState: 'hidden',
