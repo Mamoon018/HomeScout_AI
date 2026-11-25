@@ -6,6 +6,11 @@ dist
 backend/certs/
 .playwright-mcp/
 
+# Local AI-tool folders (kept on disk, not shared)
+.agents/
+.claude/
+.impeccable/
+
 # Python bytecode (regenerated automatically on import)
 __pycache__/
 *.py[cod]
