@@ -367,11 +367,26 @@ describe('coming back to a run after a refresh', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
   })
 
+  it('offers Proximity Analysis only once the plan is final', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok(BODY.finished) })
+    renderHome()
+    const next = await screen.findByRole('link', { name: "Let's get Proximity Analysis" })
+    expect(next).toHaveAttribute('href', '/proximity_info')
+  })
+
+  it('does not offer Proximity Analysis while the run waits for answers', async () => {
+    api({ [`GET /${RUN_ID}`]: () => ok(BODY.paused) })
+    renderHome()
+    await screen.findByRole('form', { name: 'Clarification questions' })
+    expect(screen.queryByRole('link', { name: /Proximity Analysis/ })).toBeNull()
+  })
+
   it('shows a stopped run with the ways on that its status allows', async () => {
     api({ [`GET /${RUN_ID}`]: () => ok(BODY.failed(false)) })
     renderHome()
 
     expect(await screen.findByText("This run can't continue")).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Proximity Analysis/ })).toBeNull()
     // The brief is not known after a refresh, so there is nothing to send again.
     expect(screen.getByRole('button', { name: 'Write a new brief' })).toBeInTheDocument()
   })

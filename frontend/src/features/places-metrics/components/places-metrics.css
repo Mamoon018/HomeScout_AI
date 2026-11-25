@@ -613,6 +613,11 @@
   cursor: pointer; transition: background 0.2s, border-color 0.2s;
 }
 .pm a.run-btn, .pm a.run-btn:hover { color: #f9f9f6; }
+/* Page-step buttons keep their own text colour, as run-btn does, instead of the plain link colour above. */
+.pm a[data-slot='page-step-link'][data-direction='forward'],
+.pm a[data-slot='page-step-link'][data-direction='forward']:hover { color: var(--fs-on-accent); }
+.pm a[data-slot='page-step-link'][data-direction='back'],
+.pm a[data-slot='page-step-link'][data-direction='back']:hover { color: var(--fs-ink); }
 .pm .run-btn:hover { background: #3b4822; border-color: #3b4822; }
 .pm .run-btn.quiet { background: var(--cream); color: var(--ink); border-color: rgba(110, 100, 60, 0.3); }
 .pm .run-btn.quiet:hover { background: #fff; border-color: #4a5a2a; }

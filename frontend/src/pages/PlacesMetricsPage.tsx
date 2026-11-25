@@ -1,4 +1,5 @@
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
 import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/places-metrics/components/places-metrics.css'
 import { CategoryWorkspace } from '@/features/places-metrics/components/category-workspace'
@@ -63,6 +64,18 @@ export function PlacesMetricsPage() {
         {ready && run.result && run.result.categories.length === 0 ? <EmptyResult onStartAgain={run.startAgain} /> : null}
 
         {ready && run.result && run.result.categories.length > 0 ? <Results result={run.result} /> : null}
+
+        {/* Back is always offered; starting over only once the result is final. */}
+        <nav aria-label="Next steps" className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+          <PageStepLink to="/proximity_info" direction="back">
+            Go back to Proximity Analysis
+          </PageStepLink>
+          {ready ? (
+            <PageStepLink to="/home" direction="forward" onClick={run.startOver}>
+              Start over for another home?
+            </PageStepLink>
+          ) : null}
+        </nav>
       </main>
     </div>
   )

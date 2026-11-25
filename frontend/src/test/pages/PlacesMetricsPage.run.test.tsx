@@ -256,6 +256,28 @@ describe('the finished result', () => {
   })
 })
 
+describe('moving between pages', () => {
+  it('offers the way back to Proximity Analysis before any run', () => {
+    rememberAmenitySearch()
+    mockR3Api({})
+    renderPage()
+    expect(screen.getByRole('link', { name: 'Go back to Proximity Analysis' })).toHaveAttribute('href', '/proximity_info')
+    expect(screen.queryByRole('link', { name: /Start over/ })).toBeNull()
+  })
+
+  it('offers Start over once the result is final, and it forgets this tab’s R1 and R2 runs', async () => {
+    rememberAmenitySearch()
+    window.sessionStorage.setItem('homescout.r1.runId', R1_RUN_ID)
+    mockR3Api({ [`r3 GET /${R3_RUN_ID}`]: () => ok(R3_BODY.finished), ...CONTEXT })
+    renderPage(RUN_URL)
+    const startOver = await screen.findByRole('link', { name: 'Start over for another home?' })
+    expect(startOver).toHaveAttribute('href', '/home')
+    fireEvent.click(startOver)
+    expect(window.sessionStorage.getItem('homescout.r1.runId')).toBeNull()
+    expect(window.sessionStorage.getItem('homescout.r2.run')).toBeNull()
+  })
+})
+
 describe('failures', () => {
   it('offers Retry for a retryable failure, and a retry resumes the run', async () => {
     const { calls } = mockR3Api({

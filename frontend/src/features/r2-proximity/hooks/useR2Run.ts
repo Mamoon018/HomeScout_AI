@@ -201,8 +201,11 @@ export function useR2Run({ onUnauthenticated }: Options = {}) {
       // Opened from a link in another tab: nothing is known yet but the run. Its first response
       // names the R1 run, origin and radius, and apply() fills them in (completeSavedRun).
       follow({ runId: urlRun, r1RunId: '', latitude: NaN, longitude: NaN, radiusKm: NaN }, null)
-    } else if (stored) {
+    } else if (stored && stored.r1RunId === loadR1RunId()) {
       follow(stored, null)
+    } else if (stored) {
+      // Saved for an older plan: Home has a new R1 run since, so this page starts fresh for it.
+      clearR2Run()
     }
     return () => {
       // Deliberately the live ref: a response for any run started before unmount must be dropped.

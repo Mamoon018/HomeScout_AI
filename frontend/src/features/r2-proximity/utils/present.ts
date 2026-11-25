@@ -19,6 +19,11 @@ export const CATEGORY_COLORS = [
   '#7a5230',
 ] as const
 
+/** Home's address for the R1 plan behind this search, so it reopens finished in any tab. */
+export function planHref(r1RunId: string | null): string {
+  return r1RunId ? `/home?run=${encodeURIComponent(r1RunId)}` : '/home'
+}
+
 /** A category as the page shows it: the R1 plan's order and words joined to R2's places. */
 export type PageCategory = {
   id: number

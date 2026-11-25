@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
 import '@/features/auth/components/olive-hero.css'
 import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import { useWelcomeMessage } from '@/features/auth/hooks/useWelcomeMessage'
@@ -125,6 +126,15 @@ export function HomePage() {
           onReload={run.reload}
           leaving={run.resetting}
         />
+
+        {/* Next step: shown only once the plan is final. */}
+        {run.phase === 'done' && !run.resetting ? (
+          <div className="flex w-full max-w-[1120px] justify-end">
+            <PageStepLink to="/proximity_info" direction="forward">
+              Let&apos;s get Proximity Analysis
+            </PageStepLink>
+          </div>
+        ) : null}
         <p aria-live="polite" className="sr-only">
           {announcement}
         </p>

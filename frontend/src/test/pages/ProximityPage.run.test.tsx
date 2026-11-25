@@ -206,6 +206,42 @@ describe('a refresh', () => {
   })
 })
 
+describe('moving between pages', () => {
+  it('offers the way back at once, and the way forward only once the search has places', async () => {
+    saveRunId(R1_RUN_ID)
+    api({ 'POST /': () => ok(R2_BODY.running, 202), [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.finished) })
+    renderPage()
+    expect(screen.getByRole('link', { name: 'Go back to Search Plan' })).toHaveAttribute(
+      'href',
+      `/home?run=${R1_RUN_ID}`,
+    )
+    expect(screen.queryByRole('link', { name: /Needs Fit Analysis/ })).toBeNull()
+
+    fillAndLook()
+    const next = await screen.findByRole('link', { name: "Let's get Needs Fit Analysis" }, SLOW)
+    expect(next).toHaveAttribute('href', '/places_metrics')
+  })
+
+  it('reopens the saved search when Home still has the same plan', async () => {
+    saveRunId(R1_RUN_ID)
+    saveR2Run(SAVED)
+    const { calls } = api({ [`GET /${R2_RUN_ID}`]: () => ok(R2_BODY.finished) })
+    renderPage()
+    expect(await screen.findByRole('navigation', { name: 'Categories' })).toBeInTheDocument()
+    expect(calls.some((c) => c.method === 'POST')).toBe(false)
+  })
+
+  it('starts fresh when the saved search belongs to an older plan', () => {
+    saveRunId('r1_newer_plan')
+    saveR2Run(SAVED)
+    const { calls } = api({})
+    renderPage()
+    expect(screen.getByRole('button', { name: 'Look around' })).toBeInTheDocument()
+    expect(window.sessionStorage.getItem('homescout.r2.run')).toBeNull()
+    expect(calls.filter((c) => c.path === `/${R2_RUN_ID}`)).toHaveLength(0)
+  })
+})
+
 describe('what a finished run can contain', () => {
   it('keeps every planned category in the rail, marking the ones with nothing found', async () => {
     saveR2Run(SAVED)

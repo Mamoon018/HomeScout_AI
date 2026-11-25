@@ -22,7 +22,8 @@ import { useSearchParams } from 'react-router-dom'
 
 import { getRun as getR1Run } from '@/features/r1-interpretation/api/r1Api'
 import { getR2Run } from '@/features/r2-proximity/api/r2Api'
-import { loadR2Run } from '@/features/r2-proximity/utils/runStorage'
+import { clearRunId } from '@/features/r1-interpretation/utils/runStorage'
+import { clearR2Run, loadR2Run } from '@/features/r2-proximity/utils/runStorage'
 import { getR3Run, retryR3Run, startR3Run } from '@/features/places-metrics/api/r3Api'
 import type { PlacesMetricsResult } from '@/features/places-metrics/types/placesMetrics'
 import type { R3Result, R3RunView } from '@/features/places-metrics/types/r3Run'
@@ -315,6 +316,12 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
 
   const startAgain = useCallback(() => toSetup(null), [toSetup])
 
+  /** Forgets this tab's saved R1 and R2 runs so Home opens with an empty composer (nothing is deleted). */
+  const startOver = useCallback(() => {
+    clearRunId()
+    clearR2Run()
+  }, [])
+
   const step: R3Step = phase === 'finished' ? 'writing' : view?.completedStep === 'discovery_batch' ? 'research' : 'websites'
 
   return {
@@ -329,6 +336,7 @@ export function useR3Run({ onUnauthenticated }: Options = {}) {
     start,
     retry,
     startAgain,
+    startOver,
     reloadContext,
   }
 }

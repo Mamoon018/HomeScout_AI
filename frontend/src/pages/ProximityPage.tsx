@@ -2,6 +2,7 @@ import { useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { CheckIcon } from 'lucide-react'
 
 import { OliveSiteHeader } from '@/components/olive-site-header'
+import { PageStepLink } from '@/components/page-step-link'
 import { useUnauthenticatedRedirect } from '@/features/auth/hooks/useUnauthenticatedRedirect'
 import '@/features/r2-proximity/components/proximity.css'
 import { CategoryRail } from '@/features/r2-proximity/components/category-rail'
@@ -10,7 +11,7 @@ import { RunNotice, StartPanel, WaitingPanel } from '@/features/r2-proximity/com
 import { SummaryPanel } from '@/features/r2-proximity/components/summary-panel'
 import { useR2Run } from '@/features/r2-proximity/hooks/useR2Run'
 import type { TravelMode } from '@/features/r2-proximity/types/r2'
-import { formatKm, pageCategories, type PageCategory } from '@/features/r2-proximity/utils/present'
+import { formatKm, pageCategories, planHref, type PageCategory } from '@/features/r2-proximity/utils/present'
 import type { Reach } from '@/features/r2-proximity/utils/summary'
 import { useDocumentClasses } from '@/lib/useDocumentClasses'
 
@@ -103,6 +104,18 @@ function LiveProximity({ onUnauthenticated }: LiveProximityProps) {
       {run.phase === 'finished' && categories.length > 0 ? (
         <Results categories={categories} radiusKm={radiusKm} r1RunId={run.saved?.r1RunId || run.r1RunId} />
       ) : null}
+
+      {/* Back is always offered; forward only once the search has places to judge. */}
+      <nav aria-label="Next steps" className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+        <PageStepLink to={planHref(run.saved?.r1RunId || run.r1RunId)} direction="back">
+          Go back to Search Plan
+        </PageStepLink>
+        {run.phase === 'finished' && categories.length > 0 ? (
+          <PageStepLink to="/places_metrics" direction="forward">
+            Let&apos;s get Needs Fit Analysis
+          </PageStepLink>
+        ) : null}
+      </nav>
     </>
   )
 }
