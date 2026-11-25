@@ -26,7 +26,7 @@ The product is organized into five features:
 
 | # | Feature | Purpose |
 | --- | --- | --- |
-| 1 | **Deep Search** ✅ | Interpret the renter's brief and run the agentic workflows that gather evidence |
+| 1 | **Deep Search** | Interpret the renter's brief and run the agentic workflows that gather evidence |
 | 2 | **Deep Analysis** | Evaluate each apartment and its neighborhood against that evidence |
 | 3 | **Matching Engine** | Rank apartments by fit to the renter's priorities |
 | 4 | **Owners Outreach** | Contact owners, follow up, and keep each conversation in one thread |
@@ -160,18 +160,6 @@ flowchart LR
 ```
 
 Every Deep Search run is stored per user in Supabase (`r1_runs`, `r2_runs`, `r3_runs` and their step tables), which is what makes runs pollable, private and resumable.
-
-### HTTP API
-
-All endpoints require an authenticated session.
-
-| Service | Start | Status | Retry | Other |
-| --- | --- | --- | --- | --- |
-| R1 Requirement Interpretation | `POST /api/requirement-interpretation/runs` | `GET …/runs/{run_id}` | `POST …/runs/{run_id}/retry` | `POST …/runs/{run_id}/clarification-answers` |
-| R2 Amenity Search | `POST /api/amenity-search/runs` | `GET …/runs/{run_id}` | `POST …/runs/{run_id}/retry` | — |
-| R3 Specific Attribute Resolution | `POST /api/specific-metric-resolution/runs` | `GET …/runs/{run_id}` | `POST …/runs/{run_id}/retry` | — |
-
-Long-running runs (R2, R3) start in the background and return `202` with a `run_id`; the client polls the status endpoint.
 
 ### Repository layout
 
